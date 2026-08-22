@@ -1,6 +1,7 @@
 # dump-o-matic configuration
 #
 # Copy to ~/.config/dump-o-matic/config.toml and edit, or point DUMO_CONFIG at it.
+# Every path below is an example. Nothing is defaulted: set them to your own locations.
 #
 # SECRETS: never commit a config containing real API keys. Prefer the environment
 # variables noted below — those are read at runtime and never written to disk.
@@ -28,9 +29,14 @@ reclaim_after_migrate = false
 # in this file.
 #
 # [[destination]]
-# name = "nas"
-# root = "/mnt/nas"
+# name = "nas-games"
+# root = "/mnt/nas/emulation/roms"
 # network = true
+# media = ["games"]
+#
+# Note: point `root` at the directory content actually belongs in, which may be a
+# subdirectory of the mount. Some NAS servers mark share roots read-only while their
+# subdirectories are writable.
 
 
 [drives]
@@ -41,8 +47,8 @@ devices = []
 [datfiles]
 # Identification databases, supplied by you. These are never downloaded automatically;
 # refresh them deliberately with `dump-o-matic datfiles update`.
-# redump_dir = "/home/user/.local/share/dump-o-matic/redump"
-# nointro_dir = "/home/user/.local/share/dump-o-matic/nointro"
+# redump_dir = "~/.local/share/dump-o-matic/redump"
+# nointro_dir = "~/.local/share/dump-o-matic/nointro"
 
 
 [api]

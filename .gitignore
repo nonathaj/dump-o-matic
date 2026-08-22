@@ -5,3 +5,7 @@
 config.toml
 dump-o-matic.toml
 .env
+
+# Machine-specific notes and values (hostnames, IPs, share names, real paths).
+# Never committed; this is where personal environment details live.
+/local/

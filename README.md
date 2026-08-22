@@ -7,8 +7,20 @@ migrate it to permanent storage — without ever risking data loss.
 Supports movies/TV, audio CDs, and game discs (PS1/PS2 and friends). See [PLAN.md](PLAN.md)
 for the full design, the survey of existing tools, and the roadmap.
 
-> **Status: early.** Only the read-only half is implemented — drive discovery and Stage 1
-> disc probing. Nothing in this repository writes to a disc or moves your files yet.
+> **Status: early, but working.** The full pipeline runs end to end for **game discs**:
+> probe → rip → identify → migrate, including verified transfer to a network share.
+> Video discs rip and hash correctly but cannot yet be identified automatically, and
+> audio CD support is not built. Nothing in this repository ever writes to a disc.
+
+## Pipeline
+
+| Stage | Command | Games | Video | Audio CD |
+|---|---|---|---|---|
+| 1. Probe | `probe` | ✅ | ✅ | ✅ |
+| 2. Rip to staging | `rip` | ✅ redumper | ✅ MakeMKV | ✗ |
+| 3. Identify | `identify` | ✅ Redump datfiles | ✗ TMDB/TVDB not built | ✗ |
+| 4. Migrate | `migrate` | ✅ | — | — |
+| Re-verify | `verify` | ✅ | ✅ | ✅ |
 
 ## What works today
 

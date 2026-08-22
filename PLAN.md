@@ -2,7 +2,7 @@
 
 **Repo:** `github.com/nonathaj/dump-o-matic`
 **Language:** Rust
-**Status:** planning / pre-Phase-0
+**Status:** stages 1–4 working end to end for game discs; video identification not yet built (see §6)
 
 A single tool for a deliberate, multi-stage media backup pipeline: probe a disc, rip it to
 staging, identify what it actually is with a confidence score, organize it to your naming
@@ -77,7 +77,7 @@ config change, not a rearchitecture.
 
 ### 2.4 Network destinations are first-class (and treated as hostile)
 
-The permanent destination is expected to be a **network share** (e.g. `smb://nas`),
+The permanent destination is expected to be a **network share** (SMB/CIFS on a NAS),
 not local disk. This is a load-bearing assumption, not an afterthought, and it makes §2.1
 materially harder:
 
@@ -229,27 +229,26 @@ D1.iso`), so adopting Redump names is a **change** from current practice. Existi
 are left alone unless explicitly re-processed; the tool never rewrites the existing
 library as a side effect.
 
-## 3b. Existing backlog (a real migration case, not just new discs)
+## 3b. Ingesting an existing backlog
 
-The current library contains content already stuck between stages, which the tool must be
-able to ingest — meaning **Stage 3 must accept already-staged files as input**, not only
-output from Stage 2:
+Most libraries that motivate a tool like this already contain content stuck between
+stages: discs ripped to raw backend output that was never identified, files that were
+renamed inconsistently, and duplicates created by two passes over the same disc. So
+**Stage 3 must accept already-staged files as input**, not only fresh output from
+Stage 2.
 
-- `Friends (1994)/Season 05/Friends Season 5 Disc 1_t00.mkv` … `_t10.mkv` and
-  `Mad Men (2007)/Season 01/…` are raw MakeMKV output sitting on the permanent drive,
-  never identified into episodes. Roughly 10 unlabeled titles per disc, spanning multiple
-  seasons and discs.
-- `Wonder Woman (1975)/Season 01/` contains **two different files both claiming S01E02**
-  (`Fausta The Nazi Wonder Woman` and `Wonder Woman Meets Baroness Von Gunther`) — an
-  existing duplicate/misfile. Duplicate-target detection (§2.1: never silently overwrite)
-  would have caught this, and a `dump-o-matic verify` / audit mode should surface
-  conflicts like it across an existing library.
-- Stray staging artifacts live on the permanent drive (`k3bimage.iso`, `notempty/`),
-  reinforcing the staging/permanent separation this tool enforces.
+Two capabilities follow:
 
-Identifying anonymous `_t00.mkv` episode dumps is genuinely hard (no filename signal —
-must match on duration, chapter layout, and episode order against TVDB, with low
-confidence by design). Per §6 this is explicitly a **fuzzy, always-confirm** path.
+- **Ingest**: point identification at existing files and let it propose names, rather
+  than requiring everything to be re-ripped.
+- **Audit**: scan a library for duplicates and conflicts — two files claiming the same
+  episode, or content sitting in a staging-shaped layout on permanent storage.
+
+The hardest case is a directory of anonymous per-title rips (`Show Disc 1_t00.mkv` and
+similar), where the filename carries no episode information at all. Matching those means
+runtime, chapter layout, and disc ordering against an episode database, with low
+confidence by design. Per §6 this is explicitly a **fuzzy, always-confirm** path, and an
+assisted-manual ordering interface may be the honest answer rather than full automation.
 
 ## 4. Architecture
 
@@ -318,12 +317,12 @@ structural change to the pipeline or UI.
 
 | Phase | Deliverable |
 |---|---|
-| 0 | Repo scaffold, Cargo workspace, CI (fmt / clippy / test), license, config format, naming-template engine + tests |
-| 1 | `dumo-drives` detection + Stage 1 fast probe for game discs; `dumo-cli` skeleton |
-| 1.5 | **CIFS verification spike** — prove the re-read genuinely round-trips to `nas` and isn't cache-served (§2.4). Small, but gates the safety of everything after it |
-| 2 | Stage 2 rip via redumper wrapper; job DB; **verified-copy/checksum module** (safety-critical — heaviest test coverage in the project, including fault injection and mid-write share disconnection) |
-| 3 | Stage 3: Redump/No-Intro identification, confidence scoring, staging rename |
-| 4 | Stage 4: verified migration to permanent storage |
+| ✅ 0 | Repo scaffold, Cargo workspace, CI (fmt / clippy / test), license, config format, naming-template engine + tests |
+| ✅ 1 | `dumo-drives` detection + Stage 1 fast probe for game discs; `dumo-cli` skeleton |
+| ✅ 1.5 | **CIFS verification spike** — prove the post-write re-read genuinely round-trips to the server and is not served from local page cache (§2.4). Small, but gates the safety of everything after it |
+| ✅ 2 | Stage 2 rip via redumper wrapper; job DB; **verified-copy/checksum module** (safety-critical — heaviest test coverage in the project, including fault injection and mid-write share disconnection) |
+| ✅ 3 | Stage 3: Redump/No-Intro identification, confidence scoring, staging rename |
+| ✅ 4 | Stage 4: verified migration to permanent storage |
 | 5 | `dumo-web` UI over the above |
 | 6 | Docker image + device-passthrough documentation |
 | 7 | Audio CD support (MusicBrainz + accurate-rip backend) |
@@ -369,7 +368,7 @@ should document how the user supplies them.
 | Game naming | Redump-style filenames inside ES-DE/EmuDeck platform folders (§3a) |
 | Datfiles | User-supplied on disk; explicit `datfiles update` command; never auto-fetched |
 | Auto-accept | Exact hash / disc-ID matches only; fuzzy always confirms, with no override (§3) |
-| Storage paths | **Fully configurable, no hardcoded defaults.** Expected usage: staging on local disk, permanent on `smb://nas`. The tool ships no built-in path assumptions |
+| Storage paths | **Fully configurable, no hardcoded defaults.** Expected usage: staging on local disk, permanent on an SMB-mounted NAS. The tool ships no built-in path assumptions |
 | Permanent destination | Network share, mounted by the OS, consumed as a path (§2.4) |
 | API keys | Config/env only, never bundled (§2.6) |
 
@@ -382,9 +381,10 @@ should document how the user supplies them.
   runtime + chapter layout + disc ordering against TVDB. Needs prototyping against the
   real Friends/Mad Men backlog to see whether it is reliable enough to be worth shipping,
   or whether an assisted-manual ordering UI is the honest answer.
-- **Verification-read strategy over CIFS** (§2.4) — must be validated empirically against
-  `nas` that the re-read actually hits the server and not local page cache. Until
-  proven, this is the highest-risk correctness assumption in the project.
+- **Verification-read strategy over CIFS** (§2.4) — the post-write re-read now evicts the
+  page cache with `posix_fadvise(DONTNEED)` before hashing, which makes it a genuine
+  read rather than a re-hash of local buffers. `POSIX_FADV_DONTNEED` is advisory, so this
+  is a strong check rather than absolute proof of server-side durability.
 - Whether audio CD ripping uses `cdparanoia` (already installed) or an integrated Rust
   ripper; AccurateRip integration is a separate question from the ripper choice.
 - Retention policy for staging after a successful migrate: keep-until-space-needed vs.
