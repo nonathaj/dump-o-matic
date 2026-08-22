@@ -3,6 +3,7 @@
 //! Currently implements the read-only half of the pipeline: drive discovery and Stage 1
 //! disc probing. No command in this binary writes to a disc or to your filesystem.
 
+mod identify;
 mod rip;
 mod verify;
 
@@ -69,6 +70,13 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Identify staged content against datfiles (stage 3, read-only).
+    Identify {
+        /// Job id or a fragment of one. Omit to identify every job.
+        job: Option<String>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Re-verify staged artifacts against their manifest hashes.
     Verify {
         /// Job id or a fragment of one. Omit to verify every job.
@@ -124,6 +132,10 @@ fn main() -> Result<()> {
             min_length,
             dry_run,
             assume_yes: yes,
+            config_file: config,
+        }),
+        Command::Identify { job, config } => identify::run(identify::IdentifyArgs {
+            job,
             config_file: config,
         }),
         Command::Verify { job, update, config } => verify::run(verify::VerifyArgs {

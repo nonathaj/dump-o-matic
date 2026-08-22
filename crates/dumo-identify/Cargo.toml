@@ -1,0 +1,15 @@
+[package]
+name = "dumo-identify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Content identification for dump-o-matic"
+
+[dependencies]
+dumo-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+quick-xml = { workspace = true }
