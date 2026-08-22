@@ -10,6 +10,7 @@ pub mod discset;
 pub mod http;
 pub mod matching;
 pub mod platform;
+pub mod signals;
 pub mod tmdb;
 pub mod video;
 

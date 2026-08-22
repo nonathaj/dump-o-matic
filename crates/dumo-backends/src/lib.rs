@@ -7,6 +7,7 @@
 pub mod ffprobe;
 pub mod makemkv;
 pub mod redumper;
+pub mod subtitles;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
