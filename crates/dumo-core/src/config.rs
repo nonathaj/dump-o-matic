@@ -129,12 +129,25 @@ impl DestinationConfig {
     }
 }
 
+/// How a TMDB credential authenticates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmdbAuth {
+    /// v4 Read Access Token, sent as an `Authorization: Bearer` header. Preferred:
+    /// a header keeps the secret out of URLs, and therefore out of logs, shell
+    /// history, proxies and error messages.
+    BearerToken,
+    /// v3 API key, sent as an `api_key` query parameter.
+    QueryKey,
+}
+
 /// Credentials for external metadata services.
 ///
 /// Every field is optional. A missing credential disables that lookup source and is
 /// reported as unavailable — it never fails the run outright.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ApiConfig {
+    /// TMDB credential: either a v4 Read Access Token (preferred) or a v3 API key.
+    /// Which one it is is detected from its shape, so either can be pasted here.
     #[serde(default)]
     pub tmdb_api_key: Option<String>,
     #[serde(default)]
@@ -152,7 +165,9 @@ impl ApiConfig {
         fn env(name: &str) -> Option<String> {
             std::env::var(name).ok().filter(|s| !s.trim().is_empty())
         }
-        if let Some(v) = env("DUMO_TMDB_API_KEY") {
+        // Either name works, so the variable can be called after whichever credential
+        // the user copied from TMDB's settings page.
+        if let Some(v) = env("DUMO_TMDB_TOKEN").or_else(|| env("DUMO_TMDB_API_KEY")) {
             self.tmdb_api_key = Some(v);
         }
         if let Some(v) = env("DUMO_TVDB_API_KEY") {
@@ -163,6 +178,24 @@ impl ApiConfig {
         }
         if let Some(v) = env("DUMO_IGDB_CLIENT_SECRET") {
             self.igdb_client_secret = Some(v);
+        }
+    }
+
+    /// Work out how a TMDB credential should be sent.
+    ///
+    /// A v4 Read Access Token is a JWT: three dot-separated base64 segments beginning
+    /// `eyJ`. A v3 API key is 32 hexadecimal characters. Detecting the shape means a
+    /// user can paste either without having to know which field it belongs in — TMDB's
+    /// own settings page offers both, adjacent, with similar names.
+    pub fn tmdb_auth(&self) -> Option<(TmdbAuth, &str)> {
+        let raw = self.tmdb_api_key.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if raw.starts_with("eyJ") && raw.matches('.').count() == 2 {
+            Some((TmdbAuth::BearerToken, raw))
+        } else {
+            Some((TmdbAuth::QueryKey, raw))
         }
     }
 
@@ -516,6 +549,25 @@ pub fn check(cfg: &Config) -> Vec<CheckResult> {
         },
     });
 
+    // Say which TMDB credential style was detected, so a mis-paste is visible before a
+    // request fails with an opaque 401.
+    if let Some((auth, _)) = cfg.api.tmdb_auth() {
+        out.push(CheckResult {
+            level: CheckLevel::Ok,
+            subject: "api.tmdb".into(),
+            detail: match auth {
+                TmdbAuth::BearerToken => {
+                    "v4 Read Access Token detected; sent as an Authorization header".into()
+                }
+                TmdbAuth::QueryKey => {
+                    "v3 API key detected; sent as a query parameter. A v4 Read Access \
+                     Token is preferred, since it keeps the secret out of URLs"
+                        .to_string()
+                }
+            },
+        });
+    }
+
     out
 }
 
@@ -598,6 +650,36 @@ mod tests {
         assert!(rendered.contains("<set>"));
         // The real config is untouched.
         assert_eq!(c.api.tmdb_api_key.as_deref(), Some("super-secret-value"));
+    }
+
+    #[test]
+    fn detects_a_v4_read_access_token() {
+        let mut c = sample();
+        // Shape of a real TMDB v4 token: three dot-separated base64 segments.
+        c.api.tmdb_api_key = Some("eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJhYmMifQ.c2lnbmF0dXJl".into());
+        assert_eq!(c.api.tmdb_auth().unwrap().0, TmdbAuth::BearerToken);
+    }
+
+    #[test]
+    fn detects_a_v3_api_key() {
+        let mut c = sample();
+        c.api.tmdb_api_key = Some("0123456789abcdef0123456789abcdef".into());
+        assert_eq!(c.api.tmdb_auth().unwrap().0, TmdbAuth::QueryKey);
+    }
+
+    #[test]
+    fn blank_or_missing_tmdb_credential_is_none() {
+        let mut c = sample();
+        assert!(c.api.tmdb_auth().is_none());
+        c.api.tmdb_api_key = Some("   ".into());
+        assert!(c.api.tmdb_auth().is_none());
+    }
+
+    #[test]
+    fn tmdb_credential_is_trimmed() {
+        let mut c = sample();
+        c.api.tmdb_api_key = Some("  0123456789abcdef0123456789abcdef \n".into());
+        assert_eq!(c.api.tmdb_auth().unwrap().1, "0123456789abcdef0123456789abcdef");
     }
 
     #[test]

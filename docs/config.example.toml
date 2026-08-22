@@ -56,10 +56,20 @@ devices = []
 # that lookup source and is reported as unavailable; it never fails the run.
 #
 # Prefer environment variables over writing keys here:
-#   DUMO_TMDB_API_KEY, DUMO_TVDB_API_KEY,
+#   DUMO_TMDB_TOKEN (or DUMO_TMDB_API_KEY), DUMO_TVDB_API_KEY,
 #   DUMO_IGDB_CLIENT_ID, DUMO_IGDB_CLIENT_SECRET
 #
 # The environment always wins over values in this file.
+#
+# TMDB (themoviedb.org -> Settings -> API) offers two credentials. Paste either into
+# tmdb_api_key; which one it is is detected automatically:
+#
+#   - "API Read Access Token" (a long eyJ... JWT)  <- preferred
+#     Sent as an Authorization header, so the secret never appears in a URL, and
+#     therefore never in logs, shell history, proxies or error messages.
+#
+#   - "API Key" (32 hex characters)
+#     Sent as an ?api_key= query parameter. Works, but leaks more readily.
 #
 # tmdb_api_key = "..."
 # tvdb_api_key = "..."
