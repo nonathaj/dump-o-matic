@@ -74,6 +74,9 @@ enum Command {
     Identify {
         /// Job id or a fragment of one. Omit to identify every job.
         job: Option<String>,
+        /// Move exactly-matched files into ready/ under their canonical names.
+        #[arg(long)]
+        apply: bool,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -134,9 +137,10 @@ fn main() -> Result<()> {
             assume_yes: yes,
             config_file: config,
         }),
-        Command::Identify { job, config } => identify::run(identify::IdentifyArgs {
+        Command::Identify { job, apply, config } => identify::run(identify::IdentifyArgs {
             job,
             config_file: config,
+            apply,
         }),
         Command::Verify { job, update, config } => verify::run(verify::VerifyArgs {
             job,

@@ -107,6 +107,35 @@ impl TitleInfo {
     }
 }
 
+/// A file placed in the staging `ready/` tree under its final name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyFile {
+    /// Path relative to the **staging root**, e.g. `ready/ps2/Title (USA).iso`.
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// The outcome of identifying a job's content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Identification {
+    /// Canonical title, e.g. `Lord of the Rings, The - The Two Towers (USA)`.
+    pub title: String,
+    /// Source vocabulary platform name, e.g. `Sony - PlayStation 2`.
+    pub platform: String,
+    /// ES-DE / EmuDeck directory slug, e.g. `ps2`.
+    pub platform_slug: String,
+    /// Which digest produced the match.
+    pub matched_on: String,
+    pub confidence: crate::Confidence,
+    /// Datfile the match came from, for auditability.
+    pub source: String,
+    /// Files now sitting in `ready/` under their final names.
+    pub files: Vec<ReadyFile>,
+    /// Unix timestamp of identification.
+    pub identified_at: u64,
+}
+
 /// A single unit of work through the pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -128,6 +157,9 @@ pub struct Job {
     pub backend: Option<String>,
     /// Failure detail when `stage` is `Failed`.
     pub error: Option<String>,
+    /// Identification result, once stage 3 has run.
+    #[serde(default)]
+    pub identification: Option<Identification>,
 }
 
 impl Job {
@@ -143,6 +175,7 @@ impl Job {
             artifacts: Vec::new(),
             backend: None,
             error: None,
+            identification: None,
         }
     }
 

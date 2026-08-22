@@ -7,11 +7,12 @@
 pub mod config;
 pub mod disc;
 pub mod drive;
+pub mod fsops;
 pub mod hash;
 pub mod job;
 
 pub use config::{Config, ConfigError};
-pub use job::{Artifact, Job, JobStage, TitleInfo};
+pub use job::{Artifact, Identification, Job, JobStage, ReadyFile, TitleInfo};
 
 pub use disc::{
     AudioTrack, ContentHint, DiscProbe, DiscProfile, GameSerial, MediaKind, TocInfo, VolumeInfo,
