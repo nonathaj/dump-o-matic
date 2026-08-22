@@ -81,6 +81,9 @@ enum Command {
         /// Search term for a video disc, overriding the guess from the volume label.
         #[arg(long)]
         show: Option<String>,
+        /// Solve all matching video discs together as one box set.
+        #[arg(long)]
+        set: bool,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -157,11 +160,12 @@ fn main() -> Result<()> {
             assume_yes: yes,
             config_file: config,
         }),
-        Command::Identify { job, apply, show, config } => identify::run(identify::IdentifyArgs {
+        Command::Identify { job, apply, show, set, config } => identify::run(identify::IdentifyArgs {
             job,
             config_file: config,
             apply,
             show,
+            set,
         }),
         Command::Migrate { job, destination, dry_run, yes, config } => {
             migrate::run(migrate::MigrateArgs {

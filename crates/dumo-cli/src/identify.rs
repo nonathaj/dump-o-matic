@@ -20,6 +20,8 @@ pub struct IdentifyArgs {
     pub apply: bool,
     /// Search term for a video disc, overriding the guess from the volume label.
     pub show: Option<String>,
+    /// Solve all matching video discs together as one set.
+    pub set: bool,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -83,6 +85,10 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
     if args.apply {
         println!("Apply mode: exact matches will be moved into {}", cfg.staging.ready_dir().display());
         println!();
+    }
+
+    if args.set {
+        return solve_video_set(&dirs, &cfg, args.show.as_deref());
     }
 
     for dir in dirs {
@@ -461,6 +467,13 @@ fn analyse_video(
         println!("  No series matched. Try --show \"<title>\".");
         return Ok(());
     }
+    // The disc number in the volume label is an independent ordering signal, and
+    // runtimes tie often enough that it earns its keep.
+    let disc_hint = dumo_identify::matching::disc_number_from_label(&label);
+    if let Some(d) = disc_hint {
+        println!("  Disc {d} of a set, per the volume label");
+    }
+
     let mut titles: Vec<dumo_identify::matching::DiscTitle> = analysis
         .main_titles()
         .map(|t| dumo_identify::matching::DiscTitle {
@@ -500,7 +513,7 @@ fn analyse_video(
                 seasons.push(s);
             }
         }
-        let results = dumo_identify::matching::match_seasons(&titles, &seasons);
+        let results = dumo_identify::matching::match_seasons(&titles, &seasons, disc_hint);
         match results.first() {
             Some(b) => {
                 println!(
@@ -578,6 +591,9 @@ fn analyse_video(
     for e in &best.evidence {
         println!("    - {e}");
     }
+    if best.disc_hint_used {
+        println!("    - the disc number decided this, not the runtimes");
+    }
 
 
     println!();
@@ -625,4 +641,188 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
     }
+}
+
+/// Identify several video discs together, using the constraint that a box set holds
+/// consecutive, non-overlapping episodes in disc order.
+///
+/// This is materially stronger than matching discs one at a time. Runtimes routinely
+/// tie between adjacent windows; requiring the whole set to be consistent usually
+/// leaves exactly one arrangement standing.
+fn solve_video_set(dirs: &[PathBuf], cfg: &Config, show_override: Option<&str>) -> Result<()> {
+    use dumo_identify::discset::{self, SetDisc};
+    use dumo_identify::matching::{self, DiscTitle};
+    use dumo_identify::video::{self as vid, AnalysisParams, TitleInput};
+
+    let mut discs: Vec<SetDisc> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+
+    for dir in dirs {
+        let job = match Job::load(dir) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let kind = job.probe.as_ref().map(|p| p.content.kind);
+        if !matches!(kind, Some(MediaKind::DvdVideo) | Some(MediaKind::BluRayVideo)) {
+            continue;
+        }
+        let label = job
+            .probe
+            .as_ref()
+            .and_then(|p| p.content.title_guess.clone())
+            .unwrap_or_default();
+
+        let mut inputs = Vec::new();
+        for a in job.artifacts.iter().filter(|a| {
+            let p = a.relative_path.to_ascii_lowercase();
+            p.ends_with(".mkv") || p.ends_with(".mp4") || p.ends_with(".m2ts")
+        }) {
+            let path = dir.join(&a.relative_path);
+            if !path.is_file() {
+                continue;
+            }
+            let f = dumo_backends::ffprobe::probe(&path)
+                .with_context(|| format!("probing {}", path.display()))?;
+            inputs.push(TitleInput {
+                name: a.relative_path.clone(),
+                duration_secs: f.duration_secs,
+                chapters: f.chapter_count(),
+            });
+        }
+        if inputs.is_empty() {
+            continue;
+        }
+
+        let analysis = vid::analyse(&inputs, AnalysisParams::default());
+        let mut titles: Vec<DiscTitle> = analysis
+            .main_titles()
+            .map(|t| DiscTitle {
+                name: t.name.trim_start_matches("raw/").to_string(),
+                duration_secs: t.duration_secs,
+            })
+            .collect();
+        if titles.is_empty() {
+            continue;
+        }
+        matching::sort_by_title_index(&mut titles);
+
+        let disc_number = matching::disc_number_from_label(&label).unwrap_or(discs.len() as u32 + 1);
+        println!(
+            "  disc {disc_number}: {} main title(s) from {}",
+            titles.len(),
+            job.id
+        );
+        labels.push(label);
+        discs.push(SetDisc {
+            disc_number,
+            job_id: job.id.clone(),
+            titles,
+        });
+    }
+
+    if discs.is_empty() {
+        println!("No video jobs with main titles found.");
+        return Ok(());
+    }
+
+    let query = show_override.map(str::to_string).unwrap_or_else(|| {
+        labels
+            .first()
+            .map(|l| matching::query_from_label(l))
+            .unwrap_or_default()
+    });
+    if query.trim().is_empty() {
+        println!("No search term; pass --show.");
+        return Ok(());
+    }
+
+    let client = match dumo_identify::tmdb::TmdbClient::from_config(&cfg.api) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Naming unavailable: {e}");
+            return Ok(());
+        }
+    };
+
+    println!();
+    println!("Searching TMDB for {query:?} ...");
+    let shows = client.search_tv(&query).context("searching TMDB")?;
+    if shows.is_empty() {
+        println!("No series matched. Try --show \"<title>\".");
+        return Ok(());
+    }
+
+    // Rank candidate series by how well the whole set fits, not by search position.
+    let mut best: Option<(&dumo_identify::tmdb::TvResult, discset::SetSolution)> = None;
+    for c in shows.iter().take(4) {
+        let Ok(nums) = client.tv_season_numbers(c.id) else {
+            continue;
+        };
+        let mut seasons = Vec::new();
+        for n in nums.iter().filter(|n| **n > 0) {
+            if let Ok(s) = client.season(c.id, *n) {
+                seasons.push(s);
+            }
+        }
+        if let Some(sol) = discset::solve(&discs, &seasons) {
+            println!(
+                "  {:<34} {:>5.1} min/title average difference",
+                truncate(&format!("{} ({})", c.name,
+                    c.year().map(|y| y.to_string()).unwrap_or("?".into())), 34),
+                sol.mean_delta
+            );
+            if best.as_ref().map(|(_, b)| sol.mean_delta < b.mean_delta).unwrap_or(true) {
+                best = Some((c, sol));
+            }
+        }
+    }
+
+    let Some((series, solution)) = best else {
+        println!("No candidate series could hold this set.");
+        return Ok(());
+    };
+
+    let year = series.year().map(|y| format!(" ({y})")).unwrap_or_default();
+    println!();
+    println!("Series: {}{}  [tmdb:{}]", series.name, year, series.id);
+    println!("Season: {}", solution.season);
+    println!(
+        "Confidence: {}  ({})",
+        solution.confidence,
+        if solution.confidence.is_auto_acceptable() {
+            "eligible for unattended acceptance"
+        } else {
+            "needs confirmation"
+        }
+    );
+    for e in &solution.evidence {
+        println!("  - {e}");
+    }
+
+    println!();
+    for p in &solution.placements {
+        println!("Disc {} ({})", p.disc_number, p.job_id);
+        for m in &p.matches {
+            println!(
+                "  {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<40} (delta {:.0} min)",
+                m.title_name,
+                m.title_mins,
+                m.episode.season,
+                m.episode.number,
+                truncate(&m.episode.name, 40),
+                m.delta_mins
+            );
+        }
+        for m in &p.matches {
+            println!(
+                "    tv/{}{}/Season {:02}/{}{} S{:02}E{:02} - {}.mkv",
+                series.name, year, m.episode.season,
+                series.name, year, m.episode.season, m.episode.number,
+                sanitise(&m.episode.name)
+            );
+        }
+        println!();
+    }
+    println!("Applying video names is not wired up yet — review the above first.");
+    Ok(())
 }

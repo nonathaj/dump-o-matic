@@ -39,6 +39,13 @@ pub struct SeasonMatch {
     pub runner_up_delta: Option<f64>,
     pub confidence: Confidence,
     pub evidence: Vec<String>,
+    /// Starting episode numbers of other alignments that score within a hair of this
+    /// one. A non-empty list means runtime alone did not decide the answer.
+    pub tied_alternatives: Vec<u32>,
+    /// Whether the disc number was needed to break a tie.
+    pub disc_hint_used: bool,
+    /// Every scored window: (mean, max, counted, start index).
+    pub all_windows: Vec<(f64, f64, usize, usize)>,
 }
 
 impl SeasonMatch {
@@ -99,6 +106,109 @@ fn score(titles: &[DiscTitle], episodes: &[Episode]) -> Option<(f64, f64, usize)
         return None;
     }
     Some((total / counted as f64, worst, counted))
+}
+
+/// Two alignments this close in score are treated as indistinguishable on runtime alone.
+const TIE_EPSILON_MINS: f64 = 0.25;
+
+/// Extract the disc number from a volume label, e.g. `ESPN_30_FOR_30_DISC_2` → 2.
+///
+/// Worth doing because runtimes frequently tie. A three-episode disc labelled DISC 2 in
+/// a set almost certainly holds the episodes after DISC 1's, and that ordering resolves
+/// ties that runtime cannot.
+pub fn disc_number_from_label(label: &str) -> Option<u32> {
+    let spaced = label.replace(['_', '.', '-'], " ").to_ascii_uppercase();
+    let words: Vec<&str> = spaced.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        if matches!(*w, "DISC" | "DISK" | "D") {
+            if let Some(n) = words.get(i + 1).and_then(|n| n.parse::<u32>().ok()) {
+                return Some(n);
+            }
+        }
+        // Also handles a suffixed form like "D2".
+        if let Some(rest) = w.strip_prefix('D') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(n) = rest.parse() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find the best contiguous run of episodes matching these titles.
+///
+/// `titles` must already be in disc order. `disc_hint` is the disc's number within its
+/// set, used only to break ties that runtime cannot.
+pub fn match_season_with_hint(
+    titles: &[DiscTitle],
+    season: &Season,
+    disc_hint: Option<u32>,
+) -> Option<SeasonMatch> {
+    let mut m = match_season(titles, season)?;
+
+    // Only intervene where runtime genuinely cannot decide.
+    let k = titles.len();
+    let tied: Vec<&(f64, f64, usize, usize)> = m
+        .all_windows
+        .iter()
+        .filter(|w| (w.0 - m.mean_delta).abs() <= TIE_EPSILON_MINS)
+        .collect();
+
+    if tied.len() > 1 {
+        m.tied_alternatives = tied
+            .iter()
+            .map(|w| season.episodes[w.3].number)
+            .filter(|n| *n != m.first_episode)
+            .collect();
+
+        if let Some(disc) = disc_hint {
+            // A disc holding k episodes, numbered from 1, would start here if the set is
+            // packed evenly. Used only to choose between alignments already tied on
+            // runtime, never to override a better-scoring one.
+            let expected_start = (disc.saturating_sub(1)) * k as u32 + 1;
+            if let Some(w) = tied
+                .iter()
+                .find(|w| season.episodes[w.3].number == expected_start)
+            {
+                let start = w.3;
+                let window = &season.episodes[start..start + k];
+                m.first_episode = window.first().map(|e| e.number).unwrap_or(0);
+                m.mean_delta = w.0;
+                m.max_delta = w.1;
+                m.matches = titles
+                    .iter()
+                    .zip(window.iter())
+                    .map(|(t, e)| TitleMatch {
+                        title_name: t.name.clone(),
+                        title_mins: t.mins(),
+                        episode: e.clone(),
+                        delta_mins: e
+                            .runtime_mins
+                            .map(|rt| (t.mins() - f64::from(rt)).abs())
+                            .unwrap_or(f64::NAN),
+                    })
+                    .collect();
+                m.tied_alternatives = tied
+                    .iter()
+                    .map(|w| season.episodes[w.3].number)
+                    .filter(|n| *n != m.first_episode)
+                    .collect();
+                m.disc_hint_used = true;
+                m.evidence.push(format!(
+                    "runtimes tie between alignments starting at episode {}; the label says \
+                     disc {disc}, and {k} episodes per disc puts this one at episode \
+                     {expected_start}",
+                    tied.iter()
+                        .map(|w| season.episodes[w.3].number.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    Some(m)
 }
 
 /// Find the best contiguous run of episodes matching these titles.
@@ -179,6 +289,26 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
     }
     evidence.push("runtime matching is inference, not proof — confirm before filing".into());
 
+    let tied_alternatives: Vec<u32> = scored
+        .iter()
+        .skip(1)
+        .filter(|w| (w.0 - mean_delta).abs() <= TIE_EPSILON_MINS)
+        .map(|w| season.episodes[w.3].number)
+        .collect();
+
+    if !tied_alternatives.is_empty() {
+        evidence.push(format!(
+            "runtime cannot separate this from {} other alignment(s), starting at \
+             episode(s) {}",
+            tied_alternatives.len(),
+            tied_alternatives
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     Some(SeasonMatch {
         season: season.number,
         first_episode: window.first().map(|e| e.number).unwrap_or(0),
@@ -188,6 +318,9 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
         runner_up_delta,
         confidence,
         evidence,
+        tied_alternatives,
+        disc_hint_used: false,
+        all_windows: scored.clone(),
     })
 }
 
@@ -197,10 +330,14 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
 /// merely the runner-up within one. A disc that fits season 1 to within half a minute is
 /// not well identified if season 3 fits just as well — and per-season scoring alone
 /// cannot see that.
-pub fn match_seasons(titles: &[DiscTitle], seasons: &[Season]) -> Vec<SeasonMatch> {
+pub fn match_seasons(
+    titles: &[DiscTitle],
+    seasons: &[Season],
+    disc_hint: Option<u32>,
+) -> Vec<SeasonMatch> {
     let mut out: Vec<SeasonMatch> = seasons
         .iter()
-        .filter_map(|s| match_season(titles, s))
+        .filter_map(|s| match_season_with_hint(titles, s, disc_hint))
         .collect();
     out.sort_by(|a, b| {
         a.mean_delta
@@ -218,6 +355,8 @@ pub fn match_seasons(titles: &[DiscTitle], seasons: &[Season]) -> Vec<SeasonMatc
         let margin = strongest_alternative - best;
 
         out[0].runner_up_delta = Some(strongest_alternative);
+        // A tie broken by the disc number is still not proof, but it is a real
+        // independent signal, so it is worth distinguishing from an unresolved tie.
         out[0].confidence = if best <= 2.0 && margin >= 2.0 {
             Confidence::Strong
         } else {
@@ -368,6 +507,51 @@ mod tests {
             Confidence::Weak,
             "a fit that every window achieves is not evidence"
         );
+    }
+
+    /// Disc 2's real durations. They tie exactly between episodes 2-4 and 4-6, so
+    /// runtime alone picks the wrong one; the disc number resolves it.
+    #[test]
+    fn disc_number_breaks_an_exact_runtime_tie() {
+        let titles = vec![
+            title("B1_t00.mkv", 52.2),
+            title("D1_t01.mkv", 51.2),
+            title("E1_t02.mkv", 51.8),
+        ];
+        let season = season_one();
+
+        // Without the hint the tie is resolved arbitrarily, and reported as a tie.
+        let plain = match_season(&titles, &season).unwrap();
+        assert!(
+            !plain.tied_alternatives.is_empty(),
+            "an exact tie must be reported, not hidden"
+        );
+
+        // With it, disc 2 of a 3-episode-per-disc set starts at episode 4.
+        let hinted = match_season_with_hint(&titles, &season, Some(2)).unwrap();
+        assert_eq!(hinted.first_episode, 4);
+        assert!(hinted.disc_hint_used);
+        assert_eq!(hinted.matches[0].episode.name, "Muhammad and Larry");
+        assert_eq!(hinted.matches[2].episode.name, "The Legend of Jimmy the Greek");
+    }
+
+    /// The hint must never override a genuinely better runtime fit.
+    #[test]
+    fn disc_number_does_not_override_a_better_scoring_window() {
+        // Disc 3's titles fit episodes 7-8 uniquely and far better than anything else.
+        let titles = vec![title("a_t00.mkv", 102.5), title("b_t01.mkv", 69.3)];
+        // A hint of disc 1 would suggest starting at episode 1, which fits terribly.
+        let m = match_season_with_hint(&titles, &season_one(), Some(1)).unwrap();
+        assert_eq!(m.first_episode, 7, "hint must not beat a clear runtime win");
+        assert!(!m.disc_hint_used);
+    }
+
+    #[test]
+    fn extracts_disc_numbers_from_labels() {
+        assert_eq!(disc_number_from_label("ESPN_30_FOR_30_DISC_2"), Some(2));
+        assert_eq!(disc_number_from_label("THE_WIRE_S01_D3"), Some(3));
+        assert_eq!(disc_number_from_label("SHOW_DISK_11"), Some(11));
+        assert_eq!(disc_number_from_label("MOVIE_TITLE"), None);
     }
 
     #[test]

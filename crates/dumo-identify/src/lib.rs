@@ -6,6 +6,7 @@
 //! acceptance.
 
 pub mod datfile;
+pub mod discset;
 pub mod http;
 pub mod matching;
 pub mod platform;
