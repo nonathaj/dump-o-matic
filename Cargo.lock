@@ -172,6 +172,7 @@ dependencies = [
  "dumo-core",
  "dumo-drives",
  "dumo-identify",
+ "libc",
  "serde_json",
  "toml",
 ]

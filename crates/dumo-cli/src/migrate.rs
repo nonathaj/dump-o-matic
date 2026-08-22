@@ -43,63 +43,30 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         );
     }
 
-    let dest_cfg: &DestinationConfig = match &args.destination {
-        Some(name) => cfg
+    // With several shares, each file is routed by its media category rather than the
+    // whole run going to one place. --destination restricts the run to a single target.
+    let candidates: Vec<&DestinationConfig> = match &args.destination {
+        Some(name) => vec![cfg
             .find_destination(name)
-            .with_context(|| format!("no destination named {name:?}"))?,
-        None if cfg.destinations.len() == 1 => &cfg.destinations[0],
-        None => bail!(
-            "several destinations configured ({}); choose one with --destination",
-            cfg.destinations
-                .iter()
-                .map(|d| d.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+            .with_context(|| format!("no destination named {name:?}"))?],
+        None => cfg.destinations.iter().collect(),
     };
 
-    println!("Destination: {} -> {}", dest_cfg.name, dest_cfg.root.display());
-
-    // --- Destination must actually be there ---
-    if !dest_cfg.root.is_dir() {
-        bail!(
-            "{} is not present.{}\n\
-             Nothing has been changed; staged content simply waits.",
-            dest_cfg.root.display(),
-            if dest_cfg.network {
-                " The share may not be mounted."
-            } else {
-                ""
-            }
-        );
-    }
-    // A mounted-but-empty mountpoint is a common failure: the share dropped and writes
-    // would silently land on the local root filesystem instead.
-    if dest_cfg.network && !is_mountpoint(&dest_cfg.root) {
+    println!("Destinations:");
+    for d in &candidates {
         println!(
-            "  WARNING: {} is configured as a network destination but is not a mount\n\
-             \x20         point. If the share is unmounted, writes would land on the local\n\
-             \x20         disk under that path instead.",
-            dest_cfg.root.display()
+            "  {:<16} {}{}{}",
+            d.name,
+            d.root.display(),
+            if d.media.is_empty() {
+                "  (any media)".to_string()
+            } else {
+                format!("  ({})", d.media.join(", "))
+            },
+            if d.network { "  [network]" } else { "" }
         );
-        if !args.assume_yes && !confirm("Continue anyway?")? {
-            println!("Aborted; nothing was written.");
-            return Ok(());
-        }
     }
 
-    match config::filesystem_free_bytes(&dest_cfg.root) {
-        Some((free, total)) => println!(
-            "  {} free of {}",
-            human_size(free),
-            human_size(total)
-        ),
-        None => println!("  free space: unknown (the filesystem does not report it)"),
-    }
-
-    if dest_cfg.network {
-        println!("  network destination: writes are verified by re-reading after eviction");
-    }
     println!();
 
     // --- Gather eligible jobs ---
@@ -162,11 +129,22 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         };
         for f in &id.files {
             let src = cfg.staging.root.join(&f.path);
-            let dest = destination_path(&dest_cfg.root, &f.path);
+            let category = category_of(&f.path);
+
+            let Some(target) = candidates.iter().find(|d| d.accepts(&category)) else {
+                println!(
+                    "  {} -> no destination accepts category {:?}; skipping",
+                    f.path, category
+                );
+                continue;
+            };
+
+            let dest = destination_path(&target.root, &f.path);
             let exists = dest.exists();
             println!(
-                "  {} -> {}{}",
+                "  {} -> [{}] {}{}",
                 f.path,
+                target.name,
                 dest.display(),
                 if exists { "   [BLOCKED: exists]" } else { "" }
             );
@@ -181,6 +159,7 @@ pub fn run(args: MigrateArgs) -> Result<()> {
                 bytes: f.bytes,
                 blocked: exists,
                 staging_relative: f.path.clone(),
+                dest_root: target.root.clone(),
             });
         }
     }
@@ -205,16 +184,83 @@ pub fn run(args: MigrateArgs) -> Result<()> {
     println!();
     println!("Total to transfer: {}", human_size(total_bytes));
 
-    if let Some((free, _)) = config::filesystem_free_bytes(&dest_cfg.root) {
-        if free < total_bytes {
+    // Validate only the destinations this run will actually write to. Checking every
+    // configured destination up front would let an unrelated offline or read-only share
+    // block a migration that never touches it.
+    let mut used_roots: Vec<PathBuf> = Vec::new();
+    for p in planned.iter().filter(|p| !p.blocked) {
+        if !used_roots.contains(&p.dest_root) {
+            used_roots.push(p.dest_root.clone());
+        }
+    }
+    for root in &used_roots {
+        let d = candidates
+            .iter()
+            .find(|c| &c.root == root)
+            .expect("planned roots come from candidates");
+
+        if !d.root.is_dir() {
             bail!(
-                "destination has {} free but {} is needed",
-                human_size(free),
-                human_size(total_bytes)
+                "{} ({}) is not present.{}\n\
+                 Nothing has been changed; staged content simply waits.",
+                d.name,
+                d.root.display(),
+                if d.network { " The share may not be mounted." } else { "" }
             );
         }
-    } else if !args.assume_yes {
-        bail!("destination free space is unknown; re-run with --yes to proceed anyway");
+        // Touch the path first: with systemd automount the mount is lazy, and a bare
+        // stat of an untriggered mountpoint would look like an unmounted share.
+        let _ = std::fs::read_dir(&d.root);
+
+        if d.network && !is_network_filesystem(&d.root) {
+            println!(
+                "  WARNING: {} is declared as a network destination, but {} is not on a",
+                d.name,
+                d.root.display()
+            );
+            println!("           network filesystem — the share is probably not mounted.");
+            println!("           Writing would land on the local disk and fill it silently.");
+            if !args.assume_yes && !confirm("Continue anyway?")? {
+                println!("Aborted; nothing was written.");
+                return Ok(());
+            }
+        }
+        if !is_writable_dir(&d.root) {
+            bail!(
+                "{} ({}) is not writable.\n\
+                 Some NAS shares mark the share root read-only while subdirectories are\n\
+                 writable; point the destination at a writable subdirectory, or fix the\n\
+                 permission on the server.",
+                d.name,
+                d.root.display()
+            );
+        }
+        if let Some((free, total)) = config::filesystem_free_bytes(&d.root) {
+            println!("  {} — {} free of {}", d.name, human_size(free), human_size(total));
+        }
+    }
+
+    // Space is checked per destination root, since files may be routed to different
+    // shares with independent free space.
+    let mut needed: std::collections::BTreeMap<PathBuf, u64> = Default::default();
+    for p in planned.iter().filter(|p| !p.blocked) {
+        *needed.entry(p.dest_root.clone()).or_insert(0) += p.bytes;
+    }
+    for (root, bytes) in &needed {
+        match config::filesystem_free_bytes(root) {
+            Some((free, _)) if free < *bytes => bail!(
+                "{} has {} free but {} is needed",
+                root.display(),
+                human_size(free),
+                human_size(*bytes)
+            ),
+            Some(_) => {}
+            None if !args.assume_yes => bail!(
+                "free space on {} is unknown; re-run with --yes to proceed anyway",
+                root.display()
+            ),
+            None => {}
+        }
     }
 
     let reclaim = cfg.staging.reclaim_after_migrate;
@@ -288,9 +334,14 @@ pub fn run(args: MigrateArgs) -> Result<()> {
             .identification
             .as_ref()
             .map(|id| {
-                id.files
-                    .iter()
-                    .all(|f| destination_path(&dest_cfg.root, &f.path).exists())
+                id.files.iter().all(|f| {
+                    let category = category_of(&f.path);
+                    candidates
+                        .iter()
+                        .find(|d| d.accepts(&category))
+                        .map(|d| destination_path(&d.root, &f.path).exists())
+                        .unwrap_or(false)
+                })
             })
             .unwrap_or(false);
         if all_done {
@@ -324,6 +375,7 @@ struct Plan {
     bytes: u64,
     blocked: bool,
     staging_relative: String,
+    dest_root: PathBuf,
 }
 
 /// Map a staging-relative path onto the destination.
@@ -334,22 +386,71 @@ fn destination_path(dest_root: &Path, staging_relative: &str) -> PathBuf {
     let rel = staging_relative
         .strip_prefix("ready/")
         .unwrap_or(staging_relative);
-    dest_root.join(rel)
+    // Drop the category component too: it selected the destination, and the destination
+    // root already represents it (e.g. .../emulation/roms for games).
+    let below = rel.split_once('/').map(|(_, rest)| rest).unwrap_or(rel);
+    dest_root.join(below)
 }
 
-/// Whether `path` is a mount point, by comparing device ids with its parent.
-fn is_mountpoint(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(here) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Some(parent) = path.parent() else {
-        return true; // "/" is a mount point
-    };
-    match std::fs::metadata(parent) {
-        Ok(up) => here.dev() != up.dev(),
+/// The media category of a staging-relative path: the component after `ready/`.
+///
+/// `ready/games/ps2/Title.iso` -> `games`. This is the key that routes a file to a
+/// destination, which matters once movies, shows and games live on separate shares.
+fn category_of(staging_relative: &str) -> String {
+    staging_relative
+        .strip_prefix("ready/")
+        .unwrap_or(staging_relative)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Whether a directory can actually be written to, tested rather than inferred.
+///
+/// Some NAS shares mark the share root read-only while its subdirectories are writable,
+/// so permission bits alone are not a reliable answer.
+fn is_writable_dir(dir: &Path) -> bool {
+    let probe = dir.join(".dumo-write-test");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
         Err(_) => false,
     }
+}
+
+/// Whether `path` currently sits on a network filesystem.
+///
+/// This is the question that matters for a network destination, and it is not the same
+/// as "is this a mount point": destinations are usually a *subdirectory* of the mount
+/// (e.g. the share is at /mnt/nas/emulation but games belong in .../emulation/roms),
+/// so a mount-point test gives a false negative on a perfectly good path.
+///
+/// Checking the filesystem type answers it directly. If the share is not mounted, the
+/// path resolves to a local disk and this returns false — which is exactly the silent
+/// failure worth catching, because writes would otherwise fill the root filesystem while
+/// appearing to succeed.
+fn is_network_filesystem(path: &Path) -> bool {
+    // Magic numbers from statfs(2). Note SMB2 and the older CIFS value differ by a
+    // single bit and are easy to confuse: a modern `vers=3.1.1` mount reports
+    // 0xFE534D42, verified against a live share on this machine.
+    const SMB2_MAGIC: i64 = 0xFE53_4D42;
+    const CIFS_MAGIC: i64 = 0xFF53_4D42;
+    const SMB_MAGIC: i64 = 0x0000_517B;
+    const NFS_MAGIC: i64 = 0x0000_6969;
+    const FUSE_MAGIC: i64 = 0x6573_5546; // sshfs and friends
+
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    let t = st.f_type as i64;
+    matches!(t, SMB2_MAGIC | CIFS_MAGIC | SMB_MAGIC | NFS_MAGIC | FUSE_MAGIC)
 }
 
 fn human_size(bytes: u64) -> String {
@@ -379,24 +480,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn destination_path_drops_the_ready_prefix() {
-        let d = destination_path(Path::new("/mnt/nas"), "ready/ps2/Title (USA).iso");
-        assert_eq!(d, PathBuf::from("/mnt/nas/ps2/Title (USA).iso"));
+    fn destination_path_drops_ready_and_category() {
+        let d = destination_path(Path::new("/mnt/x"), "ready/games/ps2/Title (USA).iso");
+        assert_eq!(d, PathBuf::from("/mnt/x/ps2/Title (USA).iso"));
     }
 
     #[test]
-    fn destination_path_passes_through_other_paths() {
-        let d = destination_path(Path::new("/mnt/nas"), "ps2/Title.iso");
-        assert_eq!(d, PathBuf::from("/mnt/nas/ps2/Title.iso"));
+    fn category_is_the_component_after_ready() {
+        assert_eq!(category_of("ready/games/ps2/Title.iso"), "games");
+        assert_eq!(category_of("ready/movies/Title (2001).mkv"), "movies");
+        assert_eq!(category_of("ready/tv/Show (1994)/Season 01/e.mkv"), "tv");
     }
 
     #[test]
-    fn root_is_a_mountpoint() {
-        assert!(is_mountpoint(Path::new("/")));
+    fn destination_path_preserves_the_tree_below_the_category() {
+        // The category itself is consumed by routing; the rest of the path is kept.
+        let d = destination_path(Path::new("/mnt/nas/emulation/roms"), "ready/games/ps2/T.iso");
+        assert_eq!(d, PathBuf::from("/mnt/nas/emulation/roms/ps2/T.iso"));
+    }
+
+    /// Local paths must never be mistaken for a mounted share.
+    #[test]
+    fn local_paths_are_not_network_filesystems() {
+        assert!(!is_network_filesystem(Path::new("/")));
+        assert!(!is_network_filesystem(Path::new("/etc")));
     }
 
     #[test]
-    fn an_ordinary_directory_is_not_a_mountpoint() {
-        assert!(!is_mountpoint(Path::new("/etc")));
+    fn a_missing_path_is_not_a_network_filesystem() {
+        assert!(!is_network_filesystem(Path::new("/nonexistent/dumo/path")));
     }
 }

@@ -79,6 +79,14 @@ impl StagingConfig {
         self.root.join("ready")
     }
 
+    /// Ready-tree subdirectory for a media category, e.g. `ready/games`.
+    ///
+    /// The category is the routing key that decides which destination a file goes to,
+    /// so it is part of the staging path rather than inferred later.
+    pub fn ready_category_dir(&self, category: &str) -> PathBuf {
+        self.ready_dir().join(category)
+    }
+
     /// Per-job logs from ripping backends, kept for troubleshooting.
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
@@ -103,6 +111,22 @@ pub struct DestinationConfig {
     /// verification and interruption handling that network targets require.
     #[serde(default)]
     pub network: bool,
+
+    /// Media categories this destination accepts, e.g. `["games"]`.
+    ///
+    /// Categories correspond to the top level of the staging `ready/` tree, so
+    /// `ready/games/ps2/Title.iso` is routed to whichever destination accepts `games`.
+    /// An empty list accepts everything, which is the right default for a single
+    /// destination and wrong the moment there are several.
+    #[serde(default)]
+    pub media: Vec<String>,
+}
+
+impl DestinationConfig {
+    /// Whether this destination should receive content of the given category.
+    pub fn accepts(&self, category: &str) -> bool {
+        self.media.is_empty() || self.media.iter().any(|m| m == category)
+    }
 }
 
 /// Credentials for external metadata services.
@@ -537,6 +561,30 @@ mod tests {
         assert_eq!(
             c.staging.job_raw_dir("job1"),
             PathBuf::from("/tmp/dumo-staging/jobs/job1/raw")
+        );
+    }
+
+    #[test]
+    fn destination_accepts_by_category() {
+        let mut d = DestinationConfig {
+            name: "nas-games".into(),
+            root: PathBuf::from("/mnt/nas/emulation/roms"),
+            network: true,
+            media: vec!["games".into()],
+        };
+        assert!(d.accepts("games"));
+        assert!(!d.accepts("movies"));
+        // An empty list is a catch-all, for the single-destination case.
+        d.media.clear();
+        assert!(d.accepts("movies"));
+    }
+
+    #[test]
+    fn ready_category_dir_is_under_ready() {
+        let c = sample();
+        assert_eq!(
+            c.staging.ready_category_dir("games"),
+            PathBuf::from("/tmp/dumo-staging/ready/games")
         );
     }
 

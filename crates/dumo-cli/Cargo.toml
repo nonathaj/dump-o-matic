@@ -19,5 +19,6 @@ dumo-backends = { workspace = true }
 dumo-identify = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+libc = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

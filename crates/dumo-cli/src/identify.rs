@@ -257,7 +257,9 @@ fn apply_matches(
         }
     }
 
-    let ready_root = cfg.staging.ready_dir();
+    // Disc images are the 'games' category; the category is the routing key
+    // migrate uses to pick a destination.
+    let ready_root = cfg.staging.ready_category_dir("games");
     let mut moved: Vec<dumo_core::ReadyFile> = Vec::new();
     let mut reference: Option<dumo_identify::datfile::DatMatch> = None;
 
