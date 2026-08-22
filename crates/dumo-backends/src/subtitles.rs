@@ -74,26 +74,21 @@ pub fn dialogue_text(srt: &str) -> String {
     out
 }
 
-/// Content words from a piece of text, lowercased.
+/// Split text into lowercase word tokens.
 ///
-/// Short and very common words are dropped: they appear in every episode and so carry
-/// no discriminating power, while inflating any overlap score.
-pub fn content_words(text: &str) -> std::collections::HashSet<String> {
-    const STOP: &[&str] = &[
-        "the", "and", "that", "this", "with", "from", "they", "have", "been", "were", "will",
-        "would", "could", "should", "there", "their", "what", "when", "which", "about", "into",
-        "than", "then", "them", "these", "those", "your", "just", "like", "know", "going",
-        "here", "come", "came", "said", "says", "want", "well", "were", "over", "after",
-        "before", "because", "gonna", "yeah", "okay", "right", "think", "really", "thing",
-        "things", "people", "time", "back", "down", "very", "much", "more", "some", "also",
-        "film", "story", "documentary", "features", "look", "looks",
-    ];
-    let stop: std::collections::HashSet<&str> = STOP.iter().copied().collect();
-
+/// Deliberately *not* filtered against a stopword list. A hand-written list of common
+/// words would be English-only, arbitrary, and impossible to tune without recompiling —
+/// and it is unnecessary: which words are uninformative is a property of the candidate
+/// set, not of the language, and is measured directly by [`crate::subtitles`] callers
+/// using inverse document frequency. Words that appear in every candidate get almost no
+/// weight automatically, in any language.
+///
+/// The only filter is a minimum length, which drops punctuation fragments rather than
+/// making a judgement about meaning.
+pub fn tokenize(text: &str) -> std::collections::HashSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .filter(|w| w.len() >= 4)
-        .filter(|w| !stop.contains(w))
+        .filter(|w| w.chars().count() >= 3)
         .map(str::to_string)
         .collect()
 }
@@ -133,21 +128,23 @@ YOU KNOW EVERYTHING.
     }
 
     #[test]
-    fn content_words_drop_stopwords_and_short_words() {
-        let w = content_words("The Gretzky trade shocked Edmonton and the fans");
+    fn tokenize_keeps_words_and_drops_fragments() {
+        let w = tokenize("The Gretzky trade shocked Edmonton -- a 1988 deal!");
         assert!(w.contains("gretzky"));
         assert!(w.contains("edmonton"));
-        assert!(w.contains("shocked"));
-        assert!(!w.contains("the"));
-        assert!(!w.contains("and"));
-        // Too short to be distinctive.
-        assert!(!w.contains("fans") == false || w.contains("fans"));
+        assert!(w.contains("1988"));
+        // Common words are kept here on purpose: weighting them down is the corpus's
+        // job, not a hardcoded list's.
+        assert!(w.contains("the"));
+        // Punctuation does not survive as a token.
+        assert!(!w.contains("--"));
+        assert!(!w.iter().any(|t| t.is_empty()));
     }
 
     #[test]
     fn empty_input_is_handled() {
         assert_eq!(dialogue_text(""), "");
-        assert!(content_words("").is_empty());
+        assert!(tokenize("").is_empty());
     }
 
     #[test]
