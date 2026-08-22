@@ -100,6 +100,24 @@ pub fn analyze_state_file(path: &Path) -> std::io::Result<StateSummary> {
     Ok(s)
 }
 
+/// Drive parameters redumper used for this dump.
+///
+/// Worth recording: on raw CD reads the dump's correctness depends entirely on these,
+/// and a wrong sector order makes every sector fail. Keeping them with the job means a
+/// dump can be explained, reproduced, or distrusted later on evidence rather than memory.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DriveConfig {
+    /// Raw `configuration:` line as reported.
+    pub summary: Option<String>,
+    /// Sector order actually used, after any auto-detection.
+    pub sector_order: Option<String>,
+    /// True when the drive was absent from redumper's database and parameters were
+    /// therefore assumed rather than known.
+    pub generic: bool,
+    /// True when the sector order was measured rather than assumed.
+    pub auto_detected: bool,
+}
+
 /// Identification metadata redumper's INFO stage recovers from the image.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiscMetadata {
@@ -132,6 +150,8 @@ pub struct DumpOutcome {
     pub metadata: DiscMetadata,
     /// Warnings worth showing the operator.
     pub warnings: Vec<String>,
+    /// Drive parameters used, recorded as provenance.
+    pub drive: DriveConfig,
 }
 
 impl DumpOutcome {
@@ -215,6 +235,37 @@ fn parse_sector_count(line: &str) -> Option<u64> {
     let line = line.trim();
     let prefix = "sectors count (READ_CAPACITY):";
     line.strip_prefix(prefix)?.trim().parse().ok()
+}
+
+/// Note drive configuration and any auto-detection result.
+fn absorb_drive_config(line: &str, d: &mut DriveConfig) {
+    let t = line.trim();
+    if let Some(rest) = t.strip_prefix("configuration:") {
+        d.summary = Some(rest.trim().to_string());
+        // Extract the sector order from within the parenthesised summary.
+        if let Some(i) = rest.find("sector order:") {
+            let tail = &rest[i + "sector order:".len()..];
+            let v: String = tail
+                .trim()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !v.is_empty() {
+                d.sector_order = Some(v);
+            }
+        }
+    }
+    if t.contains("using generic drive") || t.contains("drive not found in the database") {
+        d.generic = true;
+    }
+    // e.g. "GENERIC: auto-detected sector order: DATA_SUB"
+    if let Some(i) = t.find("auto-detected sector order:") {
+        let v = t[i + "auto-detected sector order:".len()..].trim().to_string();
+        if !v.is_empty() {
+            d.sector_order = Some(v);
+            d.auto_detected = true;
+        }
+    }
 }
 
 /// Pull `key: value` metadata emitted by the INFO stage into `meta`.
@@ -306,14 +357,17 @@ fn read_cr_lines<R: Read>(r: R, mut on_line: impl FnMut(&str)) {
 ///
 /// `image_name` is the basename for the produced files. Progress is reported through
 /// `on_progress`; every output line is passed to `on_log`.
+#[allow(clippy::too_many_arguments)]
 pub fn dump(
     device: &str,
     image_path: &Path,
     image_name: &str,
+    sector_order: Option<&str>,
     mut on_progress: impl FnMut(&DumpProgress),
     mut on_log: impl FnMut(&str),
+    mut on_warning: impl FnMut(&str),
 ) -> Result<DumpOutcome> {
-    let args = vec![
+    let mut args = vec![
         "disc".to_string(),
         format!("--drive={device}"),
         format!("--image-path={}", image_path.display()),
@@ -322,6 +376,14 @@ pub fn dump(
         // dumps are worth the extra time.
         "--retries=8".to_string(),
     ];
+    match sector_order {
+        // An explicit override wins: used when detection is known to be wrong.
+        Some(o) => args.push(format!("--drive-sector-order={o}")),
+        // Otherwise measure rather than assume. Raw CD reads depend on this being
+        // right, and redumper's fallback for a drive missing from its database is a
+        // guess that silently fails every sector when wrong. Detection costs ~0s.
+        None => args.push("--auto-detect".to_string()),
+    }
 
     let mut child = spawn(&args)?;
     let stdout = child.stdout.take().expect("piped");
@@ -346,9 +408,14 @@ pub fn dump(
             return;
         }
         absorb_metadata(line, &mut outcome.metadata);
+        absorb_drive_config(line, &mut outcome.drive);
         let t = line.trim();
         if t.starts_with("warning:") || t.starts_with("error:") {
             outcome.warnings.push(t.to_string());
+            // Surface immediately. A warning that the drive is unknown decides whether
+            // the dump can work at all, and holding it until the end is useless when the
+            // run would otherwise grind for hours producing nothing.
+            on_warning(t);
         }
     });
 

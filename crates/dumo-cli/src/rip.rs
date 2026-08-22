@@ -395,7 +395,10 @@ fn rip_game(
         device,
         &raw_dir,
         &image_name,
-        |p| {
+        // No override configured: let redumper measure the sector order rather than
+        // assume it. Assuming is what made every sector of a CD fail.
+        None,
+        |p: &dumo_backends::redumper::DumpProgress| {
             if last_render.elapsed().as_millis() < 250 {
                 return;
             }
@@ -406,8 +409,13 @@ fn rip_game(
             );
             let _ = std::io::stdout().flush();
         },
-        |line| {
+        |line: &str| {
             let _ = writeln!(log, "{line}");
+        },
+        // Warnings are shown as they happen. Held to the end they are useless: an
+        // unknown drive decides whether the dump can work at all.
+        |w: &str| {
+            println!("\r  {w:<70}");
         },
     );
 
@@ -466,6 +474,23 @@ fn rip_game(
             "  {} of {} sectors read successfully",
             s.total_sectors - s.bad_sectors(),
             s.total_sectors
+        );
+    }
+    // Record how the drive was configured: on raw CD reads the dump's correctness
+    // depends on it entirely.
+    if let Some(order) = &outcome.drive.sector_order {
+        println!(
+            "  drive sector order: {order}{}{}",
+            if outcome.drive.auto_detected {
+                " (measured)"
+            } else {
+                " (assumed)"
+            },
+            if outcome.drive.generic {
+                ", drive not in redumper's database"
+            } else {
+                ""
+            }
         );
     }
     let m = &outcome.metadata;
