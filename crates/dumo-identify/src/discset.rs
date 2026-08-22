@@ -12,8 +12,67 @@
 //! consistent set. The constraint decides what the measurements could not.
 
 use crate::matching::{DiscTitle, TitleMatch};
+use crate::signals::{self, Corpus, ScoringParams, SignalScores};
 use crate::tmdb::{Episode, Season};
 use dumo_core::Confidence;
+use std::collections::HashSet;
+
+/// Everything needed to score titles against one candidate season.
+///
+/// Built once per season rather than per arrangement: the solver enumerates every
+/// consistent placement, so tokenising synopses inside the inner loop would dominate the
+/// run time for no benefit.
+struct SeasonScorer<'a> {
+    episodes: &'a [Episode],
+    /// Tokenised reference text per episode, index-aligned with `episodes`.
+    references: Vec<HashSet<String>>,
+    /// Which words are informative *for this season* — measured, not hardcoded. A term
+    /// appearing in every synopsis of a series carries no information about which
+    /// episode this is, whatever the language.
+    corpus: Corpus,
+    params: ScoringParams,
+}
+
+impl<'a> SeasonScorer<'a> {
+    fn new(season: &'a Season, params: ScoringParams) -> Self {
+        let references: Vec<HashSet<String>> = season
+            .episodes
+            .iter()
+            .map(|e| dumo_core::text::tokenize(&e.reference_text()))
+            .collect();
+        let corpus = Corpus::from_references(references.iter());
+        Self {
+            episodes: &season.episodes,
+            references,
+            corpus,
+            params,
+        }
+    }
+
+    /// Both signals' opinions of one pairing.
+    fn scores(&self, title: &DiscTitle, idx: usize) -> SignalScores {
+        let e = &self.episodes[idx];
+        SignalScores {
+            runtime: signals::runtime_score_with(title.duration_secs / 60.0, e, &self.params),
+            subtitle: title.dialogue.as_ref().map(|d| {
+                signals::subtitle_score_weighted(d, &self.references[idx], &self.corpus)
+            }),
+        }
+    }
+
+    /// Cost of a pairing: lower is better, so the solver still minimises.
+    fn cost(&self, title: &DiscTitle, idx: usize) -> f64 {
+        1.0 - self.scores(title, idx).combined_with(&self.params)
+    }
+
+    /// Which episode in the whole season a single signal would pick on its own.
+    fn best_by(&self, title: &DiscTitle, f: impl Fn(&SignalScores) -> Option<f64>) -> Option<u32> {
+        (0..self.episodes.len())
+            .filter_map(|i| f(&self.scores(title, i)).map(|s| (i, s)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| self.episodes[i].number)
+    }
+}
 
 /// One disc awaiting placement.
 #[derive(Debug, Clone)]
@@ -41,35 +100,57 @@ pub struct DiscPlacement {
 pub struct SetSolution {
     pub season: u32,
     pub placements: Vec<DiscPlacement>,
-    /// Mean runtime difference across every matched title in the set.
+    /// Mean runtime difference across every matched title, in minutes. For reporting:
+    /// it is what a person can sanity-check, but it is not what the solver ranks on.
     pub mean_delta: f64,
-    /// The next-best consistent arrangement, if any.
-    pub runner_up_delta: Option<f64>,
+    /// Mean combined-signal cost, 0..1, lower is better. This is the ranking quantity.
+    pub mean_cost: f64,
+    /// Cost of the next-best consistent arrangement, if there was one.
+    pub runner_up_cost: Option<f64>,
     pub confidence: Confidence,
     pub evidence: Vec<String>,
 }
 
 impl SetSolution {
+    /// How much worse the next consistent arrangement is. Larger is safer.
     pub fn margin(&self) -> Option<f64> {
-        self.runner_up_delta.map(|r| r - self.mean_delta)
+        self.runner_up_cost.map(|r| r - self.mean_cost)
     }
 }
 
-/// Total absolute runtime difference for placing `titles` at `start`, plus how many
-/// titles could actually be scored.
-fn window_cost(titles: &[DiscTitle], episodes: &[Episode], start: usize) -> Option<(f64, usize)> {
-    if start + titles.len() > episodes.len() {
+/// Combined-signal cost of placing `titles` at `start`, plus how many were scored.
+///
+/// Every title is counted now, not just those whose episode publishes a runtime: a
+/// missing runtime scores neutrally rather than dropping out, and dialogue can still
+/// decide the pairing on its own.
+fn window_cost(titles: &[DiscTitle], sc: &SeasonScorer, start: usize) -> Option<(f64, usize)> {
+    if start + titles.len() > sc.episodes.len() {
         return None;
     }
     let mut total = 0.0;
+    for (i, t) in titles.iter().enumerate() {
+        total += sc.cost(t, start + i);
+    }
+    Some((total, titles.len()))
+}
+
+/// Mean absolute runtime difference over a window, for reporting in minutes.
+///
+/// Kept separate from the cost the solver minimises: a unitless score is the right thing
+/// to rank on, but "3 minutes out" is what a person can judge.
+fn window_runtime_delta(titles: &[DiscTitle], episodes: &[Episode], start: usize) -> f64 {
+    let mut total = 0.0;
     let mut counted = 0usize;
     for (t, e) in titles.iter().zip(episodes[start..].iter()) {
-        // Episodes with no runtime contribute nothing rather than a fabricated zero.
         let Some(rt) = e.runtime_mins else { continue };
         total += (t.duration_secs / 60.0 - f64::from(rt)).abs();
         counted += 1;
     }
-    Some((total, counted))
+    if counted == 0 {
+        f64::NAN
+    } else {
+        total / counted as f64
+    }
 }
 
 /// Enumerate every consistent arrangement of the set within one season.
@@ -78,7 +159,7 @@ fn window_cost(titles: &[DiscTitle], episodes: &[Episode], start: usize) -> Opti
 /// positions. Returns `(total cost, counted titles, start index per disc)`.
 fn arrangements(
     discs: &[SetDisc],
-    episodes: &[Episode],
+    sc: &SeasonScorer,
     idx: usize,
     min_start: usize,
     acc: &mut Vec<usize>,
@@ -88,7 +169,7 @@ fn arrangements(
         let mut total = 0.0;
         let mut counted = 0;
         for (d, &s) in discs.iter().zip(acc.iter()) {
-            match window_cost(&d.titles, episodes, s) {
+            match window_cost(&d.titles, sc, s) {
                 Some((c, n)) => {
                     total += c;
                     counted += n;
@@ -105,10 +186,10 @@ fn arrangements(
         return;
     }
     let mut start = min_start;
-    while start + k <= episodes.len() {
+    while start + k <= sc.episodes.len() {
         acc.push(start);
         // The next disc must begin after this one ends: no overlap, disc order preserved.
-        arrangements(discs, episodes, idx + 1, start + k, acc, out);
+        arrangements(discs, sc, idx + 1, start + k, acc, out);
         acc.pop();
         start += 1;
     }
@@ -119,18 +200,26 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     if discs.is_empty() {
         return None;
     }
+    let params = ScoringParams::default();
+
     // Placement is only meaningful in disc order.
     let mut ordered = discs.to_vec();
     ordered.sort_by_key(|d| d.disc_number);
 
     let total_titles: usize = ordered.iter().map(|d| d.titles.len()).sum();
+    let with_dialogue = ordered
+        .iter()
+        .flat_map(|d| d.titles.iter())
+        .filter(|t| t.dialogue.is_some())
+        .count();
 
-    let mut best: Option<(f64, usize, Vec<usize>, &Season)> = None;
+    let mut best: Option<(f64, Vec<usize>, &Season)> = None;
     let mut second_best: Option<f64> = None;
 
     for season in seasons {
+        let sc = SeasonScorer::new(season, params);
         let mut found = Vec::new();
-        arrangements(&ordered, &season.episodes, 0, 0, &mut Vec::new(), &mut found);
+        arrangements(&ordered, &sc, 0, 0, &mut Vec::new(), &mut found);
         if found.is_empty() {
             continue;
         }
@@ -142,27 +231,30 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
 
         for (i, cand) in found.iter().take(2).enumerate() {
             let mean = cand.0 / cand.1.max(1) as f64;
-            let better = best
-                .as_ref()
-                .map(|(bc, bn, _, _)| mean < bc / (*bn).max(1) as f64)
-                .unwrap_or(true);
+            let better = best.as_ref().map(|(bc, _, _)| mean < *bc).unwrap_or(true);
             if i == 0 && better {
                 // Whatever was best becomes the runner-up.
-                if let Some((bc, bn, _, _)) = &best {
-                    let prev = bc / (*bn).max(1) as f64;
+                if let Some((prev, _, _)) = &best {
+                    let prev = *prev;
                     second_best = Some(second_best.map_or(prev, |s: f64| s.min(prev)));
                 }
-                best = Some((cand.0, cand.1, cand.2.clone(), season));
+                best = Some((mean, cand.2.clone(), season));
             } else {
                 second_best = Some(second_best.map_or(mean, |s: f64| s.min(mean)));
             }
         }
     }
 
-    let (total_cost, counted, starts, season) = best?;
-    let mean_delta = total_cost / counted.max(1) as f64;
+    let (mean_cost, starts, season) = best?;
+    let sc = SeasonScorer::new(season, params);
 
+    // Per-title verdicts: what each signal would have said on its own, so confidence can
+    // rest on independent signals agreeing rather than on one number being small.
+    let mut verdicts: Vec<signals::TitleVerdict> = Vec::new();
     let mut placements = Vec::new();
+    let mut runtime_total = 0.0;
+    let mut runtime_counted = 0usize;
+
     for (d, &start) in ordered.iter().zip(starts.iter()) {
         let window = &season.episodes[start..start + d.titles.len()];
         let matches: Vec<TitleMatch> = d
@@ -179,22 +271,53 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
                     .unwrap_or(f64::NAN),
             })
             .collect();
-        let (c, n) = window_cost(&d.titles, &season.episodes, start).unwrap_or((0.0, 1));
+
+        for (i, t) in d.titles.iter().enumerate() {
+            let idx = start + i;
+            let scores = sc.scores(t, idx);
+            let runtime_pick = sc.best_by(t, |s| Some(s.runtime)).unwrap_or(0);
+            let subtitle_pick = t.dialogue.as_ref().and_then(|_| sc.best_by(t, |s| s.subtitle));
+            let chosen = season.episodes[idx].number;
+            verdicts.push(signals::TitleVerdict {
+                title_name: t.name.clone(),
+                chosen_episode: chosen,
+                scores,
+                runtime_pick,
+                subtitle_pick,
+                signals_agree: subtitle_pick.map(|p| p == runtime_pick).unwrap_or(false),
+                // The set constraint, not a per-title contest, decided this placement;
+                // the margin that matters is the one between whole arrangements.
+                margin: second_best.map(|s| s - mean_cost).unwrap_or(1.0),
+            });
+            if let Some(rt) = season.episodes[idx].runtime_mins {
+                runtime_total += (t.duration_secs / 60.0 - f64::from(rt)).abs();
+                runtime_counted += 1;
+            }
+        }
+
         placements.push(DiscPlacement {
             disc_number: d.disc_number,
             job_id: d.job_id.clone(),
             first_episode: window.first().map(|e| e.number).unwrap_or(0),
             matches,
-            mean_delta: c / n.max(1) as f64,
+            mean_delta: window_runtime_delta(&d.titles, &season.episodes, start),
         });
     }
 
-    let margin = second_best.map(|s| s - mean_delta);
-    let confidence = if mean_delta <= 2.0 && margin.map(|m| m >= 1.0).unwrap_or(true) {
-        Confidence::Strong
+    let mean_delta = if runtime_counted == 0 {
+        f64::NAN
     } else {
-        Confidence::Weak
+        runtime_total / runtime_counted as f64
     };
+    let margin = second_best.map(|s| s - mean_cost);
+
+    // Confidence comes from the signals agreeing, then is capped by how much better this
+    // arrangement is than the next consistent one. A set that fits beautifully but has an
+    // equally good alternative is not something to accept unattended.
+    let mut confidence = signals::confidence_from(&verdicts);
+    if margin.map(|m| m < params.min_margin).unwrap_or(false) && confidence > Confidence::Weak {
+        confidence = Confidence::Weak;
+    }
 
     let mut evidence = vec![
         format!(
@@ -207,14 +330,29 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             "{total_titles} title(s) placed; runtimes differ by {mean_delta:.1} min on average"
         ),
     ];
+
+    if with_dialogue == 0 {
+        evidence.push(
+            "no title had a subtitle track, so this rests on runtime alone — the weakest \
+             evidence available"
+                .to_string(),
+        );
+    } else {
+        let agreed = verdicts.iter().filter(|v| v.signals_agree).count();
+        evidence.push(format!(
+            "{with_dialogue} of {total_titles} title(s) had dialogue to compare; runtime and \
+             dialogue independently picked the same episode for {agreed} of them"
+        ));
+    }
+
     match margin {
-        Some(m) if m >= 1.0 => evidence.push(format!(
-            "the next consistent arrangement is {m:.1} min/title worse — the set \
-             constraint leaves little room for doubt"
+        Some(m) if m >= params.min_margin => evidence.push(format!(
+            "the next consistent arrangement scores {m:.3} worse — the set constraint \
+             leaves little room for doubt"
         )),
         Some(m) => evidence.push(format!(
-            "another consistent arrangement is only {m:.1} min/title worse; check the \
-             episode titles before accepting"
+            "another consistent arrangement is only {m:.3} worse; check the episode \
+             titles before accepting"
         )),
         None => evidence.push(
             "this is the only arrangement that satisfies the set constraint".to_string(),
@@ -227,7 +365,8 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         season: season.number,
         placements,
         mean_delta,
-        runner_up_delta: second_best,
+        mean_cost,
+        runner_up_cost: second_best,
         confidence,
         evidence,
     })
@@ -244,6 +383,7 @@ mod tests {
             name: name.into(),
             runtime_mins: Some(rt),
             air_date: None,
+            overview: None,
         }
     }
 
@@ -251,6 +391,7 @@ mod tests {
         DiscTitle {
             name: name.into(),
             duration_secs: mins * 60.0,
+            dialogue: None,
         }
     }
 
@@ -383,6 +524,132 @@ mod tests {
         }];
         let s = solve(&discs, &[season_one()]).unwrap();
         assert!(!s.confidence.is_auto_acceptable());
+    }
+
+    fn ep_with(n: u32, rt: u32, name: &str, overview: &str) -> Episode {
+        Episode {
+            season: 1,
+            number: n,
+            name: name.into(),
+            runtime_mins: Some(rt),
+            air_date: None,
+            overview: Some(overview.into()),
+        }
+    }
+
+    fn t_with(name: &str, mins: f64, dialogue: &str) -> DiscTitle {
+        DiscTitle {
+            name: name.into(),
+            duration_secs: mins * 60.0,
+            dialogue: Some(dumo_core::text::tokenize(dialogue)),
+        }
+    }
+
+    /// Dialogue decides what runtime cannot.
+    ///
+    /// Every episode here runs exactly 50 minutes, so runtime carries no information at
+    /// all and the set constraint alone admits several arrangements. The dialogue on the
+    /// single disc names the subject of episodes 3 and 4, and that is enough.
+    #[test]
+    fn dialogue_breaks_a_runtime_tie() {
+        let season = Season {
+            number: 1,
+            episodes: vec![
+                ep_with(1, 50, "Reykjavik", "A summit in Iceland between two leaders."),
+                ep_with(2, 50, "Chernobyl", "The reactor at Chernobyl fails catastrophically."),
+                ep_with(3, 50, "Gretzky", "Wayne Gretzky is traded from Edmonton to Los Angeles."),
+                ep_with(4, 50, "Tiananmen", "Protesters occupy Tiananmen Square in Beijing."),
+                ep_with(5, 50, "Berlin", "The Berlin Wall comes down."),
+            ],
+        };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j1".into(),
+            titles: vec![
+                t_with("t01.mkv", 50.0, "GRETZKY WAS TRADED FROM EDMONTON TO LOS ANGELES TODAY"),
+                t_with("t02.mkv", 50.0, "PROTESTERS FILLED TIANANMEN SQUARE IN BEIJING"),
+            ],
+        }];
+
+        let sol = solve(&discs, &[season]).expect("solved");
+        let picked: Vec<u32> = sol.placements[0]
+            .matches
+            .iter()
+            .map(|m| m.episode.number)
+            .collect();
+        assert_eq!(picked, vec![3, 4], "dialogue should place these at episodes 3-4");
+    }
+
+    /// Runtime alone must never reach a confidence we would act on unattended.
+    ///
+    /// This is the whole reason the scorer exists: episode runtimes are a weak signal,
+    /// and a tidy-looking runtime fit is not evidence enough to rename files by itself.
+    #[test]
+    fn runtime_only_sets_are_never_auto_acceptable() {
+        let season = Season {
+            number: 1,
+            episodes: (1..=4).map(|n| ep(n, 50, &format!("Ep {n}"))).collect(),
+        };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j1".into(),
+            titles: vec![t("t01.mkv", 50.0), t("t02.mkv", 50.0)],
+        }];
+
+        let sol = solve(&discs, &[season]).expect("solved");
+        assert!(
+            !sol.confidence.is_auto_acceptable(),
+            "runtime alone reached {:?}",
+            sol.confidence
+        );
+        assert!(
+            sol.evidence.iter().any(|e| e.contains("runtime alone")),
+            "the report must say the evidence is thin: {:?}",
+            sol.evidence
+        );
+    }
+
+    /// A title with no subtitle track must not be penalised against one that has them.
+    #[test]
+    fn titles_without_dialogue_still_place_on_runtime() {
+        let season = Season {
+            number: 1,
+            episodes: vec![
+                ep_with(1, 30, "One", "The first thing happens."),
+                ep_with(2, 60, "Two", "The second thing happens."),
+            ],
+        };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j1".into(),
+            titles: vec![t("t01.mkv", 30.0), t("t02.mkv", 60.0)],
+        }];
+        let sol = solve(&discs, &[season]).expect("solved");
+        let picked: Vec<u32> = sol.placements[0]
+            .matches
+            .iter()
+            .map(|m| m.episode.number)
+            .collect();
+        assert_eq!(picked, vec![1, 2]);
+    }
+
+    /// The reported minute figure must stay in minutes even though ranking moved to a
+    /// unitless score — it is the number a person checks the result against.
+    #[test]
+    fn runtime_delta_is_still_reported_in_minutes() {
+        let season = Season {
+            number: 1,
+            episodes: vec![ep(1, 50, "One"), ep(2, 50, "Two")],
+        };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j1".into(),
+            titles: vec![t("t01.mkv", 52.0), t("t02.mkv", 54.0)],
+        }];
+        let sol = solve(&discs, &[season]).expect("solved");
+        // 2 minutes out and 4 minutes out: a 3 minute mean.
+        assert!((sol.mean_delta - 3.0).abs() < 0.01, "got {}", sol.mean_delta);
+        assert!(sol.mean_cost >= 0.0 && sol.mean_cost <= 1.0);
     }
 }
 
@@ -528,6 +795,7 @@ mod grouping_tests {
                 .map(|i| DiscTitle {
                     name: format!("t{i:02}.mkv"),
                     duration_secs: 3060.0,
+                    dialogue: None,
                 })
                 .collect(),
         }

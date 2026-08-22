@@ -76,22 +76,9 @@ pub fn dialogue_text(srt: &str) -> String {
 
 /// Split text into lowercase word tokens.
 ///
-/// Deliberately *not* filtered against a stopword list. A hand-written list of common
-/// words would be English-only, arbitrary, and impossible to tune without recompiling —
-/// and it is unnecessary: which words are uninformative is a property of the candidate
-/// set, not of the language, and is measured directly by [`crate::subtitles`] callers
-/// using inverse document frequency. Words that appear in every candidate get almost no
-/// weight automatically, in any language.
-///
-/// The only filter is a minimum length, which drops punctuation fragments rather than
-/// making a judgement about meaning.
-pub fn tokenize(text: &str) -> std::collections::HashSet<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .filter(|w| w.chars().count() >= 3)
-        .map(str::to_string)
-        .collect()
-}
+/// Re-exported from [`dumo_core::text`] so ripped dialogue and reference synopses are
+/// tokenised by the same code; see there for why there is no stopword list.
+pub use dumo_core::text::tokenize;
 
 #[cfg(test)]
 mod tests {

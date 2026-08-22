@@ -53,7 +53,7 @@ pub fn run(args: VerifyArgs) -> Result<()> {
 
     let mut any_failed = false;
     for dir in dirs {
-        if !verify_one(&dir, args.update)? {
+        if !verify_one(&dir, &cfg.staging.root, args.update)? {
             any_failed = true;
         }
         println!();
@@ -65,7 +65,11 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     Ok(())
 }
 
-fn verify_one(job_dir: &std::path::Path, update: bool) -> Result<bool> {
+fn verify_one(
+    job_dir: &std::path::Path,
+    staging_root: &std::path::Path,
+    update: bool,
+) -> Result<bool> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
 
@@ -156,12 +160,21 @@ fn verify_one(job_dir: &std::path::Path, update: bool) -> Result<bool> {
     // The expected length comes from the TOC/capacity recorded at probe time, which is
     // independent of the image, so this still catches a truncated artifact long after
     // the disc is gone.
+    //
+    // Only while the image is still in the job, though: once identify has filed the
+    // tracks into ready/ they are no longer here to measure, and the leftover cue and
+    // sidecars are provenance, not a truncated dump.
     let files: Vec<PathBuf> = job
         .artifacts
         .iter()
         .map(|a| job_dir.join(&a.relative_path))
         .collect();
-    if files.iter().any(|p| p.extension().map(|e| e == "cue").unwrap_or(false)) {
+    let has = |ext: &str| {
+        files
+            .iter()
+            .any(|p| p.extension().map(|e| e == ext).unwrap_or(false))
+    };
+    if has("cue") && has("bin") {
         let leadout = job
             .probe
             .as_ref()
@@ -175,7 +188,7 @@ fn verify_one(job_dir: &std::path::Path, update: bool) -> Result<bool> {
             Ok(()) => println!("  track lengths: match the TOC lead-out at LBA {leadout}"),
             Err(e) => problems.push(e),
         }
-    } else if files.iter().any(|p| p.extension().map(|e| e == "iso").unwrap_or(false)) {
+    } else if has("iso") {
         let sectors = job
             .probe
             .as_ref()
@@ -184,6 +197,34 @@ fn verify_one(job_dir: &std::path::Path, update: bool) -> Result<bool> {
         match redumper::verify_files_size(&files, sectors, redumper::ExpectedGeometry::Iso) {
             Ok(()) => println!("  image length: matches the drive-reported capacity"),
             Err(e) => problems.push(e),
+        }
+    }
+
+    // --- Re-hash whatever identify filed into ready/ ---
+    // These are the files that will actually be migrated, so they matter more than the
+    // provenance left behind in the job directory. Without this, verifying an identified
+    // job would silently check only the leftovers.
+    if let Some(id) = &job.identification {
+        for f in &id.files {
+            let path = staging_root.join(&f.path);
+            print!("  {} ... ", f.path);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            if !path.is_file() {
+                println!("MISSING");
+                problems.push(format!("{} is missing from ready/", f.path));
+                continue;
+            }
+            match hash::sha256_file(&path) {
+                Ok((sha256, _)) if sha256 == f.sha256 => println!("ok  {}", &sha256[..16]),
+                Ok(_) => {
+                    println!("HASH MISMATCH");
+                    problems.push(format!("{} failed hash verification", f.path));
+                }
+                Err(e) => {
+                    println!("ERROR");
+                    problems.push(format!("could not hash {}: {e}", f.path));
+                }
+            }
         }
     }
 

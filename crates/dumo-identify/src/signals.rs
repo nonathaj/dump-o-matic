@@ -289,6 +289,7 @@ mod tests {
             name: String::new(),
             runtime_mins: rt,
             air_date: None,
+            overview: None,
         }
     }
 

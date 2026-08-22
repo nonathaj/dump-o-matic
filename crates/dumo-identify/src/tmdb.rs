@@ -72,6 +72,23 @@ pub struct Episode {
     pub name: String,
     pub runtime_mins: Option<u32>,
     pub air_date: Option<String>,
+    /// Episode synopsis. Several sentences of distinctive text — the strongest
+    /// reference we have to compare ripped dialogue against, since an episode title
+    /// alone is only a few words.
+    pub overview: Option<String>,
+}
+
+impl Episode {
+    /// Text describing this episode specifically, for dialogue comparison.
+    ///
+    /// Title and synopsis together: the title carries proper nouns, the synopsis carries
+    /// enough vocabulary for the overlap score to mean something.
+    pub fn reference_text(&self) -> String {
+        match &self.overview {
+            Some(o) => format!("{} {}", self.name, o),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// A season's episode list.
@@ -255,6 +272,11 @@ pub fn parse_episodes(v: &serde_json::Value, season: u32) -> Vec<Episode> {
                             .get("air_date")
                             .and_then(|d| d.as_str())
                             .filter(|d| !d.is_empty())
+                            .map(str::to_string),
+                        overview: e
+                            .get("overview")
+                            .and_then(|d| d.as_str())
+                            .filter(|d| !d.trim().is_empty())
                             .map(str::to_string),
                     })
                 })

@@ -60,6 +60,12 @@ impl SeasonMatch {
 pub struct DiscTitle {
     pub name: String,
     pub duration_secs: f64,
+    /// Tokenised dialogue from the title's subtitle track, when it has one.
+    ///
+    /// Far more discriminating than a runtime: two episodes of a series routinely run to
+    /// the same minute, but they do not say the same words. `None` means the title had
+    /// no text subtitle track, and scoring falls back to runtime alone.
+    pub dialogue: Option<std::collections::HashSet<String>>,
 }
 
 impl DiscTitle {
@@ -434,6 +440,7 @@ mod tests {
             name: name.into(),
             runtime_mins: rt,
             air_date: None,
+            overview: None,
         }
     }
 
@@ -441,6 +448,7 @@ mod tests {
         DiscTitle {
             name: name.into(),
             duration_secs: mins * 60.0,
+            dialogue: None,
         }
     }
 

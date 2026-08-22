@@ -268,6 +268,21 @@ fn identify_job(
     Ok(())
 }
 
+/// How much of a title's subtitle track to read, in seconds.
+///
+/// The opening quarter-hour is ample to tell episodes apart, and stopping there keeps a
+/// whole box set to seconds rather than minutes of ffmpeg time.
+const DIALOGUE_WINDOW_SECS: u32 = 900;
+
+/// Tokenised dialogue for one title, or `None` if it has no usable subtitle track.
+fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashSet<String>> {
+    let srt = dumo_backends::subtitles::extract_text(path, DIALOGUE_WINDOW_SECS).ok()?;
+    let words = dumo_backends::subtitles::tokenize(&dumo_backends::subtitles::dialogue_text(&srt));
+    // A handful of words is a stray forced-subtitle caption, not dialogue; scoring on it
+    // would be worse than admitting we have no signal.
+    (words.len() >= 20).then_some(words)
+}
+
 /// Rebuild cue sheets into Redump's canonical form, completing CD sets.
 ///
 /// A CD dump's `.cue` is generated text that names its track files. redumper names them
@@ -612,6 +627,7 @@ fn analyse_video(
         .map(|t| dumo_identify::matching::DiscTitle {
             name: t.name.trim_start_matches("raw/").to_string(),
             duration_secs: t.duration_secs,
+            dialogue: None,
         })
         .collect();
     if titles.is_empty() {
@@ -826,13 +842,26 @@ fn solve_video_set(dirs: &[PathBuf], cfg: &Config, show_override: Option<&str>) 
         }
 
         let analysis = vid::analyse(&title_inputs, AnalysisParams::default());
-        let mut titles: Vec<DiscTitle> = analysis
-            .main_titles()
-            .map(|t| DiscTitle {
+        // Pull dialogue for each main title. This is what lets the solver do better
+        // than runtime alone: two episodes of a series often run to the same minute, but
+        // they do not say the same words. Extras have no subtitle track and score on
+        // runtime as before.
+        let mut titles: Vec<DiscTitle> = Vec::new();
+        for t in analysis.main_titles() {
+            let path = dir.join(&t.name);
+            print!("  reading dialogue from {} ... ", t.name);
+            std::io::stdout().flush().ok();
+            let dialogue = read_dialogue(&path);
+            match &dialogue {
+                Some(w) => println!("{} words", w.len()),
+                None => println!("no subtitle track"),
+            }
+            titles.push(DiscTitle {
                 name: t.name.trim_start_matches("raw/").to_string(),
                 duration_secs: t.duration_secs,
-            })
-            .collect();
+                dialogue,
+            });
+        }
         if titles.is_empty() {
             continue;
         }
@@ -953,12 +982,15 @@ fn solve_one_set(
         }
         if let Some(sol) = discset::solve(&discs, &seasons) {
             println!(
-                "  {:<34} {:>5.1} min/title average difference",
+                "  {:<34} score {:>5.3}   runtimes {:>4.1} min/title out",
                 truncate(&format!("{} ({})", c.name,
                     c.year().map(|y| y.to_string()).unwrap_or("?".into())), 34),
+                1.0 - sol.mean_cost,
                 sol.mean_delta
             );
-            if best.as_ref().map(|(_, b)| sol.mean_delta < b.mean_delta).unwrap_or(true) {
+            // Rank on the combined signal, not runtime alone: a series whose episode
+            // lengths happen to line up should not beat one whose dialogue matches.
+            if best.as_ref().map(|(_, b)| sol.mean_cost < b.mean_cost).unwrap_or(true) {
                 best = Some((c, sol));
             }
         }

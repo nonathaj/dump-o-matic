@@ -10,6 +10,7 @@ pub mod drive;
 pub mod fsops;
 pub mod hash;
 pub mod job;
+pub mod text;
 
 pub use config::{Config, ConfigError};
 pub use job::{Artifact, Identification, Job, JobStage, ReadyFile, TitleInfo};
