@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use dumo_core::{DiscProbe, MediaKind};
+use dumo_core::config::{self, CheckLevel};
+use dumo_core::{Config, DiscProbe, MediaKind};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +38,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect and validate configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Validate the configuration against the filesystem.
+    Check {
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Print the effective configuration, with secrets redacted.
+    Show {
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Print a commented starter config to stdout.
+    Example,
 }
 
 fn main() -> Result<()> {
@@ -43,6 +67,60 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Drives { json } => cmd_drives(json),
         Command::Probe { device, json } => cmd_probe(device, json),
+        Command::Config { action } => cmd_config(action),
+    }
+}
+
+const EXAMPLE_CONFIG: &str = include_str!("../../../docs/config.example.toml");
+
+fn cmd_config(action: ConfigAction) -> Result<()> {
+    match action {
+        ConfigAction::Example => {
+            print!("{EXAMPLE_CONFIG}");
+            Ok(())
+        }
+        ConfigAction::Show { file } => {
+            let cfg = Config::load(file.as_deref())?;
+            if let Some(p) = &cfg.source_path {
+                println!("# loaded from {}", p.display());
+            }
+            // Always print the redacted form; secrets must never reach stdout or a log.
+            println!("{}", toml::to_string_pretty(&cfg.redacted())?);
+            Ok(())
+        }
+        ConfigAction::Check { file } => {
+            let cfg = Config::load(file.as_deref())?;
+            if let Some(p) = &cfg.source_path {
+                println!("Config: {}", p.display());
+                println!();
+            }
+
+            let results = config::check(&cfg);
+            let mut errors = 0;
+            let mut warnings = 0;
+            for r in &results {
+                let tag = match r.level {
+                    CheckLevel::Ok => "ok   ",
+                    CheckLevel::Warning => {
+                        warnings += 1;
+                        "warn "
+                    }
+                    CheckLevel::Error => {
+                        errors += 1;
+                        "ERROR"
+                    }
+                };
+                println!("[{tag}] {:<24} {}", r.subject, r.detail);
+            }
+
+            println!();
+            if errors > 0 {
+                println!("{errors} error(s), {warnings} warning(s) — not ready to run.");
+                std::process::exit(1);
+            }
+            println!("No errors, {warnings} warning(s).");
+            Ok(())
+        }
     }
 }
 

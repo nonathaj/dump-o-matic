@@ -11,3 +11,5 @@ description = "Core domain model for dump-o-matic"
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
+libc = { workspace = true }

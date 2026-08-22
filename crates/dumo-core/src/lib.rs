@@ -4,8 +4,11 @@
 //! vocabulary that every stage, backend, and front-end speaks. Drive access lives in
 //! `dumo-drives`, ripping backends in `dumo-backends`, and so on.
 
+pub mod config;
 pub mod disc;
 pub mod drive;
+
+pub use config::{Config, ConfigError};
 
 pub use disc::{
     AudioTrack, ContentHint, DiscProbe, DiscProfile, GameSerial, MediaKind, TocInfo, VolumeInfo,

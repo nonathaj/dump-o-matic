@@ -1,0 +1,59 @@
+# dump-o-matic configuration
+#
+# Copy to ~/.config/dump-o-matic/config.toml and edit, or point DUMO_CONFIG at it.
+#
+# SECRETS: never commit a config containing real API keys. Prefer the environment
+# variables noted below — those are read at runtime and never written to disk.
+
+[staging]
+# Where rips are written before they are identified and migrated.
+# REQUIRED. There is no default: the tool refuses to run rather than guess a location.
+root = "/srv/dumper/staging"
+
+# Refuse to start a stage unless at least this much space would remain free afterwards.
+# Guards against filling the disk that also holds your library.
+min_free_headroom_gb = 20
+
+# Reclaim staged files as soon as a migration is verified (true), or keep them until
+# space is needed (false). Both are safe — a staged file is only ever removed after its
+# destination copy is verified by checksum. This is purely a space/convenience choice.
+reclaim_after_migrate = false
+
+
+# Permanent storage destinations. Repeat this block for more than one.
+#
+# For a network share, `root` is the OS MOUNT POINT, not an smb:// URL. dump-o-matic
+# does not implement an SMB client — mount the share with cifs/mount.smb3, autofs, or a
+# systemd mount unit. Share credentials therefore live in the OS mount config and never
+# in this file.
+#
+# [[destination]]
+# name = "nas"
+# root = "/mnt/nas"
+# network = true
+
+
+[drives]
+# Explicit device list. Leave empty (or omit) to autodetect all optical drives.
+devices = []
+
+
+[datfiles]
+# Identification databases, supplied by you. These are never downloaded automatically;
+# refresh them deliberately with `dump-o-matic datfiles update`.
+# redump_dir = "/home/user/.local/share/dump-o-matic/redump"
+# nointro_dir = "/home/user/.local/share/dump-o-matic/nointro"
+
+
+[api]
+# Credentials for online metadata lookups. All optional — a missing credential disables
+# that lookup source and is reported as unavailable; it never fails the run.
+#
+# Prefer environment variables over writing keys here:
+#   DUMO_TMDB_API_KEY, DUMO_TVDB_API_KEY,
+#   DUMO_IGDB_CLIENT_ID, DUMO_IGDB_CLIENT_SECRET
+#
+# The environment always wins over values in this file.
+#
+# tmdb_api_key = "..."
+# tvdb_api_key = "..."

@@ -1,0 +1,583 @@
+//! Configuration loading and validation.
+//!
+//! Two rules shape this module:
+//!
+//! 1. **No storage path is ever defaulted.** If staging or a destination is not
+//!    configured, the tool refuses to run rather than inventing a location. Guessing
+//!    where to put someone's media is exactly the kind of surprise this project exists
+//!    to avoid.
+//! 2. **No credential is ever bundled or committed.** Secrets come from the environment,
+//!    or from a config file the user owns. They are redacted everywhere they are printed.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Environment variable naming an explicit config file.
+pub const ENV_CONFIG: &str = "DUMO_CONFIG";
+/// Environment override for the staging root.
+pub const ENV_STAGING_ROOT: &str = "DUMO_STAGING_ROOT";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("no config file found (looked at {searched}); write one or set {ENV_CONFIG}")]
+    NotFound { searched: String },
+
+    #[error("reading {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("parsing {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
+/// Where ripped content is written before it is identified and migrated.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StagingConfig {
+    /// Root of the staging area. Required — never defaulted.
+    pub root: PathBuf,
+
+    /// Refuse to begin a stage unless at least this much space would remain free
+    /// afterwards. Guards against filling the disk that also holds your library.
+    #[serde(default = "default_headroom_gb")]
+    pub min_free_headroom_gb: u64,
+
+    /// Whether to reclaim staged files as soon as a migration is verified, or keep them
+    /// until space is needed. Both are safe; this is a space/convenience trade-off.
+    #[serde(default)]
+    pub reclaim_after_migrate: bool,
+}
+
+fn default_headroom_gb() -> u64 {
+    20
+}
+
+impl StagingConfig {
+    /// Directory holding all in-flight jobs.
+    pub fn jobs_dir(&self) -> PathBuf {
+        self.root.join("jobs")
+    }
+
+    /// Working directory for a single job.
+    pub fn job_dir(&self, job_id: &str) -> PathBuf {
+        self.jobs_dir().join(job_id)
+    }
+
+    /// Raw, unmodified backend output for a job — the bits straight off the disc.
+    pub fn job_raw_dir(&self, job_id: &str) -> PathBuf {
+        self.job_dir(job_id).join("raw")
+    }
+
+    /// Content that has been identified and renamed, awaiting migration.
+    pub fn ready_dir(&self) -> PathBuf {
+        self.root.join("ready")
+    }
+
+    /// Per-job logs from ripping backends, kept for troubleshooting.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+}
+
+/// A permanent storage destination.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DestinationConfig {
+    /// Short name used to refer to this destination, e.g. `nas`.
+    pub name: String,
+
+    /// Filesystem path to the destination.
+    ///
+    /// For network shares this is the **OS mount point**, not a `smb://` URL:
+    /// dump-o-matic does not implement an SMB client, so the share must be mounted by
+    /// the system (cifs/mount.smb3, autofs, or a systemd mount unit). That keeps share
+    /// credentials in the OS mount config rather than in this tool's secret surface.
+    pub root: PathBuf,
+
+    /// True if this destination is a network share, which enables the stricter
+    /// verification and interruption handling that network targets require.
+    #[serde(default)]
+    pub network: bool,
+}
+
+/// Credentials for external metadata services.
+///
+/// Every field is optional. A missing credential disables that lookup source and is
+/// reported as unavailable — it never fails the run outright.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ApiConfig {
+    #[serde(default)]
+    pub tmdb_api_key: Option<String>,
+    #[serde(default)]
+    pub tvdb_api_key: Option<String>,
+    #[serde(default)]
+    pub igdb_client_id: Option<String>,
+    #[serde(default)]
+    pub igdb_client_secret: Option<String>,
+}
+
+impl ApiConfig {
+    /// Overlay credentials found in the environment. Environment wins over file, so a
+    /// key can be supplied without ever being written to disk.
+    fn apply_env(&mut self) {
+        fn env(name: &str) -> Option<String> {
+            std::env::var(name).ok().filter(|s| !s.trim().is_empty())
+        }
+        if let Some(v) = env("DUMO_TMDB_API_KEY") {
+            self.tmdb_api_key = Some(v);
+        }
+        if let Some(v) = env("DUMO_TVDB_API_KEY") {
+            self.tvdb_api_key = Some(v);
+        }
+        if let Some(v) = env("DUMO_IGDB_CLIENT_ID") {
+            self.igdb_client_id = Some(v);
+        }
+        if let Some(v) = env("DUMO_IGDB_CLIENT_SECRET") {
+            self.igdb_client_secret = Some(v);
+        }
+    }
+
+    /// Names of the services that have credentials, for display. Never the values.
+    pub fn configured_services(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.tmdb_api_key.is_some() {
+            v.push("tmdb");
+        }
+        if self.tvdb_api_key.is_some() {
+            v.push("tvdb");
+        }
+        if self.igdb_client_id.is_some() && self.igdb_client_secret.is_some() {
+            v.push("igdb");
+        }
+        v
+    }
+}
+
+/// Locations of identification databases.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DatfileConfig {
+    /// Directory of Redump `.dat` files, supplied by the user.
+    #[serde(default)]
+    pub redump_dir: Option<PathBuf>,
+    /// Directory of No-Intro `.dat` files, supplied by the user.
+    #[serde(default)]
+    pub nointro_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DrivesConfig {
+    /// Explicit device list. Empty means autodetect.
+    #[serde(default)]
+    pub devices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Config {
+    pub staging: StagingConfig,
+
+    /// Permanent destinations. May be empty while only staging is in use.
+    #[serde(default, rename = "destination")]
+    pub destinations: Vec<DestinationConfig>,
+
+    #[serde(default)]
+    pub drives: DrivesConfig,
+
+    #[serde(default)]
+    pub datfiles: DatfileConfig,
+
+    #[serde(default)]
+    pub api: ApiConfig,
+
+    /// Path this config was loaded from. Not part of the file itself.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
+}
+
+impl Config {
+    /// Candidate config locations, in priority order.
+    pub fn search_paths() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Ok(p) = std::env::var(ENV_CONFIG) {
+            if !p.trim().is_empty() {
+                paths.push(PathBuf::from(p));
+            }
+        }
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            if !xdg.trim().is_empty() {
+                paths.push(PathBuf::from(xdg).join("dump-o-matic/config.toml"));
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            paths.push(PathBuf::from(&home).join(".config/dump-o-matic/config.toml"));
+        }
+        paths.push(PathBuf::from("dump-o-matic.toml"));
+        paths
+    }
+
+    /// Load configuration, applying environment overrides.
+    pub fn load(explicit: Option<&Path>) -> Result<Self, ConfigError> {
+        let candidates: Vec<PathBuf> = match explicit {
+            Some(p) => vec![p.to_path_buf()],
+            None => Self::search_paths(),
+        };
+
+        let found = candidates.iter().find(|p| p.is_file());
+        let Some(path) = found else {
+            return Err(ConfigError::NotFound {
+                searched: candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        };
+
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
+            path: path.clone(),
+            source: e,
+        })?;
+        let mut cfg: Config = toml::from_str(&text).map_err(|e| ConfigError::Parse {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        cfg.source_path = Some(path.clone());
+        cfg.apply_env_overrides();
+        Ok(cfg)
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(root) = std::env::var(ENV_STAGING_ROOT) {
+            if !root.trim().is_empty() {
+                self.staging.root = PathBuf::from(root);
+            }
+        }
+        self.api.apply_env();
+    }
+
+    /// Serialize with every secret replaced, for safe display and logging.
+    pub fn redacted(&self) -> Config {
+        let mut c = self.clone();
+        fn redact(v: &mut Option<String>) {
+            if v.is_some() {
+                *v = Some("<set>".to_string());
+            }
+        }
+        redact(&mut c.api.tmdb_api_key);
+        redact(&mut c.api.tvdb_api_key);
+        redact(&mut c.api.igdb_client_id);
+        redact(&mut c.api.igdb_client_secret);
+        c
+    }
+
+    pub fn find_destination(&self, name: &str) -> Option<&DestinationConfig> {
+        self.destinations.iter().find(|d| d.name == name)
+    }
+}
+
+/// Severity of a configuration finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckLevel {
+    Ok,
+    Warning,
+    Error,
+}
+
+/// One result from validating the configuration.
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    pub level: CheckLevel,
+    pub subject: String,
+    pub detail: String,
+}
+
+/// Free and total bytes on the filesystem containing `path`.
+///
+/// Returns `None` when the filesystem cannot report usage — which network shares
+/// sometimes do. That is deliberately distinct from reporting zero, because "unknown"
+/// must never be mistaken for "full" or "empty".
+pub fn filesystem_free_bytes(path: &Path) -> Option<(u64, u64)> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut st) };
+    if rc != 0 {
+        return None;
+    }
+    let block = if st.f_frsize > 0 {
+        st.f_frsize as u64
+    } else {
+        st.f_bsize as u64
+    };
+    if block == 0 {
+        return None;
+    }
+    let total = (st.f_blocks as u64).checked_mul(block)?;
+    let free = (st.f_bavail as u64).checked_mul(block)?;
+    if total == 0 {
+        return None;
+    }
+    Some((free, total))
+}
+
+/// Check whether a directory is writable, without leaving anything behind.
+fn is_writable(path: &Path) -> bool {
+    let probe = path.join(".dumo-write-test");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Validate a configuration against the actual filesystem.
+///
+/// This is what `config check` reports. It never modifies anything except a transient
+/// write-probe file, which is removed immediately.
+pub fn check(cfg: &Config) -> Vec<CheckResult> {
+    let mut out = Vec::new();
+    let root = &cfg.staging.root;
+
+    if !root.exists() {
+        out.push(CheckResult {
+            level: CheckLevel::Error,
+            subject: "staging.root".into(),
+            detail: format!("{} does not exist", root.display()),
+        });
+    } else if !root.is_dir() {
+        out.push(CheckResult {
+            level: CheckLevel::Error,
+            subject: "staging.root".into(),
+            detail: format!("{} is not a directory", root.display()),
+        });
+    } else if !is_writable(root) {
+        out.push(CheckResult {
+            level: CheckLevel::Error,
+            subject: "staging.root".into(),
+            detail: format!("{} is not writable", root.display()),
+        });
+    } else {
+        let space = match filesystem_free_bytes(root) {
+            Some((free, total)) => {
+                let free_gb = free / 1_000_000_000;
+                let headroom = cfg.staging.min_free_headroom_gb;
+                let level = if free_gb <= headroom {
+                    CheckLevel::Warning
+                } else {
+                    CheckLevel::Ok
+                };
+                out.push(CheckResult {
+                    level,
+                    subject: "staging.space".into(),
+                    detail: format!(
+                        "{} GB free of {} GB (headroom {} GB){}",
+                        free_gb,
+                        total / 1_000_000_000,
+                        headroom,
+                        if level == CheckLevel::Warning {
+                            " — at or below headroom, rips will be refused"
+                        } else {
+                            ""
+                        }
+                    ),
+                });
+                true
+            }
+            None => {
+                out.push(CheckResult {
+                    level: CheckLevel::Warning,
+                    subject: "staging.space".into(),
+                    detail: "filesystem does not report free space; pre-flight checks \
+                             cannot guarantee a rip will fit"
+                        .into(),
+                });
+                false
+            }
+        };
+        let _ = space;
+        out.push(CheckResult {
+            level: CheckLevel::Ok,
+            subject: "staging.root".into(),
+            detail: format!("{} exists and is writable", root.display()),
+        });
+    }
+
+    if cfg.destinations.is_empty() {
+        out.push(CheckResult {
+            level: CheckLevel::Warning,
+            subject: "destination".into(),
+            detail: "no permanent destination configured; migration is unavailable".into(),
+        });
+    }
+
+    for d in &cfg.destinations {
+        if !d.root.exists() {
+            out.push(CheckResult {
+                level: CheckLevel::Warning,
+                subject: format!("destination.{}", d.name),
+                detail: format!(
+                    "{} is not present{}",
+                    d.root.display(),
+                    if d.network {
+                        " (share not mounted? staged content will simply wait)"
+                    } else {
+                        ""
+                    }
+                ),
+            });
+            continue;
+        }
+        match filesystem_free_bytes(&d.root) {
+            Some((free, total)) => out.push(CheckResult {
+                level: CheckLevel::Ok,
+                subject: format!("destination.{}", d.name),
+                detail: format!(
+                    "{} available, {} GB free of {} GB",
+                    d.root.display(),
+                    free / 1_000_000_000,
+                    total / 1_000_000_000
+                ),
+            }),
+            None => out.push(CheckResult {
+                level: CheckLevel::Warning,
+                subject: format!("destination.{}", d.name),
+                detail: format!(
+                    "{} present but reports no free space information",
+                    d.root.display()
+                ),
+            }),
+        }
+    }
+
+    for (label, dir) in [
+        ("datfiles.redump_dir", &cfg.datfiles.redump_dir),
+        ("datfiles.nointro_dir", &cfg.datfiles.nointro_dir),
+    ] {
+        if let Some(p) = dir {
+            let level = if p.is_dir() {
+                CheckLevel::Ok
+            } else {
+                CheckLevel::Warning
+            };
+            out.push(CheckResult {
+                level,
+                subject: label.into(),
+                detail: format!(
+                    "{}{}",
+                    p.display(),
+                    if level == CheckLevel::Ok {
+                        ""
+                    } else {
+                        " does not exist; game identification will be unavailable"
+                    }
+                ),
+            });
+        }
+    }
+
+    let services = cfg.api.configured_services();
+    out.push(CheckResult {
+        level: CheckLevel::Ok,
+        subject: "api".into(),
+        detail: if services.is_empty() {
+            "no credentials configured; online lookups unavailable".into()
+        } else {
+            format!("credentials present for: {}", services.join(", "))
+        },
+    });
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Config {
+        toml::from_str(
+            r#"
+            [staging]
+            root = "/tmp/dumo-staging"
+
+            [[destination]]
+            name = "nas"
+            root = "/mnt/nas"
+            network = true
+            "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn parses_minimal_config() {
+        let c = sample();
+        assert_eq!(c.staging.root, PathBuf::from("/tmp/dumo-staging"));
+        assert_eq!(c.staging.min_free_headroom_gb, 20);
+        assert_eq!(c.destinations.len(), 1);
+        assert!(c.destinations[0].network);
+    }
+
+    #[test]
+    fn staging_root_is_required() {
+        let err = toml::from_str::<Config>("[staging]\n").unwrap_err();
+        assert!(err.to_string().contains("root"), "got: {err}");
+    }
+
+    #[test]
+    fn staging_layout_is_under_root() {
+        let c = sample();
+        assert!(c.staging.job_raw_dir("job1").starts_with(&c.staging.root));
+        assert!(c.staging.ready_dir().starts_with(&c.staging.root));
+        assert_eq!(
+            c.staging.job_raw_dir("job1"),
+            PathBuf::from("/tmp/dumo-staging/jobs/job1/raw")
+        );
+    }
+
+    #[test]
+    fn secrets_are_redacted_not_echoed() {
+        let mut c = sample();
+        c.api.tmdb_api_key = Some("super-secret-value".into());
+        let r = c.redacted();
+        let rendered = toml::to_string(&r).unwrap();
+        assert!(!rendered.contains("super-secret-value"));
+        assert!(rendered.contains("<set>"));
+        // The real config is untouched.
+        assert_eq!(c.api.tmdb_api_key.as_deref(), Some("super-secret-value"));
+    }
+
+    #[test]
+    fn configured_services_lists_names_only() {
+        let mut c = sample();
+        c.api.tmdb_api_key = Some("k".into());
+        assert_eq!(c.api.configured_services(), vec!["tmdb"]);
+        // IGDB needs both halves before it counts as usable.
+        c.api.igdb_client_id = Some("id".into());
+        assert_eq!(c.api.configured_services(), vec!["tmdb"]);
+        c.api.igdb_client_secret = Some("secret".into());
+        assert_eq!(c.api.configured_services(), vec!["tmdb", "igdb"]);
+    }
+
+    #[test]
+    fn check_reports_missing_staging_root_as_error() {
+        let mut c = sample();
+        c.staging.root = PathBuf::from("/nonexistent/dumo/staging");
+        let results = check(&c);
+        assert!(results
+            .iter()
+            .any(|r| r.level == CheckLevel::Error && r.subject == "staging.root"));
+    }
+
+    #[test]
+    fn free_space_reports_for_a_real_path() {
+        let (free, total) = filesystem_free_bytes(Path::new("/")).expect("root reports usage");
+        assert!(total > 0);
+        assert!(free <= total);
+    }
+}
