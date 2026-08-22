@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+
+# Local configuration may contain API keys and share paths; never commit it.
+config.toml
+dump-o-matic.toml
+.env

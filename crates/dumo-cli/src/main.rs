@@ -1,0 +1,256 @@
+//! `dump-o-matic` command-line interface.
+//!
+//! Currently implements the read-only half of the pipeline: drive discovery and Stage 1
+//! disc probing. No command in this binary writes to a disc or to your filesystem.
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use dumo_core::{DiscProbe, MediaKind};
+
+#[derive(Parser)]
+#[command(
+    name = "dump-o-matic",
+    version,
+    about = "Staged media ripping pipeline (read-only commands implemented so far)"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List optical drives and their current state.
+    Drives {
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Probe the disc in a drive and report what it appears to be.
+    ///
+    /// Fast and strictly read-only: reads a handful of sectors, never the whole disc.
+    Probe {
+        /// Device to probe. Defaults to the first drive found.
+        device: Option<String>,
+        /// Emit JSON instead of a report.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Drives { json } => cmd_drives(json),
+        Command::Probe { device, json } => cmd_probe(device, json),
+    }
+}
+
+fn cmd_drives(json: bool) -> Result<()> {
+    let drives = dumo_drives::enumerate_drives().context("enumerating optical drives")?;
+
+    if drives.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            eprintln!("No optical drives found.");
+            eprintln!("If running in a container, pass the device through: --device /dev/sr0");
+        }
+        return Ok(());
+    }
+
+    let mut rows = Vec::new();
+    for d in &drives {
+        let tray = dumo_drives::open_drive_status(d)
+            .map(|s| s.tray.to_string())
+            .unwrap_or_else(|e| format!("error: {e}"));
+        rows.push((d.clone(), tray));
+    }
+
+    if json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|(d, tray)| {
+                serde_json::json!({
+                    "path": d.path,
+                    "name": d.name,
+                    "description": d.description(),
+                    "revision": d.revision,
+                    "capabilities": d.capabilities,
+                    "tray": tray,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    for (d, tray) in &rows {
+        let c = &d.capabilities;
+        let mut reads = Vec::new();
+        if c.reads_cd {
+            reads.push("CD");
+        }
+        if c.reads_dvd {
+            reads.push("DVD");
+        }
+        if c.reads_bluray {
+            reads.push("BD");
+        }
+        println!("{}  {}", d.path, d.description());
+        println!("    state:  {tray}");
+        println!("    reads:  {}", reads.join(", "));
+        if let Some(rev) = &d.revision {
+            println!("    firmware: {rev}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_probe(device: Option<String>, json: bool) -> Result<()> {
+    let device = match device {
+        Some(d) => d,
+        None => {
+            let drives = dumo_drives::enumerate_drives().context("enumerating optical drives")?;
+            drives
+                .first()
+                .map(|d| d.path.clone())
+                .context("no optical drives found; pass a device path explicitly")?
+        }
+    };
+
+    let probe = dumo_drives::probe_disc(&device).with_context(|| format!("probing {device}"))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&probe)?);
+    } else {
+        print_probe(&probe);
+    }
+    Ok(())
+}
+
+fn human_size(bytes: u64) -> String {
+    const GB: f64 = 1_000_000_000.0;
+    const MB: f64 = 1_000_000.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else {
+        format!("{:.1} MB", b / MB)
+    }
+}
+
+fn fmt_duration(secs: f64) -> String {
+    let total = secs.round() as u64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
+fn print_probe(p: &DiscProbe) {
+    println!("Device:     {}", p.device);
+    if let Some(profile) = p.profile {
+        println!("Medium:     {} ({})", profile, profile.family());
+    }
+    if let Some(cap) = p.capacity_bytes {
+        println!("Capacity:   {}", human_size(cap));
+    }
+
+    println!();
+    println!("Detected:   {}", p.content.kind);
+    if let Some(t) = &p.content.title_guess {
+        println!("Title guess: {t}");
+    }
+    println!(
+        "Confidence: {}{}",
+        p.content.confidence,
+        if p.content.confidence.is_auto_acceptable() {
+            ""
+        } else {
+            "  (needs confirmation)"
+        }
+    );
+    if !p.content.evidence.is_empty() {
+        println!("Evidence:");
+        for e in &p.content.evidence {
+            println!("  - {e}");
+        }
+    }
+
+    if let Some(v) = &p.volume {
+        println!();
+        println!("Volume:");
+        if let Some(x) = &v.volume_id {
+            println!("  label:       {x}");
+        }
+        if let Some(x) = &v.publisher_id {
+            println!("  publisher:   {x}");
+        }
+        if let Some(x) = &v.application_id {
+            println!("  application: {x}");
+        }
+        if let Some(x) = &v.created {
+            println!("  created:     {x}");
+        }
+        if let (Some(size), Some(bs)) = (v.volume_space_size, v.logical_block_size) {
+            println!(
+                "  size:        {} sectors x {} bytes = {}",
+                size,
+                bs,
+                human_size(u64::from(size) * u64::from(bs))
+            );
+        }
+    }
+
+    if let Some(g) = &p.game_serial {
+        println!();
+        println!("Game serial: {}  (platform: {})", g.serial, g.platform);
+        println!("  evidence:  {}", g.evidence);
+    }
+
+    if let Some(t) = &p.toc {
+        println!();
+        println!(
+            "Table of contents: tracks {}-{}, total {}",
+            t.first_track,
+            t.last_track,
+            fmt_duration(t.total_duration_secs())
+        );
+        for tr in &t.tracks {
+            let dur = tr
+                .duration_secs()
+                .map(fmt_duration)
+                .unwrap_or_else(|| "?".into());
+            println!(
+                "  {:>2}. {:>8}  {}",
+                tr.number,
+                dur,
+                if tr.is_data { "data" } else { "audio" }
+            );
+        }
+        if let Some(id) = &t.musicbrainz_discid {
+            println!("  MusicBrainz disc ID: {id}");
+        }
+        if let Some(id) = &t.freedb_discid {
+            println!("  FreeDB disc ID:      {id}");
+        }
+    }
+
+    if !p.root_entries.is_empty() {
+        println!();
+        println!("Root directory ({} entries):", p.root_entries.len());
+        for e in p.root_entries.iter().take(24) {
+            println!("  {e}");
+        }
+        if p.root_entries.len() > 24 {
+            println!("  ... {} more", p.root_entries.len() - 24);
+        }
+    }
+
+    if p.content.kind == MediaKind::Unknown {
+        println!();
+        println!("Nothing recognised. The disc may be blank, damaged, or use a filesystem");
+        println!("this probe does not read yet.");
+    }
+
+    println!();
+    println!("Probed in {} ms", p.probe_millis);
+}

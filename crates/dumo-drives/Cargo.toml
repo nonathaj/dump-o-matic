@@ -1,0 +1,16 @@
+[package]
+name = "dumo-drives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Optical drive detection and read-only disc probing for dump-o-matic"
+
+[dependencies]
+dumo-core = { workspace = true }
+libc = { workspace = true }
+thiserror = { workspace = true }
+sha1 = { workspace = true }
+base64 = { workspace = true }
