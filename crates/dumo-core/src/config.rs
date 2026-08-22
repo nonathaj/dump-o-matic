@@ -226,6 +226,46 @@ pub struct DatfileConfig {
     pub nointro_dir: Option<PathBuf>,
 }
 
+/// How identified game discs are packaged for the emulator library.
+///
+/// The archival form of a CD dump (a `.cue` plus per-track `.bin` files) is not the form
+/// an emulator front-end wants. Which transformation is appropriate depends on the
+/// library, so it is configuration rather than a decision baked into the code.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GamesConfig {
+    /// Pack CD dumps into a single CHD instead of filing `.cue`/`.bin`.
+    ///
+    /// On by default because the alternative is actively wrong for common front-ends:
+    /// ES-DE does not scan `.cue` for `ps2` at all, and scans both `.cue` and `.bin` for
+    /// `psx`, so one game shows up twice. CHD is one file, is read natively by PCSX2 and
+    /// DuckStation, and is losslessly reversible — and the conversion is only accepted
+    /// after extracting it back and matching the Redump hashes, so nothing is taken on
+    /// trust.
+    #[serde(default = "default_true")]
+    pub chd_for_cd: bool,
+
+    /// Also convert single-file DVD/BD images (`.iso`) to CHD.
+    ///
+    /// Off by default: `.iso` already files and launches cleanly as one entry, so there
+    /// is no duplicate-scanning problem to solve, and the space saved on a DVD image is
+    /// modest. Converting would churn games that already work.
+    #[serde(default)]
+    pub chd_for_iso: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for GamesConfig {
+    fn default() -> Self {
+        Self {
+            chd_for_cd: true,
+            chd_for_iso: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DrivesConfig {
     /// Explicit device list. Empty means autodetect.
@@ -246,6 +286,9 @@ pub struct Config {
 
     #[serde(default)]
     pub datfiles: DatfileConfig,
+
+    #[serde(default)]
+    pub games: GamesConfig,
 
     #[serde(default)]
     pub api: ApiConfig,

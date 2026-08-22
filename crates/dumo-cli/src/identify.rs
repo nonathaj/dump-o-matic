@@ -370,6 +370,188 @@ fn reconstruct_cues(job: &Job, job_dir: &std::path::Path, applicable: &mut Vec<A
     });
 }
 
+/// Pack a verified CD set into a single CHD, or return `Ok(None)` to file it as-is.
+///
+/// Why this exists at all is in [`dumo_backends::chdman`]: a `.cue`/`.bin` pair is the
+/// right archival form but the wrong library form, and for `ps2` in particular the cue is
+/// not even scanned. CHD is one file, read natively, and losslessly reversible.
+///
+/// That last property is the only reason this is allowed to replace the Redump files, so
+/// it is proven rather than assumed. The CHD is extracted straight back out and every
+/// track compared against the Redump SHA-1s the dump already matched. If anything
+/// differs — or chdman is missing, or the round-trip fails — nothing is filed as a CHD
+/// and the caller falls back to filing the original files untouched.
+///
+/// The job's own `raw/` tree is never modified: track files are hard-linked into a work
+/// area, so this costs no extra copy of the source and cannot damage the dump.
+fn package_chd(
+    job_dir: &std::path::Path,
+    cfg: &Config,
+    matches: &[Applicable],
+) -> Result<Option<(PathBuf, dumo_identify::datfile::DatMatch)>> {
+    let Some(first) = matches.first() else {
+        return Ok(None);
+    };
+    let m = &first.m;
+
+    // Only CD sets. A single .iso is already one file and one library entry, so there is
+    // no problem here worth solving (see GamesConfig::chd_for_iso).
+    if !m
+        .game
+        .roms
+        .iter()
+        .any(|r| r.name.to_ascii_lowercase().ends_with(".cue"))
+    {
+        return Ok(None);
+    }
+    let Some(slug) = es_de_slug(&m.platform) else {
+        return Ok(None);
+    };
+
+    match dumo_backends::chdman::version() {
+        Ok(v) => println!("  packaging as CHD ({v})"),
+        Err(e) => {
+            println!("  not packaging as CHD: {e}");
+            println!("    filing the .cue/.bin set instead; install chdman (mame-tools) to pack it.");
+            return Ok(None);
+        }
+    }
+
+    let work = job_dir.join("package");
+    if work.exists() {
+        println!("  not packaging as CHD: {} already exists", work.display());
+        return Ok(None);
+    }
+    std::fs::create_dir_all(&work).context("creating CHD work directory")?;
+
+    // Assemble the set under its archival names. chdman resolves track files relative to
+    // the cue, exactly as an emulator would, so the names have to be right here.
+    let mut assembled = Ok(());
+    for item in matches {
+        let dest = work.join(&item.m.rom.name);
+        let r = match &item.source {
+            Source::Reconstructed(bytes) => {
+                dumo_core::fsops::write_verified(&dest, bytes, &item.sha256)
+                    .map(|_| ())
+                    .map_err(anyhow::Error::from)
+            }
+            // A hard link costs nothing and shares the bytes with raw/, so packaging a
+            // 400 MB track needs no second copy of it.
+            Source::Artifact { path, .. } => std::fs::hard_link(path, &dest)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("linking {} into the work area", item.m.rom.name)),
+        };
+        if let Err(e) = r {
+            assembled = Err(e);
+            break;
+        }
+    }
+    let cleanup = |work: &std::path::Path| {
+        // Only ever removes the work area we just created; raw/ holds the real files and
+        // the hard links here are additional names for them, not the data itself.
+        std::fs::remove_dir_all(work).ok();
+    };
+    if let Err(e) = assembled {
+        cleanup(&work);
+        println!("  not packaging as CHD: {e}");
+        return Ok(None);
+    }
+
+    let cue = m
+        .game
+        .roms
+        .iter()
+        .find(|r| r.name.to_ascii_lowercase().ends_with(".cue"))
+        .map(|r| work.join(&r.name))
+        .expect("checked above");
+    let title = m.game.name.clone();
+    let chd = work.join(format!("{title}.chd"));
+
+    print!("  -> {slug}/{title}.chd ... ");
+    std::io::stdout().flush().ok();
+    if let Err(e) = dumo_backends::chdman::create_cd(&cue, &chd) {
+        println!("FAILED");
+        println!("     {e}");
+        cleanup(&work);
+        return Ok(None);
+    }
+
+    // --- Prove the round-trip before trusting the CHD --------------------------------
+    let verify_dir = work.join("verify");
+    let round = match dumo_backends::chdman::verify_roundtrip(&chd, &verify_dir, &title) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("FAILED");
+            println!("     could not extract the CHD back out: {e}");
+            println!("     Filing the original files instead; nothing was deleted.");
+            cleanup(&work);
+            return Ok(None);
+        }
+    };
+
+    // Every track Redump lists must come back out with the same SHA-1. Compared as
+    // multisets so track order cannot mask a swap.
+    let mut expected: Vec<String> = m
+        .game
+        .roms
+        .iter()
+        .filter(|r| !r.name.to_ascii_lowercase().ends_with(".cue"))
+        .map(|r| r.sha1.to_ascii_lowercase())
+        .collect();
+    let mut actual: Vec<String> = Vec::new();
+    for t in &round.tracks {
+        match hash::redump_digests(t) {
+            Ok(d) => actual.push(d.sha1.to_ascii_lowercase()),
+            Err(e) => {
+                println!("FAILED");
+                println!("     could not hash the extracted track: {e}");
+                cleanup(&work);
+                return Ok(None);
+            }
+        }
+    }
+    expected.sort();
+    actual.sort();
+
+    if expected != actual {
+        println!("FAILED");
+        println!("     the CHD does not reproduce the dump byte for byte:");
+        println!("       redump:    {expected:?}");
+        println!("       extracted: {actual:?}");
+        println!("     Filing the original files instead; nothing was deleted.");
+        cleanup(&work);
+        return Ok(None);
+    }
+
+    // The extracted copies have served their purpose and are pure duplicates of data we
+    // still hold in raw/.
+    std::fs::remove_dir_all(&verify_dir).ok();
+
+    let dest = cfg
+        .staging
+        .ready_category_dir("games")
+        .join(slug)
+        .join(format!("{title}.chd"));
+    match dumo_core::fsops::move_verified(&chd, &dest, None) {
+        Ok(_) => {
+            println!("packed and verified");
+            println!(
+                "     round-trip checked: {} track(s) extract back to Redump's SHA-1s",
+                actual.len()
+            );
+            cleanup(&work);
+            Ok(Some((dest, m.clone())))
+        }
+        Err(e) => {
+            println!("FAILED");
+            println!("     {e}");
+            println!("     Nothing was moved or deleted.");
+            cleanup(&work);
+            Ok(None)
+        }
+    }
+}
+
 /// Move exactly-matched files into `ready/<slug>/<canonical name>`.
 ///
 /// Only exact matches are moved, and only when nothing already occupies the destination.
@@ -397,6 +579,28 @@ fn apply_matches(
                 matches.len()
             );
             println!("  Filing a partial set would misrepresent it as a complete dump.");
+            return Ok(());
+        }
+    }
+
+    // Every file in the set must be exact before packaging is even considered; a CHD
+    // built from a set we were unsure of would bury that uncertainty in a new file.
+    let all_exact = matches.iter().all(|i| i.m.confidence.is_auto_acceptable());
+    if cfg.games.chd_for_cd && all_exact {
+        if let Some((dest, m)) = package_chd(job_dir, cfg, matches)? {
+            let (sha256, bytes) = hash::sha256_file(&dest).context("hashing the packed CHD")?;
+            record_identification(
+                job,
+                &m,
+                vec![dumo_core::ReadyFile {
+                    path: relative_to_staging(&dest, &cfg.staging.root),
+                    bytes,
+                    sha256,
+                }],
+            );
+            job.save(job_dir)?;
+            println!("  job stage: identified");
+            println!("  the archival .cue/.bin stay in the job directory as provenance");
             return Ok(());
         }
     }
@@ -473,26 +677,38 @@ fn apply_matches(
         .retain(|a| !moved_names.contains(&a.relative_path));
 
     if let Some(m) = reference {
-        job.identification = Some(dumo_core::Identification {
-            title: m.game.name.clone(),
-            platform: m.platform.clone(),
-            platform_slug: es_de_slug(&m.platform).unwrap_or("unknown").to_string(),
-            matched_on: m.matched_on.to_string(),
-            confidence: m.confidence,
-            source: file_name(&m.source),
-            files: moved,
-            identified_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        });
-        job.stage = dumo_core::JobStage::Identified;
+        record_identification(job, &m, moved);
         job.save(job_dir)?;
         println!("  job stage: identified");
         println!("  provenance (logs, sector state) stays in the job directory");
     }
 
     Ok(())
+}
+
+/// Record what a job was identified as, and which files now carry it.
+///
+/// Shared by both filing routes — the plain move and the CHD package — so the manifest
+/// says the same things about a job however its content was packaged.
+fn record_identification(
+    job: &mut Job,
+    m: &dumo_identify::datfile::DatMatch,
+    files: Vec<dumo_core::ReadyFile>,
+) {
+    job.identification = Some(dumo_core::Identification {
+        title: m.game.name.clone(),
+        platform: m.platform.clone(),
+        platform_slug: es_de_slug(&m.platform).unwrap_or("unknown").to_string(),
+        matched_on: m.matched_on.to_string(),
+        confidence: m.confidence,
+        source: file_name(&m.source),
+        files,
+        identified_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    job.stage = dumo_core::JobStage::Identified;
 }
 
 /// Express a path relative to the staging root, for storage in the manifest.

@@ -4,6 +4,7 @@
 //! (MakeMKV for video, redumper for game discs, cdparanoia for audio) as subprocesses
 //! and parses their output into structured progress and results.
 
+pub mod chdman;
 pub mod ffprobe;
 pub mod makemkv;
 pub mod redumper;
