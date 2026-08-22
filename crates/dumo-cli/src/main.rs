@@ -4,6 +4,7 @@
 //! disc probing. No command in this binary writes to a disc or to your filesystem.
 
 mod rip;
+mod verify;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -68,6 +69,16 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Re-verify staged artifacts against their manifest hashes.
+    Verify {
+        /// Job id or a fragment of one. Omit to verify every job.
+        job: Option<String>,
+        /// Update the recorded stage if the verdict changed.
+        #[arg(long)]
+        update: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// List jobs in the staging area.
     Jobs {
         #[arg(long)]
@@ -114,6 +125,11 @@ fn main() -> Result<()> {
             dry_run,
             assume_yes: yes,
             config_file: config,
+        }),
+        Command::Verify { job, update, config } => verify::run(verify::VerifyArgs {
+            job,
+            config_file: config,
+            update,
         }),
         Command::Jobs { config, json } => cmd_jobs(config, json),
     }

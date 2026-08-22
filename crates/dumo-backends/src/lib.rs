@@ -5,6 +5,7 @@
 //! and parses their output into structured progress and results.
 
 pub mod makemkv;
+pub mod redumper;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {

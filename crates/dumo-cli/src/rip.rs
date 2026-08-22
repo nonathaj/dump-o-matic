@@ -58,7 +58,7 @@ pub fn run(args: RipArgs) -> Result<()> {
         bail!("configuration is not usable; run 'dump-o-matic config check'");
     }
 
-    let device = match args.device {
+    let device = match args.device.clone() {
         Some(d) => d,
         None => dumo_drives::enumerate_drives()
             .context("enumerating drives")?
@@ -76,11 +76,15 @@ pub fn run(args: RipArgs) -> Result<()> {
         probe.content.title_guess.as_deref().unwrap_or("no title")
     );
 
+    // Route to the backend that suits the medium.
     match probe.content.kind {
         MediaKind::DvdVideo | MediaKind::BluRayVideo => {}
+        MediaKind::GameDisc | MediaKind::Data => {
+            return rip_game(&cfg, &device, &probe, &args);
+        }
         other => bail!(
-            "this command currently handles DVD-Video and Blu-ray only; disc looks like {other}. \
-             Audio CD and game disc backends are not implemented yet."
+            "no backend for {other} yet; audio CD support is not implemented. \
+             Video discs use MakeMKV and game/data discs use redumper."
         ),
     }
 
@@ -303,6 +307,285 @@ pub fn run(args: RipArgs) -> Result<()> {
     println!("Next: identification (stage 3) is not implemented yet.");
 
     Ok(())
+}
+
+/// Rip a game or data disc with redumper, producing an archival image.
+fn rip_game(
+    cfg: &Config,
+    device: &str,
+    probe: &dumo_core::DiscProbe,
+    args: &RipArgs,
+) -> Result<()> {
+    let backend_version = dumo_backends::redumper::version()
+        .context("checking redumper (install it from https://github.com/superg/redumper)")?;
+    println!("Backend: {backend_version}");
+
+    if let Some(g) = &probe.game_serial {
+        println!("Serial:  {} ({})", g.serial, g.platform);
+    } else {
+        println!("Serial:  none found — this will be dumped as a generic data disc");
+    }
+
+    // The medium's own sector count is the size to plan for; a disc image is the whole
+    // disc, unlike a video rip where only selected titles are copied.
+    let estimated = probe.capacity_bytes.unwrap_or(0);
+
+    let label = probe
+        .game_serial
+        .as_ref()
+        .map(|g| format!("{}-{}", g.platform, g.serial))
+        .or_else(|| probe.content.title_guess.clone());
+    let job_id = job::new_job_id(label.as_deref());
+    let job_dir = cfg.staging.job_dir(&job_id);
+    let raw_dir = cfg.staging.job_raw_dir(&job_id);
+
+    let mut job = Job::new(job_id.clone(), device.to_string());
+    job.probe = Some(probe.clone());
+    job.backend = Some(backend_version.clone());
+
+    println!();
+    println!("Job:       {job_id}");
+    println!("Staging:   {}", raw_dir.display());
+    println!("Estimated: {} (full disc image)", human_size(estimated));
+
+    // redumper writes the image plus state/log sidecars; leave room for them.
+    let overhead = estimated / 10;
+    preflight_space(cfg, estimated.saturating_add(overhead), args.assume_yes)?;
+
+    if args.dry_run {
+        println!();
+        println!(
+            "Dry run: would create {} and dump the full disc.",
+            job_dir.display()
+        );
+        println!("Nothing was written.");
+        return Ok(());
+    }
+
+    if !args.assume_yes && !confirm("Proceed with dump?")? {
+        println!("Aborted; nothing was written.");
+        return Ok(());
+    }
+
+    Job::create_dir(&job_dir)?;
+    std::fs::create_dir_all(&raw_dir)?;
+    std::fs::create_dir_all(cfg.staging.logs_dir())?;
+
+    job.stage = JobStage::Ripping;
+    job.save(&job_dir)?;
+
+    let log_path = cfg.staging.logs_dir().join(format!("{job_id}.log"));
+    let mut log = std::fs::File::create(&log_path)?;
+
+    // Name the image after the serial when we have one, so the raw output is already
+    // meaningful; stage 3 still renames it to the full Redump convention.
+    let image_name = probe
+        .game_serial
+        .as_ref()
+        .map(|g| g.serial.clone())
+        .unwrap_or_else(|| "disc".to_string());
+
+    let started = std::time::Instant::now();
+    let mut last_render = std::time::Instant::now();
+
+    println!();
+    println!("Dumping (this reads every sector; errors are retried) ...");
+
+    let result = dumo_backends::redumper::dump(
+        device,
+        &raw_dir,
+        &image_name,
+        |p| {
+            if last_render.elapsed().as_millis() < 250 {
+                return;
+            }
+            last_render = std::time::Instant::now();
+            print!(
+                "\r  {:>3}%  LBA {}/{}  errors: SCSI {} EDC {}   ",
+                p.percent, p.current_lba, p.total_lba, p.scsi_errors, p.edc_errors
+            );
+            let _ = std::io::stdout().flush();
+        },
+        |line| {
+            let _ = writeln!(log, "{line}");
+        },
+    );
+
+    let outcome = match result {
+        Ok(o) => o,
+        Err(e) => {
+            job.stage = JobStage::Failed;
+            job.error = Some(e.to_string());
+            job.save(&job_dir)?;
+            eprintln!();
+            eprintln!("Dump failed: {e}");
+            eprintln!("Partial output left in {} for inspection.", raw_dir.display());
+            eprintln!("Log: {}", log_path.display());
+            eprintln!("Nothing was deleted.");
+            return Err(e.into());
+        }
+    };
+    println!("\r  done{:<50}", "");
+
+    // --- Integrity gates -------------------------------------------------------
+    // redumper exits successfully even when sectors failed to read, so a clean exit is
+    // not sufficient evidence of an archival dump.
+    let mut problems: Vec<String> = Vec::new();
+
+    match &outcome.state {
+        Some(s) if !s.is_complete() => {
+            problems.push(format!(
+                "{} unreadable sector(s) in {} run(s); first at LBA {}",
+                s.bad_sectors(),
+                s.bad_runs.len(),
+                s.bad_runs.first().map(|r| r.0).unwrap_or(0)
+            ));
+        }
+        Some(_) => {}
+        None => problems.push("no .state file; cannot verify every sector was read".into()),
+    }
+    if let Err(e) = dumo_backends::redumper::verify_image_size(&outcome) {
+        problems.push(e);
+    }
+
+    for w in &outcome.warnings {
+        println!("  note: {w}");
+    }
+
+    // Corrections are recovered errors, not damage. Report them so a flaky disc is
+    // visible, but never fail the dump on them.
+    if outcome.corrections_scsi > 0 || outcome.corrections_edc > 0 {
+        println!(
+            "  note: redumper corrected {} SCSI and {} EDC read error(s) by re-reading; \
+             all sectors were ultimately recovered",
+            outcome.corrections_scsi, outcome.corrections_edc
+        );
+    }
+    if let Some(s) = &outcome.state {
+        println!(
+            "  {} of {} sectors read successfully",
+            s.total_sectors - s.bad_sectors(),
+            s.total_sectors
+        );
+    }
+    let m = &outcome.metadata;
+    if m.serial.is_some() || m.region.is_some() {
+        println!(
+            "  disc metadata: serial {}, region {}, version {}",
+            m.serial.as_deref().unwrap_or("?"),
+            m.region.as_deref().unwrap_or("?"),
+            m.version.as_deref().unwrap_or("?")
+        );
+    }
+
+    // --- Hash every produced file ---
+    println!();
+    println!("Hashing artifacts ...");
+    let mut artifacts = Vec::new();
+    for path in &outcome.files {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        print!("  {name} ... ");
+        let _ = std::io::stdout().flush();
+        let (sha256, bytes) =
+            hash::sha256_file(path).with_context(|| format!("hashing {}", path.display()))?;
+        println!("{}  {}", human_size(bytes), &sha256[..16]);
+        artifacts.push(Artifact {
+            relative_path: relative_to(path, &job_dir),
+            bytes,
+            sha256,
+            hashed_at: unix_now(),
+        });
+    }
+    job.artifacts = artifacts;
+
+    if !outcome.hashes.is_empty() {
+        println!();
+        println!("Redump-comparable hashes:");
+        for h in &outcome.hashes {
+            println!("  {}", h.name);
+            println!("    size  {}", h.size);
+            println!("    crc32 {}", h.crc32);
+            println!("    md5   {}", h.md5);
+            println!("    sha1  {}", h.sha1);
+        }
+    }
+
+    if problems.is_empty() {
+        job.stage = JobStage::Ripped;
+        job.save(&job_dir)?;
+        println!();
+        println!(
+            "Dumped {} file(s), {} in {}.",
+            job.artifacts.len(),
+            human_size(job.total_artifact_bytes()),
+            fmt_elapsed(started.elapsed())
+        );
+        println!("Dump is clean: every sector read successfully and the image length");
+        println!("matches the medium exactly.");
+    } else {
+        // Keep everything, but do not let an unclean dump pass as verified.
+        job.stage = JobStage::Failed;
+        job.error = Some(problems.join("; "));
+        job.save(&job_dir)?;
+        println!();
+        println!("Dump completed but did NOT pass integrity checks:");
+        for p in &problems {
+            println!("  - {p}");
+        }
+        println!();
+        println!("The image is kept at {} for inspection, and the job is", raw_dir.display());
+        println!("marked failed so nothing downstream treats it as archival.");
+        println!("Consider cleaning the disc and re-running, or 'redumper refine' to retry sectors.");
+    }
+
+    println!();
+    println!("Job:      {}", job_dir.display());
+    println!("Manifest: {}", job_dir.join(job::MANIFEST_NAME).display());
+    println!("Log:      {}", log_path.display());
+    println!("The disc has not been modified and nothing has been deleted.");
+
+    if problems.is_empty() {
+        println!();
+        println!("Next: identification against Redump datfiles (stage 3) is not implemented yet.");
+    }
+    Ok(())
+}
+
+/// Shared pre-flight space check.
+fn preflight_space(cfg: &Config, required_content: u64, assume_yes: bool) -> Result<()> {
+    match config::filesystem_free_bytes(&cfg.staging.root) {
+        Some((free, _)) => {
+            let headroom = cfg.staging.min_free_headroom_gb * 1_000_000_000;
+            let required = required_content.saturating_add(headroom);
+            println!(
+                "Free:      {} (need {} incl. {} GB headroom)",
+                human_size(free),
+                human_size(required),
+                cfg.staging.min_free_headroom_gb
+            );
+            if free < required {
+                bail!(
+                    "not enough space: {} free, need {}",
+                    human_size(free),
+                    human_size(required)
+                );
+            }
+            Ok(())
+        }
+        None => {
+            if !assume_yes {
+                bail!(
+                    "cannot determine free space on {}; re-run with --yes to proceed anyway",
+                    cfg.staging.root.display()
+                );
+            }
+            println!("Free:      unknown (proceeding because --yes was given)");
+            Ok(())
+        }
+    }
 }
 
 fn relative_to(path: &Path, base: &Path) -> String {
