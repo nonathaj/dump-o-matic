@@ -52,6 +52,45 @@ fn text(b: &[u8]) -> Option<String> {
     }
 }
 
+/// Parse a 17-byte ISO 9660 date/time field into a readable timestamp.
+///
+/// The layout is 16 ASCII digits (`YYYYMMDDHHMMSSss`, the last pair being hundredths of
+/// a second) followed by a **binary** byte giving the offset from GMT in 15-minute
+/// steps, as a signed value. Rendering that final byte as text is wrong — it produces
+/// stray characters like a trailing `$` for UTC+9 — so it is decoded, not printed.
+fn datetime(b: &[u8]) -> Option<String> {
+    if b.len() < 17 {
+        return None;
+    }
+    let digits = &b[..16];
+    if !digits.iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let f = |r: std::ops::Range<usize>| String::from_utf8_lossy(&digits[r]).to_string();
+    let (y, mo, d) = (f(0..4), f(4..6), f(6..8));
+    let (h, mi, s) = (f(8..10), f(10..12), f(12..14));
+
+    // An all-zero field means "not recorded".
+    if y == "0000" {
+        return None;
+    }
+
+    let offset_quarters = b[16] as i8;
+    let tz = if offset_quarters == 0 {
+        "Z".to_string()
+    } else {
+        let total_min = i32::from(offset_quarters) * 15;
+        format!(
+            "{}{:02}:{:02}",
+            if total_min < 0 { '-' } else { '+' },
+            total_min.abs() / 60,
+            total_min.abs() % 60
+        )
+    };
+
+    Some(format!("{y}-{mo}-{d} {h}:{mi}:{s} {tz}"))
+}
+
 fn read_sector<R: Read + Seek>(r: &mut R, lba: u64) -> std::io::Result<[u8; SECTOR_SIZE as usize]> {
     let mut buf = [0u8; SECTOR_SIZE as usize];
     r.seek(SeekFrom::Start(lba * SECTOR_SIZE))?;
@@ -97,7 +136,7 @@ pub fn read_volume<R: Read + Seek>(r: &mut R) -> std::io::Result<Option<Volume>>
                     volume_set_id: text(&buf[190..318]),
                     publisher_id: text(&buf[318..446]),
                     application_id: text(&buf[574..702]),
-                    created: text(&buf[813..830]),
+                    created: datetime(&buf[813..830]),
                     volume_space_size: Some(le_u32(&buf, 80)),
                     logical_block_size: Some(le_u16(&buf, 128)),
                 };
@@ -258,6 +297,42 @@ mod tests {
         assert_eq!(names, vec!["VIDEO_TS", "SYSTEM.CNF"]);
         assert!(entries[0].is_dir);
         assert!(!entries[1].is_dir);
+    }
+
+    /// Real field from the PS2 disc SLUS-20578, whose GMT-offset byte is 0x24 (UTC+9).
+    /// Printed as text this leaks a trailing '$'.
+    #[test]
+    fn parses_iso_datetime_with_binary_gmt_offset() {
+        let mut field = b"2002091717152800".to_vec();
+        field.push(0x24);
+        assert_eq!(
+            datetime(&field).as_deref(),
+            Some("2002-09-17 17:15:28 +09:00")
+        );
+    }
+
+    #[test]
+    fn datetime_handles_utc_and_negative_offsets() {
+        let mut utc = b"2010102014565000".to_vec();
+        utc.push(0);
+        assert_eq!(datetime(&utc).as_deref(), Some("2010-10-20 14:56:50 Z"));
+
+        let mut west = b"2010102014565000".to_vec();
+        west.push((-20i8) as u8); // -5 hours
+        assert_eq!(datetime(&west).as_deref(), Some("2010-10-20 14:56:50 -05:00"));
+    }
+
+    #[test]
+    fn datetime_rejects_unset_and_malformed_fields() {
+        let mut zeroed = b"0000000000000000".to_vec();
+        zeroed.push(0);
+        assert_eq!(datetime(&zeroed), None);
+
+        let mut junk = b"not-a-timestamp!".to_vec();
+        junk.push(0);
+        assert_eq!(datetime(&junk), None);
+
+        assert_eq!(datetime(b"short"), None);
     }
 
     #[test]
