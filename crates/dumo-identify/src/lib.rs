@@ -5,6 +5,7 @@
 //! [`dumo_core::Confidence::Exact`] — the sole confidence level eligible for unattended
 //! acceptance.
 
+pub mod cue;
 pub mod datfile;
 pub mod discset;
 pub mod http;

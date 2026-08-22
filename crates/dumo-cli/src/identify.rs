@@ -98,6 +98,24 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
     Ok(())
 }
 
+/// Where the bytes of a file we are about to file come from.
+enum Source {
+    /// An artifact sitting in the job directory, to be moved into place.
+    Artifact { path: PathBuf, relative: String },
+    /// Content rebuilt into Redump's canonical form rather than copied — a cue sheet,
+    /// which names its track files and so cannot survive the rename unchanged. These
+    /// bytes are only ever used after their digests have been checked against the
+    /// datfile, so a reconstruction we got wrong is refused, not written.
+    Reconstructed(Vec<u8>),
+}
+
+/// A file that has been identified and can be filed under its archival name.
+struct Applicable {
+    source: Source,
+    sha256: String,
+    m: dumo_identify::datfile::DatMatch,
+}
+
 fn identify_job(
     job_dir: &std::path::Path,
     set: &DatfileSet,
@@ -140,7 +158,7 @@ fn identify_job(
     }
 
     // Collected so a multi-file set is only applied once every file is accounted for.
-    let mut applicable: Vec<(PathBuf, String, dumo_identify::datfile::DatMatch)> = Vec::new();
+    let mut applicable: Vec<Applicable> = Vec::new();
 
     for a in candidates {
         let path = job_dir.join(&a.relative_path);
@@ -188,8 +206,8 @@ fn identify_job(
 
                 if !m.is_complete_set() {
                     println!(
-                        "      NOTE: this title has {} files in the datfile; only this one\n            \
-                         is verified so far, so the set is incomplete.",
+                        "      set:        {} files in the datfile; the rest are resolved below,\n                  \
+                         and none are filed until every one is verified.",
                         m.game.roms.len()
                     );
                     for r in &m.game.roms {
@@ -201,7 +219,14 @@ fn identify_job(
                 match es_de_slug(&m.platform) {
                     Some(slug) => {
                         println!("      proposed:   {slug}/{}", m.rom.name);
-                        applicable.push((path.clone(), a.sha256.clone(), m));
+                        applicable.push(Applicable {
+                            source: Source::Artifact {
+                                path: path.clone(),
+                                relative: a.relative_path.clone(),
+                            },
+                            sha256: a.sha256.clone(),
+                            m,
+                        });
                     }
                     None => {
                         println!(
@@ -213,6 +238,12 @@ fn identify_job(
                         );
                     }
                 }
+            }
+            // A cue sheet naming redumper's file names cannot match a datfile that
+            // names Redump's; that is expected, and reconstruct_cues handles it below.
+            None if a.relative_path.to_ascii_lowercase().ends_with(".cue") => {
+                println!("    no direct match — cue sheets name their track files, so");
+                println!("      this one is rebuilt from the identified tracks instead.");
             }
             None => {
                 println!("    NO MATCH in any loaded datfile.");
@@ -226,6 +257,8 @@ fn identify_job(
         }
     }
 
+    reconstruct_cues(&job, job_dir, &mut applicable);
+
     if apply {
         apply_matches(&mut job, job_dir, cfg, &applicable)?;
     } else if !applicable.is_empty() {
@@ -233,6 +266,93 @@ fn identify_job(
     }
 
     Ok(())
+}
+
+/// Rebuild cue sheets into Redump's canonical form, completing CD sets.
+///
+/// A CD dump's `.cue` is generated text that names its track files. redumper names them
+/// after the image and writes LF endings; Redump names them after the game and writes
+/// CRLF. So a bit-perfect CD dump arrives with a cue matching no datfile entry, and
+/// without this step every CD title would stay permanently "incomplete" and unfilable —
+/// the `.bin` alone is never the whole set.
+///
+/// The rebuilt cue is *proposed*, not asserted: it is hashed and compared against the
+/// datfile's own entry for that game. Only a byte-exact match is added, so if the
+/// reconstruction is wrong in any way the set stays incomplete and nothing is filed.
+/// Nothing in the job directory is modified — the archival dump is left as it was read.
+fn reconstruct_cues(job: &Job, job_dir: &std::path::Path, applicable: &mut Vec<Applicable>) {
+    // The cue can only be rebuilt once the track files have archival names to point at.
+    let renames: Vec<(String, String)> = applicable
+        .iter()
+        .filter_map(|i| match &i.source {
+            Source::Artifact { path, .. } => Some((
+                path.file_name()?.to_string_lossy().to_string(),
+                i.m.rom.name.clone(),
+            )),
+            Source::Reconstructed(_) => None,
+        })
+        .collect();
+    if renames.is_empty() {
+        return;
+    }
+
+    // Every matched track must belong to one game before rebuilding anything: a cue
+    // spanning two different titles is a situation we do not understand well enough to
+    // generate a file for.
+    let Some(first) = applicable.first() else {
+        return;
+    };
+    if applicable.iter().any(|i| i.m.game.name != first.m.game.name) {
+        return;
+    }
+    let Some(cue_rom) = first
+        .m
+        .game
+        .roms
+        .iter()
+        .find(|r| r.name.to_ascii_lowercase().ends_with(".cue"))
+    else {
+        return;
+    };
+    if applicable
+        .iter()
+        .any(|i| i.m.rom.name.eq_ignore_ascii_case(&cue_rom.name))
+    {
+        return; // Already accounted for.
+    }
+
+    let Some(src) = job
+        .artifacts
+        .iter()
+        .find(|a| a.relative_path.to_ascii_lowercase().ends_with(".cue"))
+    else {
+        return;
+    };
+    let Ok(raw) = std::fs::read(job_dir.join(&src.relative_path)) else {
+        return;
+    };
+
+    let rebuilt = dumo_identify::cue::retarget(&raw, &renames);
+    let digests = hash::redump_digests_of(&rebuilt);
+
+    println!("  {} — rebuilding as {}", src.relative_path, cue_rom.name);
+    if digests.sha1 != cue_rom.sha1 || digests.size != cue_rom.size {
+        println!("    the rebuilt cue does not match Redump's entry:");
+        println!("      ours:   {} bytes, sha1 {}", digests.size, digests.sha1);
+        println!("      redump: {} bytes, sha1 {}", cue_rom.size, cue_rom.sha1);
+        println!("    leaving the set incomplete rather than filing a cue we invented.");
+        return;
+    }
+
+    println!("    matches Redump exactly — the set is now complete.");
+    applicable.push(Applicable {
+        sha256: hash::sha256_of(&rebuilt),
+        source: Source::Reconstructed(rebuilt),
+        m: dumo_identify::datfile::DatMatch {
+            rom: cue_rom.clone(),
+            ..first.m.clone()
+        },
+    });
 }
 
 /// Move exactly-matched files into `ready/<slug>/<canonical name>`.
@@ -245,14 +365,15 @@ fn apply_matches(
     job: &mut Job,
     job_dir: &std::path::Path,
     cfg: &Config,
-    matches: &[(PathBuf, String, dumo_identify::datfile::DatMatch)],
+    matches: &[Applicable],
 ) -> Result<()> {
     if matches.is_empty() {
         return Ok(());
     }
 
     // Guard against filing an incomplete multi-file set as though it were whole.
-    if let Some((_, _, first)) = matches.first() {
+    if let Some(first) = matches.first() {
+        let first = &first.m;
         if !first.is_complete_set() && matches.len() < first.game.roms.len() {
             println!(
                 "  NOT APPLYING: {} needs {} files but only {} are present here.",
@@ -271,7 +392,8 @@ fn apply_matches(
     let mut moved: Vec<dumo_core::ReadyFile> = Vec::new();
     let mut reference: Option<dumo_identify::datfile::DatMatch> = None;
 
-    for (src, sha256, m) in matches {
+    for item in matches {
+        let (sha256, m) = (&item.sha256, &item.m);
         if !m.confidence.is_auto_acceptable() {
             println!("  skipping {} — confidence is not exact", m.rom.name);
             continue;
@@ -284,16 +406,28 @@ fn apply_matches(
         print!("  -> {}/{} ... ", slug, m.rom.name);
         std::io::stdout().flush().ok();
 
-        match dumo_core::fsops::move_verified(src, &dest, Some(sha256)) {
-            Ok(outcome) => {
-                let how = match outcome.method {
-                    dumo_core::fsops::MoveMethod::Rename => "moved",
-                    dumo_core::fsops::MoveMethod::CopyVerified => "copied and verified",
-                };
+        // Both paths end the same way: nothing exists at the destination until its
+        // content has been read back and proven to match.
+        let placed = match &item.source {
+            Source::Artifact { path, .. } => {
+                dumo_core::fsops::move_verified(path, &dest, Some(sha256)).map(|o| {
+                    let how = match o.method {
+                        dumo_core::fsops::MoveMethod::Rename => "moved",
+                        dumo_core::fsops::MoveMethod::CopyVerified => "copied and verified",
+                    };
+                    (how, o.bytes)
+                })
+            }
+            Source::Reconstructed(bytes) => dumo_core::fsops::write_verified(&dest, bytes, sha256)
+                .map(|_| ("written and verified", bytes.len() as u64)),
+        };
+
+        match placed {
+            Ok((how, bytes)) => {
                 println!("{how}");
                 moved.push(dumo_core::ReadyFile {
                     path: relative_to_staging(&dest, &cfg.staging.root),
-                    bytes: outcome.bytes,
+                    bytes,
                     sha256: sha256.clone(),
                 });
                 reference = Some(m.clone());
@@ -314,11 +448,10 @@ fn apply_matches(
     // and are tracked there, so the manifest keeps describing reality.
     let moved_names: Vec<String> = matches
         .iter()
-        .map(|(p, _, _)| {
-            p.strip_prefix(job_dir)
-                .unwrap_or(p)
-                .to_string_lossy()
-                .to_string()
+        .filter_map(|i| match &i.source {
+            Source::Artifact { relative, .. } => Some(relative.clone()),
+            // Reconstructed content was never an artifact, so there is nothing to drop.
+            Source::Reconstructed(_) => None,
         })
         .collect();
     job.artifacts

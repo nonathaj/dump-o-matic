@@ -101,6 +101,37 @@ impl Crc32 {
     }
 }
 
+/// Compute CRC-32, MD5, and SHA-1 over bytes already in memory.
+///
+/// For content that is generated rather than read — a reconstructed cue sheet — where
+/// the digests are needed to check the result against a datfile before it is written
+/// anywhere.
+pub fn redump_digests_of(data: &[u8]) -> RedumpDigests {
+    use md5::Md5;
+    use sha1::Sha1;
+
+    let mut crc = Crc32::new();
+    let mut md5 = Md5::new();
+    let mut sha1 = Sha1::new();
+    crc.update(data);
+    md5.update(data);
+    sha1.update(data);
+
+    RedumpDigests {
+        size: data.len() as u64,
+        crc32: format!("{:08x}", crc.finish()),
+        md5: hex(&md5.finalize()),
+        sha1: hex(&sha1.finalize()),
+    }
+}
+
+/// SHA-256 of bytes already in memory.
+pub fn sha256_of(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    hex(&h.finalize())
+}
+
 /// Compute CRC-32, MD5, and SHA-1 for a file in one pass.
 pub fn redump_digests(path: &Path) -> std::io::Result<RedumpDigests> {
     redump_digests_with_progress(path, |_| {})

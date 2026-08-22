@@ -9,7 +9,7 @@
 //! - The disc is never modified, and nothing outside the staging root is touched.
 
 use anyhow::{bail, Context, Result};
-use dumo_backends::makemkv;
+use dumo_backends::{makemkv, redumper};
 use dumo_core::config::{self, Config};
 use dumo_core::job::{self, Artifact, Job, JobStage};
 use dumo_core::{hash, MediaKind};
@@ -440,19 +440,36 @@ fn rip_game(
     // not sufficient evidence of an archival dump.
     let mut problems: Vec<String> = Vec::new();
 
+    // What the image *should* measure. The shape (one .iso versus tiled .bin tracks)
+    // follows from what redumper produced; the expected length comes from the TOC this
+    // tool read off the drive itself, so the two are independent of each other.
+    let expected_geometry = if outcome
+        .files
+        .iter()
+        .any(|p| p.extension().map(|e| e == "cue").unwrap_or(false))
+    {
+        redumper::ExpectedGeometry::CdTracks {
+            leadout_lba: probe.toc.as_ref().map(|t| u64::from(t.leadout_lba)).unwrap_or(0),
+        }
+    } else {
+        redumper::ExpectedGeometry::Iso
+    };
+
     match &outcome.state {
         Some(s) if !s.is_complete() => {
+            let runs = s.interior_runs();
             problems.push(format!(
-                "{} unreadable sector(s) in {} run(s); first at LBA {}",
-                s.bad_sectors(),
-                s.bad_runs.len(),
-                s.bad_runs.first().map(|r| r.0).unwrap_or(0)
+                "{} unreadable {}(s) inside the data, in {} run(s); first at {}",
+                s.interior_bad(),
+                s.unit_noun(),
+                runs.len(),
+                runs.first().map(|r| r.0).unwrap_or(0)
             ));
         }
         Some(_) => {}
         None => problems.push("no .state file; cannot verify every sector was read".into()),
     }
-    if let Err(e) = dumo_backends::redumper::verify_image_size(&outcome) {
+    if let Err(e) = redumper::verify_image_size(&outcome, expected_geometry) {
         problems.push(e);
     }
 
@@ -471,10 +488,21 @@ fn rip_game(
     }
     if let Some(s) = &outcome.state {
         println!(
-            "  {} of {} sectors read successfully",
+            "  {} of {} {}s read successfully",
             s.total_sectors - s.bad_sectors(),
-            s.total_sectors
+            s.total_sectors,
+            s.unit_noun()
         );
+        // On a CD the lead-in and lead-out sit outside the emitted tracks and are often
+        // unreachable. Say so plainly, so a clean dump does not look alarming.
+        if s.edge_bad() > 0 && s.interior_bad() == 0 {
+            println!(
+                "  {} unread {}(s) are all in the lead-in/lead-out, outside the tracks; \
+                 the track data is complete",
+                s.edge_bad(),
+                s.unit_noun()
+            );
+        }
     }
     // Record how the drive was configured: on raw CD reads the dump's correctness
     // depends on it entirely.

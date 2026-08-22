@@ -48,13 +48,33 @@ pub const STATE_ERROR_C2: u8 = 1;
 /// Lowest state value that still means "this sector was read successfully".
 pub const STATE_FIRST_SUCCESS: u8 = 2;
 
-/// Summary of the `.state` file: the authoritative record of which sectors are good.
+/// What a single byte of a `.state` file describes.
+///
+/// This is not cosmetic: it changes what "complete" means. Getting it wrong made an
+/// otherwise flawless CD dump fail its integrity gate, because 26 million lead-in
+/// *samples* were counted as unreadable *sectors*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StateUnit {
+    /// DVD/BD: one byte per 2048-byte sector, covering exactly the emitted image.
+    /// Every byte must be a success — there is no region here that is not the image.
+    #[default]
+    Sector,
+    /// CD: one byte per 4-byte sample of the raw scrambled stream, covering the lead-in,
+    /// pre-gap, track data *and* lead-out. The disc's outer regions are routinely
+    /// unreachable on drives redumper does not have calibration data for, and they are
+    /// not part of a Redump-conformant dump, so only the interior must be clean.
+    Sample,
+}
+
+/// Summary of the `.state` file: the authoritative record of which units are good.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StateSummary {
+    pub unit: StateUnit,
+    /// Number of units the file covers (bytes in the file).
     pub total_sectors: u64,
     pub error_skip: u64,
     pub error_c2: u64,
-    /// Contiguous runs of unreadable sectors, as inclusive `(first, last)` LBAs.
+    /// Contiguous runs of unreadable units, as inclusive `(first, last)` indices.
     pub bad_runs: Vec<(u64, u64)>,
 }
 
@@ -63,15 +83,69 @@ impl StateSummary {
         self.error_skip + self.error_c2
     }
 
+    /// Runs that touch the start or end of the covered range.
+    ///
+    /// On a CD these are the lead-in and lead-out: regions outside the emitted tracks
+    /// that many drives simply cannot reach. Worth reporting, never a reason to reject
+    /// an image whose tracks are intact.
+    pub fn edge_runs(&self) -> Vec<(u64, u64)> {
+        let last = self.total_sectors.saturating_sub(1);
+        self.bad_runs
+            .iter()
+            .copied()
+            .filter(|&(a, b)| a == 0 || b == last)
+            .collect()
+    }
+
+    /// Runs strictly inside the covered range — damage within the data itself.
+    pub fn interior_runs(&self) -> Vec<(u64, u64)> {
+        let last = self.total_sectors.saturating_sub(1);
+        self.bad_runs
+            .iter()
+            .copied()
+            .filter(|&(a, b)| a != 0 && b != last)
+            .collect()
+    }
+
+    fn run_len((a, b): (u64, u64)) -> u64 {
+        b - a + 1
+    }
+
+    /// Unreadable units that fall inside the data, excluding the unreachable edges.
+    pub fn interior_bad(&self) -> u64 {
+        self.interior_runs().into_iter().map(Self::run_len).sum()
+    }
+
+    /// Unreadable units in the lead-in/lead-out.
+    pub fn edge_bad(&self) -> u64 {
+        self.edge_runs().into_iter().map(Self::run_len).sum()
+    }
+
+    /// Word for one unit, for messages that would otherwise say "sector" about samples.
+    pub fn unit_noun(&self) -> &'static str {
+        match self.unit {
+            StateUnit::Sector => "sector",
+            StateUnit::Sample => "sample",
+        }
+    }
+
+    /// Whether the dump is archival, judged by the rules that apply to this unit.
     pub fn is_complete(&self) -> bool {
-        self.bad_sectors() == 0
+        match self.unit {
+            StateUnit::Sector => self.bad_sectors() == 0,
+            StateUnit::Sample => self.interior_bad() == 0,
+        }
     }
 }
 
 /// Read and summarise a `.state` file.
-pub fn analyze_state_file(path: &Path) -> std::io::Result<StateSummary> {
+///
+/// `unit` must come from [`detect_state_unit`] rather than a guess: the file is an
+/// undifferentiated byte array and carries no indication of its own scale.
+pub fn analyze_state_file_as(path: &Path, unit: StateUnit) -> std::io::Result<StateSummary> {
     let data = std::fs::read(path)?;
     let mut s = StateSummary {
+        unit,
         total_sectors: data.len() as u64,
         ..Default::default()
     };
@@ -98,6 +172,38 @@ pub fn analyze_state_file(path: &Path) -> std::io::Result<StateSummary> {
         s.bad_runs.push((start, s.total_sectors.saturating_sub(1)));
     }
     Ok(s)
+}
+
+/// Summarise a `.state` file, treating each byte as a sector.
+///
+/// Correct for DVD/BD only. Prefer [`analyze_state_file_as`] with a unit from
+/// [`detect_state_unit`].
+pub fn analyze_state_file(path: &Path) -> std::io::Result<StateSummary> {
+    analyze_state_file_as(path, StateUnit::Sector)
+}
+
+/// Bytes of raw scrambled CD data described by one `.state` byte.
+pub const SAMPLES_PER_STATE_BYTE: u64 = 4;
+
+/// Work out what one `.state` byte means for this dump, by measurement.
+///
+/// A raw CD dump writes a `.scram` sidecar holding the whole scrambled stream, and the
+/// `.state` file runs alongside it at one byte per 4-byte sample. That relationship is
+/// checkable, so it is checked rather than inferred from the media type: if the sizes do
+/// not line up exactly, the assumption does not hold and we fall back to per-sector,
+/// which is the stricter reading.
+pub fn detect_state_unit(state: &Path, scram: Option<&Path>) -> StateUnit {
+    let (Some(scram), Ok(st)) = (scram, std::fs::metadata(state)) else {
+        return StateUnit::Sector;
+    };
+    let Ok(sc) = std::fs::metadata(scram) else {
+        return StateUnit::Sector;
+    };
+    if st.len() > 0 && sc.len() == st.len() * SAMPLES_PER_STATE_BYTE {
+        StateUnit::Sample
+    } else {
+        StateUnit::Sector
+    }
 }
 
 /// Drive parameters redumper used for this dump.
@@ -480,7 +586,13 @@ pub fn dump(
         .find(|p| p.extension().map(|e| e == "state").unwrap_or(false))
         .cloned()
     {
-        match analyze_state_file(&state_path) {
+        let scram = outcome
+            .files
+            .iter()
+            .find(|p| p.extension().map(|e| e == "scram").unwrap_or(false))
+            .cloned();
+        let unit = detect_state_unit(&state_path, scram.as_deref());
+        match analyze_state_file_as(&state_path, unit) {
             Ok(s) => outcome.state = Some(s),
             Err(e) => outcome
                 .warnings
@@ -491,18 +603,55 @@ pub fn dump(
     Ok(outcome)
 }
 
-/// Verify the dumped image is the size the drive said it should be.
+/// Bytes per sector in a raw CD track image.
+pub const CD_RAW_SECTOR_BYTES: u64 = 2352;
+
+/// What the emitted image should measure, according to a source other than the image.
 ///
-/// A truncated image that otherwise looks fine is the failure mode worth catching here:
-/// it would hash cleanly and pass every later check while missing data.
-pub fn verify_image_size(outcome: &DumpOutcome) -> std::result::Result<(), String> {
-    let Some(sectors) = outcome.sectors else {
+/// A truncated image that otherwise looks fine is the failure mode worth catching: it
+/// hashes cleanly and passes every later check while missing data. Catching it needs an
+/// expected length from somewhere independent of the file itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpectedGeometry {
+    /// DVD/BD: one `.iso` of `sectors * 2048` bytes, per the drive's READ CAPACITY.
+    Iso,
+    /// CD: `.bin` tracks that tile the disc from LBA 0 to the lead-out, so their sizes
+    /// sum to `leadout_lba * 2352`. The lead-out comes from the TOC we read ourselves,
+    /// which makes this a genuine cross-check of redumper's output rather than a
+    /// restatement of it.
+    CdTracks { leadout_lba: u64 },
+}
+
+/// Verify the dumped image is the size an independent source says it should be.
+pub fn verify_image_size(
+    outcome: &DumpOutcome,
+    expected: ExpectedGeometry,
+) -> std::result::Result<(), String> {
+    verify_files_size(&outcome.files, outcome.sectors, expected)
+}
+
+/// As [`verify_image_size`], but over a bare file list.
+///
+/// Lets the standalone verifier re-run exactly the gate the rip ran, months later, from
+/// the manifest alone — the gate is only worth anything if it is the same gate.
+pub fn verify_files_size(
+    files: &[PathBuf],
+    sectors: Option<u64>,
+    expected: ExpectedGeometry,
+) -> std::result::Result<(), String> {
+    match expected {
+        ExpectedGeometry::Iso => verify_iso_size(files, sectors),
+        ExpectedGeometry::CdTracks { leadout_lba } => verify_cd_tracks(files, leadout_lba),
+    }
+}
+
+fn verify_iso_size(files: &[PathBuf], sectors: Option<u64>) -> std::result::Result<(), String> {
+    let Some(sectors) = sectors else {
         return Err("drive did not report a sector count; cannot verify image length".into());
     };
     let expected = sectors * 2048;
 
-    let Some(iso) = outcome
-        .files
+    let Some(iso) = files
         .iter()
         .find(|p| p.extension().map(|e| e == "iso").unwrap_or(false))
     else {
@@ -514,6 +663,42 @@ pub fn verify_image_size(outcome: &DumpOutcome) -> std::result::Result<(), Strin
         return Err(format!(
             "{} is {actual} bytes but the drive reported {sectors} sectors ({expected} bytes)",
             iso.display()
+        ));
+    }
+    Ok(())
+}
+
+fn verify_cd_tracks(files: &[PathBuf], leadout_lba: u64) -> std::result::Result<(), String> {
+    if leadout_lba == 0 {
+        return Err("no TOC lead-out was read; cannot verify track lengths".into());
+    }
+    let bins: Vec<&PathBuf> = files
+        .iter()
+        .filter(|p| p.extension().map(|e| e == "bin").unwrap_or(false))
+        .collect();
+    if bins.is_empty() {
+        return Err("no .bin track produced".into());
+    }
+
+    let mut total = 0u64;
+    for b in &bins {
+        let len = std::fs::metadata(b).map(|m| m.len()).unwrap_or(0);
+        if len % CD_RAW_SECTOR_BYTES != 0 {
+            return Err(format!(
+                "{} is {len} bytes, not a whole number of {CD_RAW_SECTOR_BYTES}-byte sectors",
+                b.display()
+            ));
+        }
+        total += len;
+    }
+
+    let expected = leadout_lba * CD_RAW_SECTOR_BYTES;
+    if total != expected {
+        return Err(format!(
+            "{} track(s) total {total} bytes ({} sectors) but the TOC puts the lead-out at \
+             LBA {leadout_lba} ({expected} bytes)",
+            bins.len(),
+            total / CD_RAW_SECTOR_BYTES
         ));
     }
     Ok(())
@@ -593,6 +778,7 @@ mod tests {
             corrections_scsi: 96,
             corrections_edc: 0,
             state: Some(StateSummary {
+                unit: StateUnit::Sector,
                 total_sectors: 2_009_888,
                 error_skip: 0,
                 error_c2: 0,
@@ -607,6 +793,7 @@ mod tests {
     fn unreadable_sectors_make_a_dump_unclean() {
         let o = DumpOutcome {
             state: Some(StateSummary {
+                unit: StateUnit::Sector,
                 total_sectors: 1000,
                 error_skip: 3,
                 error_c2: 0,
@@ -696,7 +883,85 @@ mod tests {
     #[test]
     fn size_verification_requires_a_sector_count() {
         let o = DumpOutcome::default();
-        assert!(verify_image_size(&o).is_err());
+        assert!(verify_image_size(&o, ExpectedGeometry::Iso).is_err());
+    }
+
+    #[test]
+    fn cd_size_verification_requires_a_leadout() {
+        let o = DumpOutcome::default();
+        assert!(verify_image_size(&o, ExpectedGeometry::CdTracks { leadout_lba: 0 }).is_err());
+    }
+
+    /// A CD `.state` byte is a 4-byte sample, not a sector, and the file covers the
+    /// lead-in and lead-out as well as the tracks.
+    ///
+    /// Regression test for a real false negative: a flawless PS2 CD dump — redumper
+    /// reported `SCSI: 0, C2: 0` and `REDUMP.INFO errors: 0`, and every sector of the
+    /// emitted .bin was intact — was rejected as having "26547533 unreadable sectors at
+    /// LBA 0". Those were the lead-in samples, which this drive cannot reach and which
+    /// are not part of a Redump-conformant dump.
+    #[test]
+    fn cd_lead_in_gap_does_not_make_a_dump_unclean() {
+        // The real shape: one contiguous bad run at the start, nothing after it.
+        let lead_in = 26_547_533u64;
+        let track = 98_584_080u64;
+        let s = StateSummary {
+            unit: StateUnit::Sample,
+            total_sectors: lead_in + track,
+            error_skip: lead_in,
+            error_c2: 0,
+            bad_runs: vec![(0, lead_in - 1)],
+        };
+        assert_eq!(s.edge_bad(), lead_in);
+        assert_eq!(s.interior_bad(), 0);
+        assert!(s.is_complete(), "unreachable lead-in is not damage");
+
+        // Read as sectors — the old behaviour — the very same file is a failure.
+        let as_sectors = StateSummary {
+            unit: StateUnit::Sector,
+            ..s
+        };
+        assert!(!as_sectors.is_complete());
+    }
+
+    /// Edge tolerance must not become a licence to lose track data.
+    #[test]
+    fn cd_interior_gap_still_makes_a_dump_unclean() {
+        let s = StateSummary {
+            unit: StateUnit::Sample,
+            total_sectors: 1000,
+            error_skip: 110,
+            error_c2: 0,
+            bad_runs: vec![(0, 99), (500, 509)],
+        };
+        assert_eq!(s.edge_bad(), 100);
+        assert_eq!(s.interior_bad(), 10);
+        assert!(!s.is_complete());
+    }
+
+    /// The sample/sector distinction is measured against the .scram sidecar, never
+    /// guessed: the .state file is an undifferentiated byte array either way.
+    #[test]
+    fn state_unit_is_detected_from_the_scram_sidecar() {
+        let dir = std::env::temp_dir().join(format!("dumo-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("g.state");
+        let scram = dir.join("g.scram");
+        std::fs::write(&state, vec![4u8; 100]).unwrap();
+
+        // No scram at all: a DVD dump, one byte per sector.
+        assert_eq!(detect_state_unit(&state, None), StateUnit::Sector);
+
+        // Scram exactly 4x the state file: a raw CD dump.
+        std::fs::write(&scram, vec![0u8; 400]).unwrap();
+        assert_eq!(detect_state_unit(&state, Some(&scram)), StateUnit::Sample);
+
+        // Sizes that do not line up mean the assumption does not hold; fall back to the
+        // stricter reading rather than tolerating gaps we cannot account for.
+        std::fs::write(&scram, vec![0u8; 399]).unwrap();
+        assert_eq!(detect_state_unit(&state, Some(&scram)), StateUnit::Sector);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
