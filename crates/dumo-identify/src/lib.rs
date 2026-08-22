@@ -6,7 +6,10 @@
 //! acceptance.
 
 pub mod datfile;
+pub mod http;
+pub mod matching;
 pub mod platform;
+pub mod tmdb;
 pub mod video;
 
 pub use datfile::{Datfile, DatfileSet, Game, Rom};

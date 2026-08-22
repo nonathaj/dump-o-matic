@@ -78,6 +78,9 @@ enum Command {
         /// Move exactly-matched files into ready/ under their canonical names.
         #[arg(long)]
         apply: bool,
+        /// Search term for a video disc, overriding the guess from the volume label.
+        #[arg(long)]
+        show: Option<String>,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -154,10 +157,11 @@ fn main() -> Result<()> {
             assume_yes: yes,
             config_file: config,
         }),
-        Command::Identify { job, apply, config } => identify::run(identify::IdentifyArgs {
+        Command::Identify { job, apply, show, config } => identify::run(identify::IdentifyArgs {
             job,
             config_file: config,
             apply,
+            show,
         }),
         Command::Migrate { job, destination, dry_run, yes, config } => {
             migrate::run(migrate::MigrateArgs {

@@ -18,6 +18,8 @@ pub struct IdentifyArgs {
     pub config_file: Option<PathBuf>,
     /// Move exactly-matched files into `ready/` under their canonical names.
     pub apply: bool,
+    /// Search term for a video disc, overriding the guess from the volume label.
+    pub show: Option<String>,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -84,7 +86,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
     }
 
     for dir in dirs {
-        identify_job(&dir, &set, &cfg, args.apply)?;
+        identify_job(&dir, &set, &cfg, args.apply, args.show.as_deref())?;
         println!();
     }
     Ok(())
@@ -95,6 +97,7 @@ fn identify_job(
     set: &DatfileSet,
     cfg: &Config,
     apply: bool,
+    show: Option<&str>,
 ) -> Result<()> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
@@ -108,7 +111,7 @@ fn identify_job(
     // Datfile matching only applies to disc images. Video rips need an entirely
     // different (and fuzzy) identification path, which is not built yet.
     if matches!(kind, MediaKind::DvdVideo | MediaKind::BluRayVideo) {
-        return analyse_video(&job, job_dir);
+        return analyse_video(&job, job_dir, cfg, show.as_deref());
     }
     if !matches!(kind, MediaKind::GameDisc | MediaKind::Data) {
         println!("  {kind} — no identification path for this media type yet.");
@@ -358,8 +361,13 @@ fn file_name(p: &std::path::Path) -> String {
 /// This is offline inference from duration and chapter layout. It deliberately stops
 /// short of naming anything — that needs an online lookup, and it is a fuzzy match that
 /// must always be confirmed.
-fn analyse_video(job: &Job, job_dir: &std::path::Path) -> Result<()> {
-    use dumo_identify::video::{self, AnalysisParams, DiscShape, TitleInput};
+fn analyse_video(
+    job: &Job,
+    job_dir: &std::path::Path,
+    cfg: &Config,
+    show_override: Option<&str>,
+) -> Result<()> {
+    use dumo_identify::video::{self, AnalysisParams, TitleInput};
 
     let media: Vec<_> = job
         .artifacts
@@ -423,20 +431,198 @@ fn analyse_video(job: &Job, job_dir: &std::path::Path) -> Result<()> {
         println!("    - {e}");
     }
 
-    // Say plainly what is still missing rather than implying the job is done.
-    match analysis.shape {
-        DiscShape::Series => {
-            println!("  Next: naming these episodes needs an episode list (TVDB/TMDB) to");
-            println!("        match runtimes and disc order against. Not implemented yet.");
-        }
-        DiscShape::Movie => {
-            println!("  Next: naming this film needs a title lookup (TMDB). Not implemented yet.");
-        }
-        DiscShape::Mixed => {
-            println!("  Next: the disc is ambiguous, so the content type is yours to decide");
-            println!("        before anything can be named or filed.");
-        }
-        _ => {}
+    // --- Online lookup ---
+    let label = job
+        .probe
+        .as_ref()
+        .and_then(|p| p.content.title_guess.clone())
+        .unwrap_or_default();
+    let query = show_override
+        .map(str::to_string)
+        .unwrap_or_else(|| dumo_identify::matching::query_from_label(&label));
+
+    if query.trim().is_empty() {
+        println!("  No search term: pass --show to name this disc's content.");
+        return Ok(());
     }
+
+    let client = match dumo_identify::tmdb::TmdbClient::from_config(&cfg.api) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  Naming unavailable: {e}");
+            return Ok(());
+        }
+    };
+
+    println!();
+    println!("  Searching TMDB for {query:?} ...");
+    let shows = client.search_tv(&query).context("searching TMDB")?;
+    if shows.is_empty() {
+        println!("  No series matched. Try --show \"<title>\".");
+        return Ok(());
+    }
+    let mut titles: Vec<dumo_identify::matching::DiscTitle> = analysis
+        .main_titles()
+        .map(|t| dumo_identify::matching::DiscTitle {
+            name: t.name.trim_start_matches("raw/").to_string(),
+            duration_secs: t.duration_secs,
+        })
+        .collect();
+    if titles.is_empty() {
+        println!("  No main titles to match.");
+        return Ok(());
+    }
+    dumo_identify::matching::sort_by_title_index(&mut titles);
+
+    // Judge candidates by how well their episodes actually fit these runtimes, not by
+    // TMDB's search ranking. Searching "espn 30 for 30" puts a different, similarly
+    // named series first; only the runtimes reveal which one is really on the disc.
+    const MAX_CANDIDATES: usize = 4;
+    let considered: Vec<_> = shows.iter().take(MAX_CANDIDATES).collect();
+    println!(
+        "  Considering {} candidate series by how well episode runtimes fit:",
+        considered.len()
+    );
+
+    let mut evaluated: Vec<(&dumo_identify::tmdb::TvResult, Vec<dumo_identify::matching::SeasonMatch>)> =
+        Vec::new();
+    for c in &considered {
+        let season_numbers = match client.tv_season_numbers(c.id) {
+            Ok(n) => n,
+            Err(e) => {
+                println!("    {} — unavailable: {e}", c.name);
+                continue;
+            }
+        };
+        let mut seasons = Vec::new();
+        for n in season_numbers.iter().filter(|n| **n > 0) {
+            if let Ok(s) = client.season(c.id, *n) {
+                seasons.push(s);
+            }
+        }
+        let results = dumo_identify::matching::match_seasons(&titles, &seasons);
+        match results.first() {
+            Some(b) => {
+                println!(
+                    "    {:<34} {:>5.1} min/episode average difference",
+                    truncate(&format!("{} ({})", c.name,
+                        c.year().map(|y| y.to_string()).unwrap_or("?".into())), 34),
+                    b.mean_delta
+                );
+                evaluated.push((c, results));
+            }
+            None => println!(
+                "    {:<34} no season with {} or more episodes",
+                truncate(&c.name, 34),
+                titles.len()
+            ),
+        }
+    }
+
+    evaluated.sort_by(|a, b| {
+        a.1[0]
+            .mean_delta
+            .partial_cmp(&b.1[0].mean_delta)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let Some((candidate, results)) = evaluated.first() else {
+        println!("  No candidate series could be matched.");
+        return Ok(());
+    };
+    let best = &results[0];
+
+    println!();
+    println!(
+        "  Series: {} ({})  [tmdb:{}]",
+        candidate.name,
+        candidate.year().map(|y| y.to_string()).unwrap_or("?".into()),
+        candidate.id
+    );
+    if let Some((runner, rres)) = evaluated.get(1) {
+        let gap = rres[0].mean_delta - best.mean_delta;
+        println!(
+            "    chosen over {} by {:.1} min/episode",
+            truncate(&runner.name, 40),
+            gap
+        );
+    }
+
+    println!();
+    println!(
+        "  Best match: season {}, episodes {}–{}",
+        best.season,
+        best.first_episode,
+        best.first_episode + best.matches.len() as u32 - 1
+    );
+    for m in &best.matches {
+        println!(
+            "    {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<44} (delta {:.0} min)",
+            m.title_name,
+            m.title_mins,
+            m.episode.season,
+            m.episode.number,
+            truncate(&m.episode.name, 44),
+            m.delta_mins
+        );
+    }
+    println!(
+        "  Confidence: {}  ({})",
+        best.confidence,
+        if best.confidence.is_auto_acceptable() {
+            "eligible for unattended acceptance"
+        } else {
+            "needs confirmation"
+        }
+    );
+    for e in &best.evidence {
+        println!("    - {e}");
+    }
+
+
+    println!();
+    println!("  Proposed names:");
+    let year = candidate
+        .year()
+        .map(|y| format!(" ({y})"))
+        .unwrap_or_default();
+    for m in &best.matches {
+        println!(
+            "    tv/{}{}/Season {:02}/{}{} S{:02}E{:02} - {}.mkv",
+            candidate.name,
+            year,
+            m.episode.season,
+            candidate.name,
+            year,
+            m.episode.season,
+            m.episode.number,
+            sanitise(&m.episode.name)
+        );
+    }
+    println!();
+    println!("  Applying video names is not wired up yet — review the above first.");
     Ok(())
+}
+
+/// Strip characters that are awkward or illegal in filenames.
+fn sanitise(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' => '-',
+            ':' => ' ',
+            '?' | '*' | '"' | '<' | '>' | '|' => ' ',
+            other => other,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
+    }
 }
