@@ -1,9 +1,9 @@
 //! Optical drive identity and state.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Physical state of the drive's tray and media.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrayState {
     /// No disc present.
@@ -32,7 +32,7 @@ impl std::fmt::Display for TrayState {
 ///
 /// Used to warn early when a disc type cannot be read by the selected drive, rather
 /// than failing partway through a rip.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriveCapabilities {
     pub reads_cd: bool,
     pub reads_dvd: bool,
@@ -43,7 +43,7 @@ pub struct DriveCapabilities {
 }
 
 /// An optical drive attached to the system.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Drive {
     /// Device node, e.g. `/dev/sr0`.
     pub path: String,
@@ -71,7 +71,7 @@ impl Drive {
 }
 
 /// A drive plus its current state.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveStatus {
     pub drive: Drive,
     pub tray: TrayState,

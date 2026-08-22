@@ -1,13 +1,13 @@
 //! Disc-level probe results: what is in the drive, described as cheaply as possible.
 
 use crate::Confidence;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// MMC "current profile" — what kind of physical medium this is.
 ///
 /// Reported by the drive itself via GET CONFIGURATION, so it is authoritative about the
 /// medium (unlike filesystem sniffing, which describes only the content).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscProfile {
     CdRom,
@@ -87,7 +87,7 @@ impl std::fmt::Display for DiscProfile {
 }
 
 /// What kind of *content* the disc holds, as distinct from the medium.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaKind {
     /// Red Book audio CD.
@@ -124,7 +124,7 @@ impl std::fmt::Display for MediaKind {
 }
 
 /// One track from a CD table of contents.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AudioTrack {
     pub number: u8,
     /// Absolute start sector (LBA).
@@ -143,7 +143,7 @@ impl AudioTrack {
 }
 
 /// CD table of contents, plus identifiers derived from it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TocInfo {
     pub first_track: u8,
     pub last_track: u8,
@@ -171,7 +171,7 @@ impl TocInfo {
 }
 
 /// ISO 9660 / UDF primary volume descriptor fields.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VolumeInfo {
     pub volume_id: Option<String>,
     pub volume_set_id: Option<String>,
@@ -185,7 +185,7 @@ pub struct VolumeInfo {
 }
 
 /// A console game serial recovered from a disc.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSerial {
     /// e.g. `SLUS-20488`.
     pub serial: String,
@@ -199,7 +199,7 @@ pub struct GameSerial {
 ///
 /// This is Stage 1 output: fast, and explicitly *not* authoritative. Stage 3 does the
 /// real identification against datfiles and metadata services.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentHint {
     pub kind: MediaKind,
     /// Human-readable guess at the title, if one is available cheaply.
@@ -231,7 +231,7 @@ impl ContentHint {
 }
 
 /// The complete result of a Stage 1 fast probe.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscProbe {
     pub device: String,
     pub profile: Option<DiscProfile>,

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dumo-core",
     "crates/dumo-drives",
+    "crates/dumo-backends",
     "crates/dumo-cli",
 ]
 
@@ -17,6 +18,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 dumo-core = { path = "crates/dumo-core" }
 dumo-drives = { path = "crates/dumo-drives" }
+dumo-backends = { path = "crates/dumo-backends" }
 
 # NOTE: versions are pinned to the last releases supporting rust 1.75 (see rust-version
 # above). Newer releases of clap and friends require edition2024. Once the toolchain is
@@ -30,3 +32,4 @@ libc = "0.2"
 sha1 = "0.10"
 base64 = "0.21"
 toml = "0.8"
+sha2 = "0.10"

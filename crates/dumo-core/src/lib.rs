@@ -7,8 +7,11 @@
 pub mod config;
 pub mod disc;
 pub mod drive;
+pub mod hash;
+pub mod job;
 
 pub use config::{Config, ConfigError};
+pub use job::{Artifact, Job, JobStage, TitleInfo};
 
 pub use disc::{
     AudioTrack, ContentHint, DiscProbe, DiscProfile, GameSerial, MediaKind, TocInfo, VolumeInfo,
@@ -21,7 +24,7 @@ pub use drive::{Drive, DriveCapabilities, DriveStatus, TrayState};
 /// is ever eligible for unattended auto-accept; everything else requires confirmation.
 /// A finer-grained numeric score would invite a tunable threshold, which is exactly what
 /// the policy forbids.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     /// No determination could be made.

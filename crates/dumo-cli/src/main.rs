@@ -3,6 +3,8 @@
 //! Currently implements the read-only half of the pipeline: drive discovery and Stage 1
 //! disc probing. No command in this binary writes to a disc or to your filesystem.
 
+mod rip;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dumo_core::config::{self, CheckLevel};
@@ -38,10 +40,40 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rip a disc into the staging area (stage 2).
+    ///
+    /// Writes only inside the configured staging root, never modifies the disc, and
+    /// never deletes anything.
+    Rip {
+        /// Device to rip. Defaults to the first drive found.
+        device: Option<String>,
+        /// Rip only this title index. Default: every title long enough to qualify.
+        #[arg(long)]
+        title: Option<u32>,
+        /// Ignore titles shorter than this many seconds.
+        #[arg(long, default_value_t = 300)]
+        min_length: u32,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Inspect and validate configuration.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
+    },
+    /// List jobs in the staging area.
+    Jobs {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -68,7 +100,68 @@ fn main() -> Result<()> {
         Command::Drives { json } => cmd_drives(json),
         Command::Probe { device, json } => cmd_probe(device, json),
         Command::Config { action } => cmd_config(action),
+        Command::Rip {
+            device,
+            title,
+            min_length,
+            dry_run,
+            yes,
+            config,
+        } => rip::run(rip::RipArgs {
+            device,
+            title,
+            min_length,
+            dry_run,
+            assume_yes: yes,
+            config_file: config,
+        }),
+        Command::Jobs { config, json } => cmd_jobs(config, json),
     }
+}
+
+fn cmd_jobs(config_file: Option<PathBuf>, json: bool) -> Result<()> {
+    let cfg = Config::load(config_file.as_deref())?;
+    let jobs_dir = cfg.staging.jobs_dir();
+
+    let mut jobs = Vec::new();
+    if jobs_dir.is_dir() {
+        let mut dirs: Vec<_> = std::fs::read_dir(&jobs_dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        for d in dirs {
+            match dumo_core::Job::load(&d) {
+                Ok(j) => jobs.push(j),
+                Err(e) => eprintln!("warning: skipping {}: {e}", d.display()),
+            }
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&jobs)?);
+        return Ok(());
+    }
+
+    if jobs.is_empty() {
+        println!("No jobs in {}", jobs_dir.display());
+        return Ok(());
+    }
+
+    for j in &jobs {
+        println!(
+            "{:<40} {:<10} {:>3} file(s)  {}",
+            j.id,
+            j.stage.to_string(),
+            j.artifacts.len(),
+            rip::human_size(j.total_artifact_bytes())
+        );
+        if let Some(e) = &j.error {
+            println!("    error: {e}");
+        }
+    }
+    Ok(())
 }
 
 const EXAMPLE_CONFIG: &str = include_str!("../../../docs/config.example.toml");
