@@ -4,6 +4,7 @@
 //! disc probing. No command in this binary writes to a disc or to your filesystem.
 
 mod identify;
+mod migrate;
 mod rip;
 mod verify;
 
@@ -80,6 +81,22 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Migrate identified content to permanent storage (stage 4).
+    Migrate {
+        /// Job id or a fragment of one. Omit to migrate every eligible job.
+        job: Option<String>,
+        /// Destination name, when more than one is configured.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Re-verify staged artifacts against their manifest hashes.
     Verify {
         /// Job id or a fragment of one. Omit to verify every job.
@@ -142,6 +159,15 @@ fn main() -> Result<()> {
             config_file: config,
             apply,
         }),
+        Command::Migrate { job, destination, dry_run, yes, config } => {
+            migrate::run(migrate::MigrateArgs {
+                job,
+                destination,
+                dry_run,
+                assume_yes: yes,
+                config_file: config,
+            })
+        }
         Command::Verify { job, update, config } => verify::run(verify::VerifyArgs {
             job,
             config_file: config,

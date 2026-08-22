@@ -156,6 +156,8 @@ pub fn copy_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result<S
         // Flush our buffers and ask the filesystem to commit before we read back.
         output.flush()?;
         output.sync_all()?;
+        // Evict what we just wrote, so the verification read has to fetch it again.
+        drop_page_cache(&output);
         Ok(())
     })();
 
@@ -167,15 +169,15 @@ pub fn copy_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result<S
         });
     }
 
-    // Re-read the written file and hash it. Opening a fresh handle after sync_all is
-    // what makes this a real verification rather than a re-hash of our own buffers.
+    // Re-read the written file and hash it. A fresh handle after sync_all and a page
+    // cache eviction is what makes this a genuine verification rather than a re-hash of
+    // our own buffers.
     //
-    // Caveat worth stating plainly: on a network filesystem the kernel may still serve
-    // this read from local cache, which would weaken the guarantee. Verifying that a
-    // re-read genuinely round-trips to the server is tracked separately and must be
-    // settled before this path is trusted for network destinations.
-    let actual = match hash::sha256_file(&tmp) {
-        Ok((h, _)) => h,
+    // Caveat, stated plainly: POSIX_FADV_DONTNEED is advisory, and a network filesystem
+    // may still satisfy the read locally. This is a strong check, not an absolute proof
+    // of server-side durability.
+    let actual = match hash_evicting(&tmp) {
+        Ok(h) => h,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             return Err(FsError::Io { path: tmp, source: e });
@@ -193,6 +195,34 @@ pub fn copy_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result<S
 
     std::fs::rename(&tmp, dest).map_err(io_err(dest))?;
     Ok(actual)
+}
+
+/// Hash a file after evicting it from the page cache, so the read reaches storage.
+pub fn hash_evicting(path: &Path) -> std::io::Result<String> {
+    {
+        // Evict before reading, in case anything cached it since it was written.
+        let f = std::fs::File::open(path)?;
+        drop_page_cache(&f);
+    }
+    let (h, _) = hash::sha256_file(path)?;
+    Ok(h)
+}
+
+/// Ask the kernel to drop this file's pages from the page cache.
+///
+/// This is what turns the post-copy re-read into a real verification. Without it, the
+/// read after a write is very likely served from local RAM — so we would be hashing our
+/// own buffers and proving nothing about what reached the disk or the server. That
+/// matters most on network filesystems, where "the write succeeded" is the weakest.
+///
+/// `POSIX_FADV_DONTNEED` needs no privileges. It is advisory: the kernel may decline, so
+/// this strengthens the check without being something to rely on absolutely.
+fn drop_page_cache(file: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    unsafe {
+        // offset 0, len 0 means "the whole file".
+        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED);
+    }
 }
 
 /// A temporary path beside `dest`, so the rename into place stays within one directory.
