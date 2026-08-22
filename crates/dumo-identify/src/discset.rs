@@ -385,3 +385,226 @@ mod tests {
         assert!(!s.confidence.is_auto_acceptable());
     }
 }
+
+// --- Deciding what actually constitutes a set -------------------------------------
+
+/// A group of discs believed to belong together, with the reasoning and any doubts.
+#[derive(Debug, Clone)]
+pub struct SetGroup {
+    /// Normalised series name the grouping was based on.
+    pub series_key: String,
+    pub discs: Vec<SetDisc>,
+    /// Why these were grouped, in plain language.
+    pub evidence: Vec<String>,
+    /// Reasons to distrust the grouping. Non-empty means do not treat it as an ordered
+    /// set without checking.
+    pub warnings: Vec<String>,
+}
+
+impl SetGroup {
+    /// Whether this group can safely be solved with the consecutive-episodes constraint.
+    ///
+    /// The constraint is only valid if these really are discs of one release, in a known
+    /// order. When that is in doubt, solving jointly would turn a guess about grouping
+    /// into confident-looking episode assignments — worse than not solving at all.
+    pub fn is_orderable(&self) -> bool {
+        self.warnings.is_empty() && self.discs.len() > 1
+    }
+}
+
+/// One disc offered for grouping.
+#[derive(Debug, Clone)]
+pub struct GroupInput {
+    pub job_id: String,
+    /// Volume label as read from the disc.
+    pub label: String,
+    pub titles: Vec<DiscTitle>,
+}
+
+/// Group discs into sets by what their volume labels say, not by how they were selected.
+///
+/// This exists because the alternative — treating whatever the caller passed in as one
+/// set — silently merges unrelated series. The consecutive-episode constraint is powerful
+/// precisely because it is a strong claim, so the claim has to be earned: discs are only
+/// grouped when their labels agree on a series once disc and season markers are removed,
+/// and only ordered when every disc states its own number.
+pub fn group_into_sets(inputs: &[GroupInput]) -> Vec<SetGroup> {
+    use std::collections::BTreeMap;
+
+    let mut by_key: BTreeMap<String, Vec<&GroupInput>> = BTreeMap::new();
+    for i in inputs {
+        let key = crate::matching::query_from_label(&i.label);
+        // A disc with no usable label cannot be grouped with anything; it gets its own
+        // key so it is never silently attached to a real set.
+        let key = if key.trim().is_empty() {
+            format!("<unlabelled:{}>", i.job_id)
+        } else {
+            key
+        };
+        by_key.entry(key).or_default().push(i);
+    }
+
+    let mut out = Vec::new();
+    for (series_key, members) in by_key {
+        let mut discs = Vec::new();
+        let mut warnings = Vec::new();
+        let mut evidence = vec![format!(
+            "{} disc(s) share the series name {series_key:?} once disc and season \
+             markers are stripped from their volume labels",
+            members.len()
+        )];
+
+        let mut seen_numbers: BTreeMap<u32, String> = BTreeMap::new();
+        for m in &members {
+            match crate::matching::disc_number_from_label(&m.label) {
+                Some(n) => {
+                    if let Some(other) = seen_numbers.get(&n) {
+                        warnings.push(format!(
+                            "two discs both claim to be disc {n} ({other} and {}), so their \
+                             order is unknown",
+                            m.job_id
+                        ));
+                    }
+                    seen_numbers.insert(n, m.job_id.clone());
+                    discs.push(SetDisc {
+                        disc_number: n,
+                        job_id: m.job_id.clone(),
+                        titles: m.titles.clone(),
+                    });
+                }
+                None => {
+                    // Never invent a position. An unnumbered disc could sit anywhere in
+                    // the run, and guessing would corrupt every disc after it.
+                    warnings.push(format!(
+                        "{} has no disc number in its label ({:?}), so its position in \
+                         the set is unknown",
+                        m.job_id, m.label
+                    ));
+                    discs.push(SetDisc {
+                        disc_number: 0,
+                        job_id: m.job_id.clone(),
+                        titles: m.titles.clone(),
+                    });
+                }
+            }
+        }
+
+        discs.sort_by_key(|d| d.disc_number);
+
+        // A run with gaps may just be discs not yet ripped, but the constraint assumes
+        // consecutive coverage, so say so rather than quietly assuming it.
+        let numbers: Vec<u32> = discs.iter().map(|d| d.disc_number).filter(|n| *n > 0).collect();
+        if numbers.len() > 1 {
+            let expected: Vec<u32> = (numbers[0]..=*numbers.last().unwrap()).collect();
+            if numbers != expected {
+                warnings.push(format!(
+                    "disc numbers {numbers:?} are not a consecutive run, so episodes \
+                     between them are missing and the set cannot be laid out end to end"
+                ));
+            } else {
+                evidence.push(format!("disc numbers {numbers:?} form a consecutive run"));
+            }
+        }
+
+        out.push(SetGroup {
+            series_key,
+            discs,
+            evidence,
+            warnings,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+
+    fn input(job: &str, label: &str, n: usize) -> GroupInput {
+        GroupInput {
+            job_id: job.into(),
+            label: label.into(),
+            titles: (0..n)
+                .map(|i| DiscTitle {
+                    name: format!("t{i:02}.mkv"),
+                    duration_secs: 3060.0,
+                })
+                .collect(),
+        }
+    }
+
+    /// The failure that motivated this: two unrelated series must never merge.
+    #[test]
+    fn different_series_are_never_grouped_together() {
+        let g = group_into_sets(&[
+            input("j1", "ESPN_30_FOR_30_DISC_1", 3),
+            input("j2", "ESPN_30_FOR_30_DISC_2", 3),
+            input("j3", "THE_WIRE_SEASON_1_DISC_1", 3),
+        ]);
+        assert_eq!(g.len(), 2, "expected two distinct series, got {:?}",
+            g.iter().map(|x| &x.series_key).collect::<Vec<_>>());
+        let espn = g.iter().find(|x| x.series_key.contains("30 for 30")).unwrap();
+        assert_eq!(espn.discs.len(), 2);
+        assert!(espn.is_orderable());
+    }
+
+    #[test]
+    fn a_disc_with_no_number_makes_the_group_unorderable() {
+        let g = group_into_sets(&[
+            input("j1", "ESPN_30_FOR_30_DISC_1", 3),
+            input("j2", "ESPN_30_FOR_30", 3),
+        ]);
+        assert_eq!(g.len(), 1);
+        assert!(!g[0].is_orderable(), "must not order a set with an unplaced disc");
+        assert!(g[0].warnings.iter().any(|w| w.contains("no disc number")));
+    }
+
+    #[test]
+    fn duplicate_disc_numbers_are_refused() {
+        let g = group_into_sets(&[
+            input("j1", "SHOW_DISC_1", 2),
+            input("j2", "SHOW_DISC_1", 2),
+        ]);
+        assert!(!g[0].is_orderable());
+        assert!(g[0].warnings.iter().any(|w| w.contains("both claim")));
+    }
+
+    #[test]
+    fn a_gap_in_the_run_is_flagged() {
+        let g = group_into_sets(&[
+            input("j1", "SHOW_DISC_1", 2),
+            input("j3", "SHOW_DISC_3", 2),
+        ]);
+        assert!(!g[0].is_orderable());
+        assert!(g[0].warnings.iter().any(|w| w.contains("consecutive")));
+    }
+
+    #[test]
+    fn a_consecutive_run_is_orderable_and_says_why() {
+        let g = group_into_sets(&[
+            input("j1", "SHOW_DISC_1", 2),
+            input("j2", "SHOW_DISC_2", 2),
+            input("j3", "SHOW_DISC_3", 2),
+        ]);
+        assert!(g[0].is_orderable());
+        assert!(g[0].evidence.iter().any(|e| e.contains("consecutive run")));
+        assert_eq!(
+            g[0].discs.iter().map(|d| d.disc_number).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    /// A lone disc is not a set: the constraint adds nothing and claiming it would
+    /// overstate the evidence.
+    #[test]
+    fn a_single_disc_is_not_orderable_as_a_set() {
+        let g = group_into_sets(&[input("j1", "SHOW_DISC_1", 2)]);
+        assert!(!g[0].is_orderable());
+    }
+
+    #[test]
+    fn unlabelled_discs_stay_separate() {
+        let g = group_into_sets(&[input("j1", "", 2), input("j2", "", 2)]);
+        assert_eq!(g.len(), 2, "unlabelled discs must not be grouped with each other");
+    }
+}

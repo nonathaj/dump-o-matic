@@ -650,12 +650,11 @@ fn truncate(s: &str, n: usize) -> String {
 /// tie between adjacent windows; requiring the whole set to be consistent usually
 /// leaves exactly one arrangement standing.
 fn solve_video_set(dirs: &[PathBuf], cfg: &Config, show_override: Option<&str>) -> Result<()> {
-    use dumo_identify::discset::{self, SetDisc};
+    use dumo_identify::discset::{self, GroupInput};
     use dumo_identify::matching::{self, DiscTitle};
     use dumo_identify::video::{self as vid, AnalysisParams, TitleInput};
 
-    let mut discs: Vec<SetDisc> = Vec::new();
-    let mut labels: Vec<String> = Vec::new();
+    let mut inputs: Vec<GroupInput> = Vec::new();
 
     for dir in dirs {
         let job = match Job::load(dir) {
@@ -672,7 +671,7 @@ fn solve_video_set(dirs: &[PathBuf], cfg: &Config, show_override: Option<&str>) 
             .and_then(|p| p.content.title_guess.clone())
             .unwrap_or_default();
 
-        let mut inputs = Vec::new();
+        let mut title_inputs = Vec::new();
         for a in job.artifacts.iter().filter(|a| {
             let p = a.relative_path.to_ascii_lowercase();
             p.ends_with(".mkv") || p.ends_with(".mp4") || p.ends_with(".m2ts")
@@ -683,17 +682,17 @@ fn solve_video_set(dirs: &[PathBuf], cfg: &Config, show_override: Option<&str>) 
             }
             let f = dumo_backends::ffprobe::probe(&path)
                 .with_context(|| format!("probing {}", path.display()))?;
-            inputs.push(TitleInput {
+            title_inputs.push(TitleInput {
                 name: a.relative_path.clone(),
                 duration_secs: f.duration_secs,
                 chapters: f.chapter_count(),
             });
         }
-        if inputs.is_empty() {
+        if title_inputs.is_empty() {
             continue;
         }
 
-        let analysis = vid::analyse(&inputs, AnalysisParams::default());
+        let analysis = vid::analyse(&title_inputs, AnalysisParams::default());
         let mut titles: Vec<DiscTitle> = analysis
             .main_titles()
             .map(|t| DiscTitle {
@@ -706,33 +705,88 @@ fn solve_video_set(dirs: &[PathBuf], cfg: &Config, show_override: Option<&str>) 
         }
         matching::sort_by_title_index(&mut titles);
 
-        let disc_number = matching::disc_number_from_label(&label).unwrap_or(discs.len() as u32 + 1);
-        println!(
-            "  disc {disc_number}: {} main title(s) from {}",
-            titles.len(),
-            job.id
-        );
-        labels.push(label);
-        discs.push(SetDisc {
-            disc_number,
+        inputs.push(GroupInput {
             job_id: job.id.clone(),
+            label,
             titles,
         });
     }
 
-    if discs.is_empty() {
+    if inputs.is_empty() {
         println!("No video jobs with main titles found.");
         return Ok(());
     }
 
-    let query = show_override.map(str::to_string).unwrap_or_else(|| {
-        labels
-            .first()
-            .map(|l| matching::query_from_label(l))
-            .unwrap_or_default()
-    });
+    // Decide what a set is from the discs themselves, not from however the caller
+    // happened to filter the job list. Grouping unrelated series together would turn a
+    // selection accident into confident episode assignments.
+    let groups = discset::group_into_sets(&inputs);
+    println!("Grouped {} disc(s) into {} set(s):", inputs.len(), groups.len());
+    for g in &groups {
+        println!();
+        println!("  Set {:?}", g.series_key);
+        for d in &g.discs {
+            println!(
+                "    disc {:<3} {} main title(s)  {}",
+                if d.disc_number == 0 {
+                    "?".to_string()
+                } else {
+                    d.disc_number.to_string()
+                },
+                d.titles.len(),
+                d.job_id
+            );
+        }
+        for e in &g.evidence {
+            println!("      - {e}");
+        }
+        for w in &g.warnings {
+            println!("      ! {w}");
+        }
+        if !g.is_orderable() {
+            println!(
+                "      -> not solved as a set: {}",
+                if g.discs.len() < 2 {
+                    "a single disc gains nothing from the set constraint"
+                } else {
+                    "the ordering is not established, so the constraint would be a guess"
+                }
+            );
+        }
+    }
+
+    let solvable: Vec<&discset::SetGroup> = groups.iter().filter(|g| g.is_orderable()).collect();
+    if solvable.is_empty() {
+        println!();
+        println!("No set can be solved jointly. Identify these discs individually instead");
+        println!("(drop --set), or correct the volume labels.");
+        return Ok(());
+    }
+    if solvable.len() > 1 {
+        println!();
+        println!("Several independent sets found; solving each separately.");
+    }
+
+    for group in solvable {
+        solve_one_set(group, cfg, show_override)?;
+    }
+    Ok(())
+}
+
+/// Solve a single, verified set against TMDB.
+fn solve_one_set(
+    group: &dumo_identify::discset::SetGroup,
+    cfg: &Config,
+    show_override: Option<&str>,
+) -> Result<()> {
+    use dumo_identify::discset;
+
+    let discs = &group.discs;
+    let query = show_override
+        .map(str::to_string)
+        .unwrap_or_else(|| group.series_key.clone());
     if query.trim().is_empty() {
-        println!("No search term; pass --show.");
+        println!("No search term for this set; pass --show.");
         return Ok(());
     }
 
