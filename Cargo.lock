@@ -159,6 +159,7 @@ name = "dumo-backends"
 version = "0.1.0"
 dependencies = [
  "dumo-core",
+ "serde_json",
  "thiserror",
 ]
 

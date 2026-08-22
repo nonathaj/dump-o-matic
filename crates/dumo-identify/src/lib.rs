@@ -7,9 +7,11 @@
 
 pub mod datfile;
 pub mod platform;
+pub mod video;
 
 pub use datfile::{Datfile, DatfileSet, Game, Rom};
 pub use platform::es_de_slug;
+pub use video::{analyse, AnalysisParams, DiscAnalysis, DiscShape, MediaCategory, TitleInput, TitleRole};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IdentifyError {

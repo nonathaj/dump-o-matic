@@ -11,3 +11,4 @@ description = "Ripping backend adapters for dump-o-matic"
 [dependencies]
 dumo-core = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }

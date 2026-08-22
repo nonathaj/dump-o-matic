@@ -107,12 +107,11 @@ fn identify_job(
 
     // Datfile matching only applies to disc images. Video rips need an entirely
     // different (and fuzzy) identification path, which is not built yet.
+    if matches!(kind, MediaKind::DvdVideo | MediaKind::BluRayVideo) {
+        return analyse_video(&job, job_dir);
+    }
     if !matches!(kind, MediaKind::GameDisc | MediaKind::Data) {
-        println!("  {kind} — datfile matching does not apply.");
-        println!(
-            "  Video identification (TMDB/TVDB) is not implemented yet, so this job\n  \
-             cannot be identified automatically."
-        );
+        println!("  {kind} — no identification path for this media type yet.");
         return Ok(());
     }
 
@@ -351,4 +350,93 @@ fn file_name(p: &std::path::Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| p.display().to_string())
+}
+
+/// Analyse a video job's structure: what is content, what is an extra, and whether the
+/// disc looks like a film or a set of episodes.
+///
+/// This is offline inference from duration and chapter layout. It deliberately stops
+/// short of naming anything — that needs an online lookup, and it is a fuzzy match that
+/// must always be confirmed.
+fn analyse_video(job: &Job, job_dir: &std::path::Path) -> Result<()> {
+    use dumo_identify::video::{self, AnalysisParams, DiscShape, TitleInput};
+
+    let media: Vec<_> = job
+        .artifacts
+        .iter()
+        .filter(|a| {
+            let p = a.relative_path.to_ascii_lowercase();
+            p.ends_with(".mkv") || p.ends_with(".mp4") || p.ends_with(".m2ts")
+        })
+        .collect();
+
+    if media.is_empty() {
+        println!("  no video files among the artifacts");
+        return Ok(());
+    }
+
+    let mut inputs = Vec::new();
+    for a in &media {
+        let path = job_dir.join(&a.relative_path);
+        if !path.is_file() {
+            println!("  {} — MISSING", a.relative_path);
+            continue;
+        }
+        let f = dumo_backends::ffprobe::probe(&path)
+            .with_context(|| format!("probing {}", path.display()))?;
+        inputs.push(TitleInput {
+            name: a.relative_path.clone(),
+            duration_secs: f.duration_secs,
+            chapters: f.chapter_count(),
+        });
+    }
+
+    // Present titles in disc order, which is the ordering an episode set follows.
+    inputs.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let analysis = video::analyse(&inputs, AnalysisParams::default());
+
+    println!("  Disc shape: {}", analysis.shape);
+    if let Some(c) = analysis.category {
+        println!("  Category:   {} (proposed)", c.slug());
+    } else {
+        println!("  Category:   undetermined");
+    }
+    println!(
+        "  Confidence: {}  (structural inference — always requires confirmation)",
+        analysis.confidence
+    );
+
+    println!("  Titles:");
+    for t in &analysis.titles {
+        println!(
+            "    {:<16} {:>9}  {:<8} {}",
+            t.name.trim_start_matches("raw/"),
+            t.duration_hms(),
+            t.role.to_string(),
+            t.why
+        );
+    }
+
+    println!("  Reasoning:");
+    for e in &analysis.evidence {
+        println!("    - {e}");
+    }
+
+    // Say plainly what is still missing rather than implying the job is done.
+    match analysis.shape {
+        DiscShape::Series => {
+            println!("  Next: naming these episodes needs an episode list (TVDB/TMDB) to");
+            println!("        match runtimes and disc order against. Not implemented yet.");
+        }
+        DiscShape::Movie => {
+            println!("  Next: naming this film needs a title lookup (TMDB). Not implemented yet.");
+        }
+        DiscShape::Mixed => {
+            println!("  Next: the disc is ambiguous, so the content type is yours to decide");
+            println!("        before anything can be named or filed.");
+        }
+        _ => {}
+    }
+    Ok(())
 }
