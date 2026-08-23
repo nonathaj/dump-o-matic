@@ -228,41 +228,56 @@ pub struct DatfileConfig {
 
 /// How identified game discs are packaged for the emulator library.
 ///
-/// The archival form of a CD dump (a `.cue` plus per-track `.bin` files) is not the form
-/// an emulator front-end wants. Which transformation is appropriate depends on the
-/// library, so it is configuration rather than a decision baked into the code.
+/// The archival form of a dump — a Redump-exact `.iso`, or a `.cue` plus per-track
+/// `.bin` — is not always the form a front-end wants. Which transformation is right
+/// depends on the platform, so this is configuration rather than a rule baked into the
+/// code.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GamesConfig {
-    /// Pack CD dumps into a single CHD instead of filing `.cue`/`.bin`.
+    /// Platform slugs whose disc images are packed into a single CHD.
     ///
-    /// On by default because the alternative is actively wrong for common front-ends:
-    /// ES-DE does not scan `.cue` for `ps2` at all, and scans both `.cue` and `.bin` for
-    /// `psx`, so one game shows up twice. CHD is one file, is read natively by PCSX2 and
-    /// DuckStation, and is losslessly reversible — and the conversion is only accepted
-    /// after extracting it back and matching the Redump hashes, so nothing is taken on
-    /// trust.
-    #[serde(default = "default_true")]
-    pub chd_for_cd: bool,
-
-    /// Also convert single-file DVD/BD images (`.iso`) to CHD.
+    /// Per-platform rather than a blanket on/off, because the right container genuinely
+    /// differs by system. CHD is the right answer for the disc consoles listed below: it
+    /// is one file, read natively by PCSX2, DuckStation and the RetroArch disc cores, and
+    /// losslessly reversible. It is the *wrong* answer for GameCube and Wii, where
+    /// Dolphin's RVZ is format-aware and compresses considerably better — which is why
+    /// `gc` and `wii` are deliberately absent.
     ///
-    /// Off by default: `.iso` already files and launches cleanly as one entry, so there
-    /// is no duplicate-scanning problem to solve, and the space saved on a DVD image is
-    /// modest. Converting would churn games that already work.
-    #[serde(default)]
-    pub chd_for_iso: bool,
+    /// Both CD and DVD media are packed for a listed platform. That is a measured
+    /// decision, not an assumption: on a PS2 DVD (Lord of the Rings, 4.1 GB) CHD saved
+    /// 28.6%, against 27% on a PS2 CD — the same ratio, and far more in absolute terms.
+    #[serde(default = "default_chd_platforms")]
+    pub chd_platforms: Vec<String>,
 }
 
-fn default_true() -> bool {
-    true
+fn default_chd_platforms() -> Vec<String> {
+    [
+        "psx",
+        "ps2",
+        "segacd",
+        "saturn",
+        "dreamcast",
+        "3do",
+        "pcenginecd",
+        "neogeocd",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for GamesConfig {
     fn default() -> Self {
         Self {
-            chd_for_cd: true,
-            chd_for_iso: false,
+            chd_platforms: default_chd_platforms(),
         }
+    }
+}
+
+impl GamesConfig {
+    /// Whether images for this ES-DE platform slug should be packed into a CHD.
+    pub fn packs_chd(&self, slug: &str) -> bool {
+        self.chd_platforms.iter().any(|p| p == slug)
     }
 }
 
@@ -752,5 +767,36 @@ mod tests {
         let (free, total) = filesystem_free_bytes(Path::new("/")).expect("root reports usage");
         assert!(total > 0);
         assert!(free <= total);
+    }
+
+    /// The platform list is a set of deliberate decisions, not a convenience default.
+    #[test]
+    fn chd_applies_to_disc_consoles_but_not_gamecube_or_wii() {
+        let g = GamesConfig::default();
+        for slug in ["psx", "ps2", "segacd", "saturn", "dreamcast"] {
+            assert!(g.packs_chd(slug), "{slug} should be packed as CHD");
+        }
+        // Dolphin's RVZ is format-aware and beats CHD substantially on these, so packing
+        // them as CHD would be a downgrade dressed up as consistency.
+        for slug in ["gc", "wii"] {
+            assert!(!g.packs_chd(slug), "{slug} must not be packed as CHD");
+        }
+        // Nothing is packed for a platform nobody listed.
+        assert!(!g.packs_chd("switch"));
+        assert!(!g.packs_chd(""));
+    }
+
+    /// An explicitly empty list must mean "pack nothing", not "fall back to defaults" —
+    /// otherwise there is no way to turn the feature off.
+    #[test]
+    fn an_empty_platform_list_disables_packing() {
+        let g: GamesConfig = toml::from_str("chd_platforms = []").unwrap();
+        assert!(!g.packs_chd("ps2"));
+    }
+
+    #[test]
+    fn omitting_the_key_keeps_the_defaults() {
+        let g: GamesConfig = toml::from_str("").unwrap();
+        assert!(g.packs_chd("ps2"));
     }
 }

@@ -109,6 +109,12 @@ pub struct SetSolution {
     pub runner_up_cost: Option<f64>,
     pub confidence: Confidence,
     pub evidence: Vec<String>,
+    /// Per-title breakdown: what each signal said, and whether they concurred.
+    ///
+    /// Reported rather than kept private because the whole point of scoring on more than
+    /// one signal is to be able to see them disagree. A confidence number with no way to
+    /// inspect how it was reached is not much better than a guess.
+    pub verdicts: Vec<signals::TitleVerdict>,
 }
 
 impl SetSolution {
@@ -369,6 +375,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         runner_up_cost: second_best,
         confidence,
         evidence,
+        verdicts,
     })
 }
 

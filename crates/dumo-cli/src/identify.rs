@@ -5,6 +5,7 @@
 //! separate, explicit step.
 
 use anyhow::{bail, Context, Result};
+use dumo_backends::chdman;
 use dumo_core::config::Config;
 use dumo_core::job::Job;
 use dumo_core::{hash, Confidence, MediaKind};
@@ -394,21 +395,34 @@ fn package_chd(
     };
     let m = &first.m;
 
-    // Only CD sets. A single .iso is already one file and one library entry, so there is
-    // no problem here worth solving (see GamesConfig::chd_for_iso).
-    if !m
-        .game
-        .roms
-        .iter()
-        .any(|r| r.name.to_ascii_lowercase().ends_with(".cue"))
-    {
-        return Ok(None);
-    }
     let Some(slug) = es_de_slug(&m.platform) else {
         return Ok(None);
     };
+    if !cfg.games.packs_chd(slug) {
+        return Ok(None);
+    }
 
-    match dumo_backends::chdman::version() {
+    // The container follows the media, not the platform: a PS2 library holds both CD and
+    // DVD titles and chdman needs a different subcommand for each.
+    let is_cd = m
+        .game
+        .roms
+        .iter()
+        .any(|r| r.name.to_ascii_lowercase().ends_with(".cue"));
+    let format = if is_cd {
+        chdman::DiscFormat::Cd
+    } else if m
+        .game
+        .roms
+        .iter()
+        .any(|r| r.name.to_ascii_lowercase().ends_with(".iso"))
+    {
+        chdman::DiscFormat::Dvd
+    } else {
+        return Ok(None);
+    };
+
+    match chdman::version() {
         Ok(v) => println!("  packaging as CHD ({v})"),
         Err(e) => {
             println!("  not packaging as CHD: {e}");
@@ -457,11 +471,13 @@ fn package_chd(
         return Ok(None);
     }
 
-    let cue = m
+    // chdman is pointed at the cue for a CD and the iso itself for a DVD.
+    let wanted = if is_cd { ".cue" } else { ".iso" };
+    let input = m
         .game
         .roms
         .iter()
-        .find(|r| r.name.to_ascii_lowercase().ends_with(".cue"))
+        .find(|r| r.name.to_ascii_lowercase().ends_with(wanted))
         .map(|r| work.join(&r.name))
         .expect("checked above");
     let title = m.game.name.clone();
@@ -469,7 +485,7 @@ fn package_chd(
 
     print!("  -> {slug}/{title}.chd ... ");
     std::io::stdout().flush().ok();
-    if let Err(e) = dumo_backends::chdman::create_cd(&cue, &chd) {
+    if let Err(e) = chdman::create(&input, &chd, format) {
         println!("FAILED");
         println!("     {e}");
         cleanup(&work);
@@ -478,7 +494,7 @@ fn package_chd(
 
     // --- Prove the round-trip before trusting the CHD --------------------------------
     let verify_dir = work.join("verify");
-    let round = match dumo_backends::chdman::verify_roundtrip(&chd, &verify_dir, &title) {
+    let round = match chdman::verify_roundtrip(&chd, &verify_dir, &title, format) {
         Ok(r) => r,
         Err(e) => {
             println!("FAILED");
@@ -491,6 +507,8 @@ fn package_chd(
 
     // Every track Redump lists must come back out with the same SHA-1. Compared as
     // multisets so track order cannot mask a swap.
+    // The cue is chdman's own text on the way back out and is regenerated rather than
+    // preserved, so only the data files are compared. For a DVD that is the .iso itself.
     let mut expected: Vec<String> = m
         .game
         .roms
@@ -586,7 +604,7 @@ fn apply_matches(
     // Every file in the set must be exact before packaging is even considered; a CHD
     // built from a set we were unsure of would bury that uncertainty in a new file.
     let all_exact = matches.iter().all(|i| i.m.confidence.is_auto_acceptable());
-    if cfg.games.chd_for_cd && all_exact {
+    if all_exact {
         if let Some((dest, m)) = package_chd(job_dir, cfg, matches)? {
             let (sha256, bytes) = hash::sha256_file(&dest).context("hashing the packed CHD")?;
             record_identification(
@@ -1232,6 +1250,30 @@ fn solve_one_set(
     );
     for e in &solution.evidence {
         println!("  - {e}");
+    }
+
+    // Show the signals separately. Where they disagree, that disagreement is the most
+    // useful thing on screen — it is what a reviewer should be looking at.
+    println!();
+    println!(
+        "  {:<18} {:>8} {:>9}   {:<7} {:<8}",
+        "title", "runtime", "dialogue", "rt pick", "dlg pick"
+    );
+    for v in &solution.verdicts {
+        println!(
+            "  {:<18} {:>8.2} {:>9}   E{:02}     {:<8} {}",
+            truncate(&v.title_name, 18),
+            v.scores.runtime,
+            v.scores
+                .subtitle
+                .map(|s| format!("{s:.2}"))
+                .unwrap_or_else(|| "-".into()),
+            v.runtime_pick,
+            v.subtitle_pick
+                .map(|p| format!("E{p:02}"))
+                .unwrap_or_else(|| "-".into()),
+            if v.signals_agree { "agree" } else { "" }
+        );
     }
 
     println!();

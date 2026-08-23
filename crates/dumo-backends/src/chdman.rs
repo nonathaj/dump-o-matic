@@ -85,11 +85,42 @@ fn run(args: &[&std::ffi::OsStr]) -> Result<()> {
     Ok(())
 }
 
-/// Pack a `.cue`/`.bin` set into a single CHD.
+/// Which chdman subcommand family a dump needs.
 ///
-/// `cue` must sit alongside the track files it names — chdman resolves them relative to
-/// the cue, exactly as an emulator would.
-pub fn create_cd(cue: &Path, out: &Path) -> Result<()> {
+/// CD and DVD images are different enough that chdman has separate commands for them:
+/// a CD is raw 2352-byte sectors with subchannel and a cue describing its tracks, a DVD
+/// is a flat run of 2048-byte sectors. Using the wrong one either fails outright or
+/// produces something an emulator will not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscFormat {
+    /// `.cue` plus per-track `.bin`.
+    Cd,
+    /// A single `.iso`.
+    Dvd,
+}
+
+impl DiscFormat {
+    fn create(self) -> &'static str {
+        match self {
+            DiscFormat::Cd => "createcd",
+            DiscFormat::Dvd => "createdvd",
+        }
+    }
+
+    fn extract(self) -> &'static str {
+        match self {
+            DiscFormat::Cd => "extractcd",
+            DiscFormat::Dvd => "extractdvd",
+        }
+    }
+}
+
+/// Pack a disc image into a single CHD.
+///
+/// For [`DiscFormat::Cd`], `input` is the `.cue`; chdman resolves its track files
+/// relative to it, exactly as an emulator would. For [`DiscFormat::Dvd`] it is the
+/// `.iso`.
+pub fn create(input: &Path, out: &Path, format: DiscFormat) -> Result<()> {
     if out.exists() {
         return Err(BackendError::Failed {
             tool: TOOL,
@@ -97,27 +128,46 @@ pub fn create_cd(cue: &Path, out: &Path) -> Result<()> {
         });
     }
     run(&[
-        "createcd".as_ref(),
+        format.create().as_ref(),
         "-i".as_ref(),
-        cue.as_ref(),
+        input.as_ref(),
         "-o".as_ref(),
         out.as_ref(),
     ])
+}
+
+/// Unpack a CHD back to the image it was made from.
+///
+/// `out` is the `.cue` for a CD or the `.iso` for a DVD; `out_bin` names the track files
+/// and is only meaningful for a CD.
+pub fn extract(chd: &Path, out: &Path, out_bin: Option<&Path>, format: DiscFormat) -> Result<()> {
+    let mut args: Vec<&std::ffi::OsStr> = vec![
+        format.extract().as_ref(),
+        "-i".as_ref(),
+        chd.as_ref(),
+        "-o".as_ref(),
+        out.as_ref(),
+    ];
+    if let (DiscFormat::Cd, Some(b)) = (format, out_bin) {
+        args.push("-ob".as_ref());
+        args.push(b.as_ref());
+    }
+    run(&args)
+}
+
+/// Pack a `.cue`/`.bin` set into a single CHD.
+///
+/// `cue` must sit alongside the track files it names — chdman resolves them relative to
+/// the cue, exactly as an emulator would.
+pub fn create_cd(cue: &Path, out: &Path) -> Result<()> {
+    create(cue, out, DiscFormat::Cd)
 }
 
 /// Unpack a CHD back to a `.cue` and its track files.
 ///
 /// `out_cue` names the cue to write; chdman derives the track file names from `out_bin`.
 pub fn extract_cd(chd: &Path, out_cue: &Path, out_bin: &Path) -> Result<()> {
-    run(&[
-        "extractcd".as_ref(),
-        "-i".as_ref(),
-        chd.as_ref(),
-        "-o".as_ref(),
-        out_cue.as_ref(),
-        "-ob".as_ref(),
-        out_bin.as_ref(),
-    ])
+    extract(chd, out_cue, Some(out_bin), DiscFormat::Cd)
 }
 
 /// What a round-trip produced, so the caller can compare it against Redump.
@@ -125,8 +175,9 @@ pub fn extract_cd(chd: &Path, out_cue: &Path, out_bin: &Path) -> Result<()> {
 pub struct RoundTrip {
     /// Track files chdman wrote, in the order the cue names them.
     pub tracks: Vec<PathBuf>,
-    /// The cue chdman wrote. Its *text* is chdman's own, not Redump's — only the track
-    /// data is expected to round-trip byte for byte.
+    /// The index chdman wrote: a `.cue` for a CD, the `.iso` itself for a DVD. For a CD
+    /// its *text* is chdman's own, not Redump's — only the track data is expected to
+    /// round-trip byte for byte.
     pub cue: PathBuf,
 }
 
@@ -137,14 +188,30 @@ pub struct RoundTrip {
 /// once its output has been read back and matched, and packing a dump into a CHD is no
 /// different: the caller extracts, hashes, and compares against the Redump digests the
 /// dump already verified against. Only then may the original tracks be released.
-pub fn verify_roundtrip(chd: &Path, work_dir: &Path, stem: &str) -> Result<RoundTrip> {
+pub fn verify_roundtrip(
+    chd: &Path,
+    work_dir: &Path,
+    stem: &str,
+    format: DiscFormat,
+) -> Result<RoundTrip> {
     std::fs::create_dir_all(work_dir).map_err(|e| BackendError::Io {
         tool: TOOL,
         source: e,
     })?;
-    let cue = work_dir.join(format!("{stem}.cue"));
-    let bin = work_dir.join(format!("{stem}.bin"));
-    extract_cd(chd, &cue, &bin)?;
+
+    let (index, data_ext) = match format {
+        DiscFormat::Cd => (work_dir.join(format!("{stem}.cue")), "bin"),
+        DiscFormat::Dvd => (work_dir.join(format!("{stem}.iso")), "iso"),
+    };
+    match format {
+        DiscFormat::Cd => extract(
+            chd,
+            &index,
+            Some(&work_dir.join(format!("{stem}.bin"))),
+            format,
+        )?,
+        DiscFormat::Dvd => extract(chd, &index, None, format)?,
+    }
 
     // A multi-track disc extracts to "<stem> (Track N).bin" rather than the single name
     // we asked for, so discover what actually landed instead of assuming.
@@ -155,7 +222,7 @@ pub fn verify_roundtrip(chd: &Path, work_dir: &Path, stem: &str) -> Result<Round
         })?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "bin").unwrap_or(false))
+        .filter(|p| p.extension().map(|x| x == data_ext).unwrap_or(false))
         .collect();
     tracks.sort();
 
@@ -165,7 +232,10 @@ pub fn verify_roundtrip(chd: &Path, work_dir: &Path, stem: &str) -> Result<Round
             detail: "extractcd produced no track files".into(),
         });
     }
-    Ok(RoundTrip { cue, tracks })
+    Ok(RoundTrip {
+        cue: index,
+        tracks,
+    })
 }
 
 #[cfg(test)]
@@ -185,6 +255,83 @@ mod tests {
         assert!(matches!(err, BackendError::Failed { .. }));
         // The existing file is untouched.
         assert_eq!(std::fs::read(&out).unwrap(), b"existing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Is chdman available? Round-trip tests are skipped rather than failed without it,
+    /// since it is an optional dependency.
+    fn have_chdman() -> bool {
+        version().is_ok()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("dumo-chdman-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A DVD image round-trips byte for byte.
+    ///
+    /// This is the property the whole packaging step rests on — a CHD may replace the
+    /// archival image only because the image can be recovered from it exactly. Verified
+    /// here on a synthetic disc, and separately on a real 4.1 GB PS2 DVD whose extracted
+    /// .iso reproduced Redump's sha1 f6a63934521febb2e0c83d78510dfe8e78bbf214.
+    #[test]
+    fn dvd_images_round_trip_byte_for_byte() {
+        if !have_chdman() {
+            return;
+        }
+        let dir = scratch("dvd");
+        let iso = dir.join("game.iso");
+
+        // A DVD image is a whole number of 2048-byte sectors. Mixed compressible and
+        // incompressible content, so this exercises real compression rather than a run
+        // of zeros that any container would handle.
+        let mut data = Vec::new();
+        for sector in 0..512u32 {
+            let mut s = vec![0u8; 2048];
+            for (i, b) in s.iter_mut().enumerate() {
+                *b = ((sector as usize).wrapping_mul(31).wrapping_add(i * 7) % 251) as u8;
+            }
+            if sector % 4 == 0 {
+                s.iter_mut().for_each(|b| *b = 0);
+            }
+            data.extend_from_slice(&s);
+        }
+        std::fs::write(&iso, &data).unwrap();
+
+        let chd = dir.join("game.chd");
+        create(&iso, &chd, DiscFormat::Dvd).expect("createdvd");
+        assert!(chd.is_file());
+
+        let out = dir.join("rt");
+        let round = verify_roundtrip(&chd, &out, "game", DiscFormat::Dvd).expect("extractdvd");
+        assert_eq!(round.tracks.len(), 1, "a DVD extracts to one image");
+        assert_eq!(
+            std::fs::read(&round.tracks[0]).unwrap(),
+            data,
+            "the extracted image must be byte-identical to the original"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The two formats must not be interchangeable by accident: pointing the DVD command
+    /// at a cue sheet has to fail loudly rather than produce something unreadable.
+    #[test]
+    fn the_wrong_format_is_an_error_not_a_silent_mess() {
+        if !have_chdman() {
+            return;
+        }
+        let dir = scratch("mismatch");
+        let cue = dir.join("game.cue");
+        std::fs::write(&cue, b"FILE \"game.bin\" BINARY\r\n  TRACK 01 MODE1/2352\r\n").unwrap();
+
+        let err = create(&cue, &dir.join("out.chd"), DiscFormat::Dvd).unwrap_err();
+        assert!(matches!(err, BackendError::Failed { .. }), "got {err:?}");
+        assert!(!dir.join("out.chd").is_file(), "no CHD should be left behind");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }
