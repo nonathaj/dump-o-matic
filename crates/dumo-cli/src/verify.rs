@@ -12,6 +12,7 @@
 
 use anyhow::{bail, Context, Result};
 use dumo_backends::redumper;
+use crate::migrate::{category_of, destination_path};
 use dumo_core::config::Config;
 use dumo_core::job::{Job, JobStage};
 use dumo_core::hash;
@@ -53,7 +54,7 @@ pub fn run(args: VerifyArgs) -> Result<()> {
 
     let mut any_failed = false;
     for dir in dirs {
-        if !verify_one(&dir, &cfg.staging.root, args.update)? {
+        if !verify_one(&dir, &cfg, args.update)? {
             any_failed = true;
         }
         println!();
@@ -65,11 +66,20 @@ pub fn run(args: VerifyArgs) -> Result<()> {
     Ok(())
 }
 
+/// Where a staging-relative path would live at its configured destination.
+fn cfg_destination(cfg: &Config, category: &str, relative: &str) -> Option<PathBuf> {
+    cfg.destinations
+        .iter()
+        .find(|d| d.accepts(category))
+        .map(|d| destination_path(&d.root, relative))
+}
+
 fn verify_one(
     job_dir: &std::path::Path,
-    staging_root: &std::path::Path,
+    cfg: &Config,
     update: bool,
 ) -> Result<bool> {
+    let staging_root = &cfg.staging.root;
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
 
@@ -215,15 +225,38 @@ fn verify_one(
     // provenance left behind in the job directory. Without this, verifying an identified
     // job would silently check only the leftovers.
     if let Some(id) = &job.identification {
+        let migrated = job.stage == JobStage::Migrated;
         for f in &id.files {
-            let path = staging_root.join(&f.path);
+            let staged = staging_root.join(&f.path);
             print!("  {} ... ", f.path);
             std::io::Write::flush(&mut std::io::stdout()).ok();
-            if !path.is_file() {
+
+            // Once a job has migrated, its staging copy is expendable and may have been
+            // reclaimed on purpose. The content still exists — at the destination — so
+            // check there rather than calling a deliberately released copy "missing".
+            let path = if staged.is_file() {
+                staged
+            } else if migrated {
+                let category = category_of(&f.path);
+                match cfg_destination(cfg, &category, &f.path).filter(|p| p.is_file()) {
+                    Some(p) => {
+                        print!("(from permanent storage) ");
+                        p
+                    }
+                    None => {
+                        println!("MISSING");
+                        problems.push(format!(
+                            "{} is in neither staging nor permanent storage",
+                            f.path
+                        ));
+                        continue;
+                    }
+                }
+            } else {
                 println!("MISSING");
                 problems.push(format!("{} is missing from ready/", f.path));
                 continue;
-            }
+            };
             match hash::sha256_file(&path) {
                 Ok((sha256, _)) if sha256 == f.sha256 => println!("ok  {}", &sha256[..16]),
                 Ok(_) => {

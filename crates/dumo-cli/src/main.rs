@@ -10,6 +10,7 @@
 //! changing behaviour.
 
 mod adopt;
+mod clean;
 mod identify;
 mod migrate;
 mod repack;
@@ -210,6 +211,27 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Reclaim staging space for content that has reached permanent storage.
+    ///
+    /// Removes staged copies only after re-hashing the destination copy and confirming
+    /// it matches. A destination file that is missing or altered means the staged copy is
+    /// the last good one, and it is kept.
+    ///
+    /// Dump provenance — sector state, logs, subchannel data — is never removed: it
+    /// exists nowhere else and cannot be regenerated from the destination copy.
+    Clean {
+        /// Job id or a fragment of one. Omit to consider every migrated job.
+        job: Option<String>,
+        /// Show what would happen without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Re-verify staged artifacts against their manifest hashes.
     ///
     /// Re-hashes every artifact a job recorded, re-runs the rip-time integrity checks,
@@ -315,6 +337,14 @@ fn main() -> Result<()> {
             migrate::run(migrate::MigrateArgs {
                 job,
                 destination,
+                dry_run,
+                assume_yes: yes,
+                config_file: config,
+            })
+        }
+        Command::Clean { job, dry_run, yes, config } => {
+            clean::run(clean::CleanArgs {
+                job,
                 dry_run,
                 assume_yes: yes,
                 config_file: config,

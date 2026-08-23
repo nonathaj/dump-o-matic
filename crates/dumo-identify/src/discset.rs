@@ -27,7 +27,6 @@ use std::collections::HashSet;
 /// for that same set — so the table is small and the solve becomes table lookups.
 struct SeasonScorer<'a> {
     episodes: &'a [Episode],
-    params: ScoringParams,
     /// `cost[title][episode]`, indexed by position in the flattened title list.
     cost: Vec<Vec<f64>>,
     /// `scores[title][episode]`, kept for reporting each signal separately.
@@ -73,7 +72,6 @@ impl<'a> SeasonScorer<'a> {
 
         Self {
             episodes: &season.episodes,
-            params,
             cost,
             scores,
         }
