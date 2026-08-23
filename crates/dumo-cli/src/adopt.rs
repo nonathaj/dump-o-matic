@@ -94,7 +94,9 @@ pub fn run(args: AdoptArgs) -> Result<()> {
         print!("  {} ({}) ... ", file_name(path), crate::migrate::human_size(size));
         std::io::stdout().flush().ok();
 
-        let digests = match hash::redump_digests(path) {
+        // One pass for both digest sets. A library scan reads every file end to end, and
+        // over a network share a second pass costs as much again for nothing.
+        let (digests, sha256) = match hash::all_digests(path) {
             Ok(d) => d,
             Err(e) => {
                 println!("unreadable: {e}");
@@ -110,7 +112,7 @@ pub fn run(args: AdoptArgs) -> Result<()> {
                 println!("{}", m.game.name);
                 found.push(Adoptable {
                     path: path.clone(),
-                    sha256: hash::sha256_file(path)?.0,
+                    sha256,
                     bytes: digests.size,
                     slug,
                     m,

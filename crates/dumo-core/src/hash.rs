@@ -137,6 +137,49 @@ pub fn redump_digests(path: &Path) -> std::io::Result<RedumpDigests> {
     redump_digests_with_progress(path, |_| {})
 }
 
+/// Compute the Redump digests *and* SHA-256 in a single pass.
+///
+/// The pipeline needs both: CRC-32/MD5/SHA-1 to match a datfile, SHA-256 for the
+/// manifest. Reading the file twice to get them is merely wasteful locally and genuinely
+/// expensive over a network share, where a library scan can mean tens of gigabytes.
+pub fn all_digests(path: &Path) -> std::io::Result<(RedumpDigests, String)> {
+    use md5::Md5;
+    use sha1::Sha1;
+
+    let f = File::open(path)?;
+    let mut reader = BufReader::with_capacity(CHUNK, f);
+    let mut buf = vec![0u8; CHUNK];
+
+    let mut crc = Crc32::new();
+    let mut md5 = Md5::new();
+    let mut sha1 = Sha1::new();
+    let mut sha256 = Sha256::new();
+    let mut total: u64 = 0;
+
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let chunk = &buf[..n];
+        crc.update(chunk);
+        md5.update(chunk);
+        sha1.update(chunk);
+        sha256.update(chunk);
+        total += n as u64;
+    }
+
+    Ok((
+        RedumpDigests {
+            size: total,
+            crc32: format!("{:08x}", crc.finish()),
+            md5: hex(&md5.finalize()),
+            sha1: hex(&sha1.finalize()),
+        },
+        hex(&sha256.finalize()),
+    ))
+}
+
 /// As [`redump_digests`], reporting bytes consumed as it goes.
 pub fn redump_digests_with_progress(
     path: &Path,
@@ -305,5 +348,38 @@ mod tests {
         assert_ne!(sha256_file(&a).unwrap().0, sha256_file(&b).unwrap().0);
         std::fs::remove_file(a).ok();
         std::fs::remove_file(b).ok();
+    }
+
+    /// Both digest sets must match what the single-purpose functions produce, or the
+    /// one-pass optimisation would quietly change what gets written to a manifest.
+    #[test]
+    fn all_digests_agrees_with_the_separate_passes() {
+        let p = std::env::temp_dir().join(format!("dumo-all-digests-{}", std::process::id()));
+        // Larger than one read chunk, so the multi-chunk path is exercised.
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&p, &data).unwrap();
+
+        let (combined, sha256) = all_digests(&p).unwrap();
+        let separate = redump_digests(&p).unwrap();
+        let (sha256_separate, size) = sha256_file(&p).unwrap();
+
+        assert_eq!(combined, separate);
+        assert_eq!(sha256, sha256_separate);
+        assert_eq!(combined.size, size);
+        assert_eq!(combined, redump_digests_of(&data));
+        assert_eq!(sha256, sha256_of(&data));
+
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn all_digests_handles_an_empty_file() {
+        let p = std::env::temp_dir().join(format!("dumo-all-empty-{}", std::process::id()));
+        std::fs::write(&p, b"").unwrap();
+        let (d, sha256) = all_digests(&p).unwrap();
+        assert_eq!(d.size, 0);
+        assert_eq!(d, redump_digests_of(b""));
+        assert_eq!(sha256, sha256_of(b""));
+        std::fs::remove_file(&p).ok();
     }
 }
