@@ -304,7 +304,8 @@ pub fn run(args: RipArgs) -> Result<()> {
     println!("Manifest: {}", job_dir.join(job::MANIFEST_NAME).display());
     println!();
     println!("The disc has not been modified and nothing has been deleted.");
-    println!("Next: identification (stage 3) is not implemented yet.");
+    println!("Next: dump-o-matic identify {job_id}");
+    println!("      or --set with the other discs of a box set, to solve them together.");
 
     Ok(())
 }
@@ -602,7 +603,7 @@ fn rip_game(
 
     if problems.is_empty() {
         println!();
-        println!("Next: identification against Redump datfiles (stage 3) is not implemented yet.");
+        println!("Next: dump-o-matic identify {job_id}");
     }
     Ok(())
 }
