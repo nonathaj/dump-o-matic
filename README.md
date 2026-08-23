@@ -8,19 +8,45 @@ Supports movies/TV, audio CDs, and game discs (PS1/PS2 and friends). See [PLAN.m
 for the full design, the survey of existing tools, and the roadmap.
 
 > **Status: early, but working.** The full pipeline runs end to end for **game discs**:
-> probe → rip → identify → migrate, including verified transfer to a network share.
-> Video discs rip and hash correctly but cannot yet be identified automatically, and
-> audio CD support is not built. Nothing in this repository ever writes to a disc.
+> probe → rip → identify → repack → migrate, including verified transfer to a network
+> share. Video discs rip, hash and identify — including solving a whole box set at once —
+> but the proposed names cannot yet be applied automatically. Audio CD support is not
+> built. Nothing in this repository ever writes to a disc.
 
 ## Pipeline
 
 | Stage | Command | Games | Video | Audio CD |
 |---|---|---|---|---|
+| 0. Adopt existing files | `adopt` | ✅ | — | ✗ |
 | 1. Probe | `probe` | ✅ | ✅ | ✅ |
 | 2. Rip to staging | `rip` | ✅ redumper | ✅ MakeMKV | ✗ |
-| 3. Identify | `identify` | ✅ Redump datfiles | ✗ TMDB/TVDB not built | ✗ |
-| 4. Migrate | `migrate` | ✅ | — | — |
+| 3. Identify | `identify` | ✅ Redump datfiles | ✅ TMDB, proposes only | ✗ |
+| 3b. Re-package | `repack` | ✅ CHD | — | ✗ |
+| 4. Migrate | `migrate` | ✅ | ✗ needs `--apply` | ✗ |
 | Re-verify | `verify` | ✅ | ✅ | ✅ |
+
+Games are the complete path. Video stops one step short: `identify --set` scores a box
+set against TMDB and proposes episode filenames, but there is no `--apply` for video yet,
+so filing them is still manual.
+
+### How identification decides
+
+Game discs are matched by hash against Redump datfiles, and **only an exact match is ever
+filed unattended**. A multi-file CD set is not filed until every file in its datfile entry
+is accounted for, which includes rebuilding the `.cue` into Redump's canonical form and
+checking it byte-for-byte.
+
+Video has no hash to match, so it is inference and is reported as such — it always needs
+confirming, however strong the evidence. Episodes are scored on runtime *and* on subtitle
+dialogue compared against episode synopses, weighted by how informative each word is
+across that season rather than against any hardcoded stopword list. Discs of a box set are
+solved jointly, since the discs of a season hold consecutive non-overlapping runs of
+episodes, which frequently decides cases that runtimes alone cannot.
+
+Confidence comes from corroboration, not from one score being small. Measured on a real
+four-disc set: dialogue, choosing freely across all 30 episodes, independently reached the
+same placement as the constrained solve for 9 of 10 titles; runtime managed 2. A set with
+no subtitle track anywhere cannot reach a confidence worth acting on, and says so.
 
 ## What works today
 

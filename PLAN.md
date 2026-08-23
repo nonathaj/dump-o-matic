@@ -214,10 +214,57 @@ platform directory names** already in use under `~/Emulation/roms/`, so rips lan
 emulators already scan:
 
 ```
-<permanent-root>/ps2/Star Ocean - Till the End of Time (USA) (Disc 1) [SLUS-20488].iso
+<permanent-root>/ps2/Lord of the Rings, The - The Two Towers (USA).chd
 <permanent-root>/psx/…
 <permanent-root>/gc/…
 ```
+
+#### Container: CHD for disc consoles (decided, measured)
+
+The Redump *name* is the archival convention; the Redump *container* is not always the
+right thing to file. Measured against this machine's own ES-DE configuration, the `ps2`
+system does not list `.cue` as a scannable extension at all, while `psx` lists both
+`.cue` and `.bin` — so a CD dump filed as Redump ships it either goes half-invisible or
+appears twice.
+
+CHD is one file, is listed by every disc-console system, and is read natively by PCSX2,
+DuckStation and the RetroArch disc cores. Compression measured on real dumps:
+
+| Disc | Original | CHD | Saved |
+|---|---|---|---|
+| Tetris Worlds (PS2 CD) | 394 MB | 289 MB | 27.0% |
+| Lord of the Rings (PS2 DVD) | 4,116 MB | 2,942 MB | 28.6% |
+
+DVDs compress as well as CDs — PS2 discs are padded with dummy data to shorten seeks —
+so the policy covers both media, not just CDs.
+
+CHD may *replace* the archival files only because it is losslessly reversible, and that
+is proven per dump rather than assumed: the CHD is unpacked again and every track
+compared against the Redump SHA-1s before it is accepted. Both cases above round-tripped
+byte-for-byte.
+
+The policy is **per platform** (`games.chd_platforms`), not a global switch. GameCube and
+Wii are deliberately excluded: Dolphin's RVZ is format-aware and compresses considerably
+better, so packing those as CHD would be a downgrade dressed up as consistency.
+
+#### Cue sheets must be rebuilt, not copied
+
+A CD's `.cue` is generated text naming its track files. redumper names them after the
+image with LF endings; Redump names them after the game with CRLF. A byte-perfect CD dump
+therefore arrives with a cue matching no datfile entry, and without rebuilding it every CD
+title stays permanently "incomplete" and unfilable — the `.bin` alone is never the whole
+set. The rebuild is hashed against the datfile's own cue entry and only a byte-exact match
+completes the set.
+
+#### Multi-disc games need no grouping
+
+Redump gives each disc its own entry (`… (Disc 1)`, `… (Disc 2)`), so discs are named and
+packed correctly one at a time. Grouping would only buy an `.m3u`, and none is generated:
+PCSX2 does not support m3u (verified against the installed binary; upstream issues 6696
+and 7640 remain open). ES-DE lists `.m3u` for `ps2` because of the LRPS2 core and Play!,
+not standalone PCSX2 — so writing one would produce a library entry the front-end shows
+and the emulator cannot launch. Revisit for `psx`, where DuckStation and the Beetle cores
+do support it.
 
 This requires a maintained **platform-slug mapping table** in `dumo-core`: Redump/No-Intro
 platform names (`Sony PlayStation 2`) → ES-DE slugs (`ps2`). The observed platform set
@@ -239,8 +286,16 @@ Stage 2.
 
 Two capabilities follow:
 
-- **Ingest**: point identification at existing files and let it propose names, rather
-  than requiring everything to be re-ripped.
+- **Ingest** — *implemented as `adopt`*: hashes loose library files against the datfiles
+  and, on an exact match, creates a job describing what each one is and where it already
+  lives, after which the ordinary commands work on it. Only exact matches are adopted, and
+  nothing is moved, renamed or deleted — adopting is bookkeeping. Jobs record
+  `adopted_from`, because a matching hash today is weaker evidence than a dump with a
+  probe, sector state and logs, and the two must stay distinguishable.
+
+  The pieces compose without special cases: adopt records the file where it sits, `repack`
+  finds it and packs it under its Redump name, `migrate` retires the misnamed original
+  once the replacement verifies.
 - **Audit**: scan a library for duplicates and conflicts — two files claiming the same
   episode, or content sitting in a staging-shaped layout on permanent storage.
 
@@ -371,6 +426,10 @@ should document how the user supplies them.
 | Storage paths | **Fully configurable, no hardcoded defaults.** Expected usage: staging on local disk, permanent on an SMB-mounted NAS. The tool ships no built-in path assumptions |
 | Permanent destination | Network share, mounted by the OS, consumed as a path (§2.4) |
 | API keys | Config/env only, never bundled (§2.6) |
+| Game container | CHD for disc consoles, per-platform via `games.chd_platforms`; `gc`/`wii` excluded in favour of RVZ (§3a) |
+| Multi-disc | No grouping and no `.m3u`; Redump already names each disc distinctly and PCSX2 cannot read m3u (§3a) |
+| Staging retention | Configurable, `staging.reclaim_after_migrate`; both settings are safe under §2.1 |
+| Inferred matches | Never filed unattended, however strong. Only hash identity auto-accepts |
 
 ## 9. Still open
 
@@ -387,6 +446,12 @@ should document how the user supplies them.
   is a strong check rather than absolute proof of server-side durability.
 - Whether audio CD ripping uses `cdparanoia` (already installed) or an integrated Rust
   ripper; AccurateRip integration is a separate question from the ripper choice.
-- Retention policy for staging after a successful migrate: keep-until-space-needed vs.
-  reclaim-immediately-on-verify. Both are safe under §2.1; it is purely a space/convenience
-  trade-off and should be configurable.
+- **Applying video identifications.** `identify --set` scores a box set and proposes
+  episode paths, but stops there: there is no `--apply` for video, so filing those files
+  is still manual. Games are end-to-end; video is one step short. Blocked in practice as
+  well as in code — the NAS marks the `movies` and `shows` share roots read-only, so those
+  destinations are commented out of the config.
+- **Confidence for video rests on dialogue.** Runtime alone picks the right episode at
+  roughly chance when episodes share a duration (measured: 2 of 10 on a real box set,
+  against 9 of 10 for dialogue). A disc with no subtitle track therefore cannot reach a
+  confidence worth acting on, and there is currently no second signal to fall back on.
