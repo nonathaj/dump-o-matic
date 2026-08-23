@@ -123,6 +123,31 @@ tool failing outright. Secrets are redacted from all logs and from any diagnosti
 
 ---
 
+### 2.7 Non-goals
+
+**Synchronising libraries.** One disc, one archive destination. Keeping an archive in step
+with a separate play library is a different problem — different failure modes, different
+tooling (rsync and friends do it well) — and folding it in would mean this tool held
+opinions about a tree it did not create.
+
+`migrate` therefore writes each file to exactly one destination: the first configured one
+that accepts its media category. Configuring two destinations for the same category does
+*not* produce two copies.
+
+The consequence is worth stating plainly, because it is a real property of the setup and
+not a bug: on a machine whose emulator front-end reads a local directory while the archive
+lives on a NAS, **a freshly ripped disc will not appear in the front-end until something
+else copies it there**. That is by design.
+
+Note also that emulator front-ends install *emulators* into the ROM tree — EmuDeck puts
+Xenia and the Model 2 emulator, with their config and content directories, inside
+`roms/`. A ROM tree is therefore not purely content and should not be assumed
+interchangeable with an archive of dumps.
+
+**Managing the play library.** Renaming, deduplicating or reorganising a tree this tool
+did not produce is out of scope beyond `adopt`, which only records what a file is and
+never moves it.
+
 ## 3. Pipeline stages
 
 ### Stage 1 — Pre-rip (fast probe)
@@ -430,6 +455,7 @@ should document how the user supplies them.
 | Multi-disc | No grouping and no `.m3u`; Redump already names each disc distinctly and PCSX2 cannot read m3u (§3a) |
 | Staging retention | Configurable, `staging.reclaim_after_migrate`; both settings are safe under §2.1 |
 | Inferred matches | Never filed unattended, however strong. Only hash identity auto-accepts |
+| Multiple destinations | Not supported. One archive per disc; syncing an archive to a play library is a separate problem (§2.7) |
 
 ## 9. Still open
 
