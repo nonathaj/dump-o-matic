@@ -35,11 +35,10 @@ struct SeasonScorer<'a> {
 
 impl<'a> SeasonScorer<'a> {
     /// `titles` must be the flattened list, in disc order, that the solver will index.
-    fn new(season: &'a Season, titles: &[&DiscTitle], params: ScoringParams) -> Self {
+    fn new(episodes: &'a [Episode], titles: &[&DiscTitle], params: ScoringParams) -> Self {
         // Reference text and its weighting depend only on the season, so both are built
         // once here rather than per pairing.
-        let references: Vec<HashSet<String>> = season
-            .episodes
+        let references: Vec<HashSet<String>> = episodes
             .iter()
             .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
             .collect();
@@ -54,9 +53,9 @@ impl<'a> SeasonScorer<'a> {
         let mut scores = Vec::with_capacity(titles.len());
         let mut cost = Vec::with_capacity(titles.len());
         for (ti, t) in titles.iter().enumerate() {
-            let mut srow = Vec::with_capacity(season.episodes.len());
-            let mut crow = Vec::with_capacity(season.episodes.len());
-            for (ei, e) in season.episodes.iter().enumerate() {
+            let mut srow = Vec::with_capacity(episodes.len());
+            let mut crow = Vec::with_capacity(episodes.len());
+            for (ei, e) in episodes.iter().enumerate() {
                 let sc = SignalScores {
                     runtime: signals::runtime_score_with(t.duration_secs / 60.0, e, &params),
                     subtitle: dialogue[ti].as_ref().map(|d| {
@@ -71,7 +70,7 @@ impl<'a> SeasonScorer<'a> {
         }
 
         Self {
-            episodes: &season.episodes,
+            episodes,
             cost,
             scores,
         }
@@ -110,7 +109,11 @@ pub struct DiscPlacement {
 /// A consistent placement of every disc in the set.
 #[derive(Debug, Clone)]
 pub struct SetSolution {
+    /// First season the placement touches, for callers that want a single number.
     pub season: u32,
+    /// Every season the placement spans. A box set laid out in release order routinely
+    /// crosses the season boundaries a metadata provider invents.
+    pub seasons: Vec<u32>,
     pub placements: Vec<DiscPlacement>,
     /// Mean runtime difference across every matched title, in minutes. For reporting:
     /// it is what a person can sanity-check, but it is not what the solver ranks on.
@@ -241,40 +244,43 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     // The solver indexes titles by position in this flattened, disc-ordered list.
     let flat: Vec<&DiscTitle> = ordered.iter().flat_map(|d| d.titles.iter()).collect();
 
-    let mut best: Option<(f64, Vec<usize>, &Season)> = None;
-    let mut second_best: Option<f64> = None;
-
-    for season in seasons {
-        let sc = SeasonScorer::new(season, &flat, params);
-        let mut found = Vec::new();
-        arrangements(&ordered, &sc, 0, 0, &mut Vec::new(), &mut found);
-        if found.is_empty() {
-            continue;
-        }
-        found.sort_by(|a, b| {
-            let am = a.0 / a.1.max(1) as f64;
-            let bm = b.0 / b.1.max(1) as f64;
-            am.partial_cmp(&bm).unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        for (i, cand) in found.iter().take(2).enumerate() {
-            let mean = cand.0 / cand.1.max(1) as f64;
-            let better = best.as_ref().map(|(bc, _, _)| mean < *bc).unwrap_or(true);
-            if i == 0 && better {
-                // Whatever was best becomes the runner-up.
-                if let Some((prev, _, _)) = &best {
-                    let prev = *prev;
-                    second_best = Some(second_best.map_or(prev, |s: f64| s.min(prev)));
-                }
-                best = Some((mean, cand.2.clone(), season));
-            } else {
-                second_best = Some(second_best.map_or(mean, |s: f64| s.min(mean)));
-            }
-        }
+    // Solve against every episode of the series as one ordered list, not season by
+    // season.
+    //
+    // A physical box set is laid out in release order, and release order crosses the
+    // season boundaries a metadata provider invents. Requiring the whole set to fit
+    // inside one season is an assumption that holds only while a set is small: twelve
+    // discs of this anthology came to 31 titles against a 30-episode season 1, so no
+    // arrangement fit, and the solver silently fell back to a longer season full of
+    // shorts and produced 68-minute runtime deltas. Flattening removes the false
+    // constraint; the real one — consecutive, non-overlapping, in disc order — is
+    // unchanged and still does the work.
+    let mut flat_episodes: Vec<Episode> = seasons
+        .iter()
+        .flat_map(|s| s.episodes.iter().cloned())
+        .collect();
+    flat_episodes.sort_by_key(|e| (e.season, e.number));
+    if flat_episodes.is_empty() {
+        return None;
     }
 
-    let (mean_cost, starts, season) = best?;
-    let sc = SeasonScorer::new(season, &flat, params);
+    let sc = SeasonScorer::new(&flat_episodes, &flat, params);
+    let mut found = Vec::new();
+    arrangements(&ordered, &sc, 0, 0, &mut Vec::new(), &mut found);
+    if found.is_empty() {
+        return None;
+    }
+    found.sort_by(|a, b| {
+        let am = a.0 / a.1.max(1) as f64;
+        let bm = b.0 / b.1.max(1) as f64;
+        am.partial_cmp(&bm).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mean_cost = found[0].0 / found[0].1.max(1) as f64;
+    let starts = found[0].2.clone();
+    let second_best: Option<f64> = found.get(1).map(|c| c.0 / c.1.max(1) as f64);
+
+    let episodes: &[Episode] = &flat_episodes;
 
     // Per-title verdicts: what each signal would have said on its own, so confidence can
     // rest on independent signals agreeing rather than on one number being small.
@@ -285,7 +291,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
 
     let mut title_offset = 0usize;
     for (d, &start) in ordered.iter().zip(starts.iter()) {
-        let window = &season.episodes[start..start + d.titles.len()];
+        let window = &episodes[start..start + d.titles.len()];
         let matches: Vec<TitleMatch> = d
             .titles
             .iter()
@@ -309,7 +315,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
                 .dialogue
                 .as_ref()
                 .and_then(|_| sc.best_by(title_offset + i, |s| s.subtitle));
-            let chosen = season.episodes[idx].number;
+            let chosen = episodes[idx].number;
             verdicts.push(signals::TitleVerdict {
                 title_name: t.name.clone(),
                 chosen_episode: chosen,
@@ -321,7 +327,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
                 // the margin that matters is the one between whole arrangements.
                 margin: second_best.map(|s| s - mean_cost).unwrap_or(1.0),
             });
-            if let Some(rt) = season.episodes[idx].runtime_mins {
+            if let Some(rt) = episodes[idx].runtime_mins {
                 runtime_total += (t.duration_secs / 60.0 - f64::from(rt)).abs();
                 runtime_counted += 1;
             }
@@ -332,7 +338,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             job_id: d.job_id.clone(),
             first_episode: window.first().map(|e| e.number).unwrap_or(0),
             matches,
-            mean_delta: window_runtime_delta(&d.titles, &season.episodes, start),
+            mean_delta: window_runtime_delta(&d.titles, episodes, start),
         });
         title_offset += d.titles.len();
     }
@@ -352,12 +358,27 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         confidence = Confidence::Weak;
     }
 
+    // Which seasons the placement actually touched — a box set may cross them.
+    let mut touched: Vec<u32> = placements
+        .iter()
+        .flat_map(|p| p.matches.iter().map(|m| m.episode.season))
+        .collect();
+    touched.sort_unstable();
+    touched.dedup();
+    let where_ = match touched.as_slice() {
+        [] => "the series".to_string(),
+        [one] => format!("season {one}"),
+        many => format!(
+            "seasons {}",
+            many.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ")
+        ),
+    };
+
     let mut evidence = vec![
         format!(
-            "solved {} disc(s) together against season {}, requiring consecutive \
+            "solved {} disc(s) together against {where_}, requiring consecutive \
              non-overlapping episodes in disc order",
-            ordered.len(),
-            season.number
+            ordered.len()
         ),
         format!(
             "{total_titles} title(s) placed; runtimes differ by {mean_delta:.1} min on average"
@@ -399,7 +420,8 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         .push("solving the set jointly is still inference — confirm before filing".to_string());
 
     Some(SetSolution {
-        season: season.number,
+        season: touched.first().copied().unwrap_or(0),
+        seasons: touched,
         placements,
         mean_delta,
         mean_cost,
@@ -562,6 +584,62 @@ mod tests {
         }];
         let s = solve(&discs, &[season_one()]).unwrap();
         assert!(!s.confidence.is_auto_acceptable());
+    }
+
+    /// A box set is laid out in release order and may cross season boundaries.
+    ///
+    /// Regression test for a real failure: twelve discs of an anthology came to 31 titles
+    /// against a 30-episode season 1, so nothing fit, and solving season-by-season fell
+    /// back to a longer season of shorts — producing 68-minute runtime deltas and placing
+    /// every disc wrongly. Flattening lets the set straddle the boundary.
+    #[test]
+    fn a_set_may_span_two_seasons() {
+        let s1 = Season {
+            number: 1,
+            episodes: vec![ep(1, 50, "S1E1"), ep(2, 50, "S1E2")],
+        };
+        let s2 = Season {
+            number: 2,
+            episodes: vec![
+                Episode { season: 2, number: 1, name: "S2E1".into(), runtime_mins: Some(90), air_date: None, overview: None },
+                Episode { season: 2, number: 2, name: "S2E2".into(), runtime_mins: Some(30), air_date: None, overview: None },
+            ],
+        };
+        // Two discs whose four titles can only be satisfied by running off the end of
+        // season 1 and into season 2.
+        let discs = vec![
+            SetDisc { disc_number: 1, job_id: "j1".into(), titles: vec![t("a.mkv", 50.0), t("b.mkv", 50.0)] },
+            SetDisc { disc_number: 2, job_id: "j2".into(), titles: vec![t("c.mkv", 90.0), t("d.mkv", 30.0)] },
+        ];
+
+        let sol = solve(&discs, &[s1, s2]).expect("solved");
+        assert_eq!(sol.seasons, vec![1, 2], "the set should straddle both seasons");
+        let placed: Vec<(u32, u32)> = sol
+            .placements
+            .iter()
+            .flat_map(|p| p.matches.iter().map(|m| (m.episode.season, m.episode.number)))
+            .collect();
+        assert_eq!(placed, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
+        assert!(sol.mean_delta < 0.01, "every runtime should match exactly");
+    }
+
+    /// The common case must not regress: a set inside one season still reports that one
+    /// season, not a spurious span.
+    #[test]
+    fn a_set_within_one_season_reports_just_that_season() {
+        let season = Season {
+            number: 1,
+            episodes: vec![ep(1, 30, "A"), ep(2, 60, "B"), ep(3, 90, "C")],
+        };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j1".into(),
+            titles: vec![t("a.mkv", 30.0), t("b.mkv", 60.0)],
+        }];
+        let sol = solve(&discs, &[season]).expect("solved");
+        assert_eq!(sol.seasons, vec![1]);
+        assert_eq!(sol.season, 1);
+        assert!(sol.evidence.iter().any(|e| e.contains("season 1")));
     }
 
     fn ep_with(n: u32, rt: u32, name: &str, overview: &str) -> Episode {

@@ -183,12 +183,30 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
         };
     }
 
-    // Split content from extras purely on length. Chapter count is recorded as
-    // supporting evidence but is not decisive: some real content has no chapters.
-    let mains: Vec<&TitleInput> = titles
+    // Length is the first filter, but not the only one.
+    //
+    // Authored content carries chapter markers; bonus features usually do not. That is
+    // only worth acting on when the disc itself demonstrates the distinction — if *some*
+    // titles here have chapters and others have none, the authoring made a deliberate
+    // split and the chapterless ones are extras whatever their length. Where no title has
+    // chapters, the signal says nothing and length decides alone.
+    //
+    // The case this exists for: a 17-minute chapterless featurette sitting beside a
+    // 104-minute 8-chapter film and a 52-minute 4-chapter episode. On length alone it
+    // cleared the 15-minute threshold and was counted as an episode, which pushed a
+    // box set to 31 titles against a 30-episode season and made the whole set unsolvable.
+    let long_enough: Vec<&TitleInput> = titles
         .iter()
         .filter(|t| t.duration_secs >= params.min_main_secs)
         .collect();
+    let chaptering_is_meaningful = long_enough.iter().any(|t| t.chapters > 0)
+        && long_enough.iter().any(|t| t.chapters == 0);
+
+    let is_content = |t: &TitleInput| -> bool {
+        t.duration_secs >= params.min_main_secs && !(chaptering_is_meaningful && t.chapters == 0)
+    };
+
+    let mains: Vec<&TitleInput> = titles.iter().filter(|t| is_content(t)).collect();
 
     let main_durations: Vec<f64> = mains.iter().map(|t| t.duration_secs).collect();
     let med = median(main_durations.clone());
@@ -221,7 +239,8 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     };
 
     for t in titles {
-        let is_extra = t.duration_secs < params.min_main_secs;
+        let is_extra = !is_content(t);
+        let short = t.duration_secs < params.min_main_secs;
         let role = if is_extra {
             TitleRole::Extra
         } else {
@@ -230,7 +249,13 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
                 _ => TitleRole::Feature,
             }
         };
-        let why = if is_extra {
+        let why = if is_extra && !short {
+            format!(
+                "{:.0} min but no chapters, where other titles here have them — \
+                 authored as an extra",
+                t.duration_secs / 60.0
+            )
+        } else if is_extra {
             format!(
                 "{:.0} min is under the {:.0} min content threshold{}",
                 t.duration_secs / 60.0,
@@ -463,5 +488,50 @@ mod tests {
         assert_eq!(median(vec![1.0, 3.0]), 2.0);
         assert_eq!(median(vec![1.0, 2.0, 9.0]), 2.0);
         assert_eq!(median(vec![]), 0.0);
+    }
+
+    /// Chapter markers separate authored content from bonus features.
+    ///
+    /// Regression test for a real misclassification: a 17-minute chapterless featurette
+    /// sat beside a 104-minute 8-chapter film and a 52-minute 4-chapter episode. It
+    /// cleared the 15-minute length threshold and was counted as content, which pushed a
+    /// twelve-disc box set to 31 titles against a 30-episode season and made the whole
+    /// set unsolvable.
+    #[test]
+    fn a_long_chapterless_title_is_an_extra_when_the_disc_uses_chapters() {
+        let titles = vec![
+            t("C7_t00.mkv", 17.2, 0),
+            t("B1_t01.mkv", 103.7, 8),
+            t("D1_t02.mkv", 51.5, 4),
+        ];
+        let a = analyse(&titles, AnalysisParams::default());
+        let by = |n: &str| a.titles.iter().find(|x| x.name == n).unwrap();
+
+        assert_eq!(by("C7_t00.mkv").role, TitleRole::Extra, "17 min, no chapters");
+        assert_ne!(by("B1_t01.mkv").role, TitleRole::Extra);
+        assert_ne!(by("D1_t02.mkv").role, TitleRole::Extra);
+        assert_eq!(a.main_titles().count(), 2);
+        assert!(
+            by("C7_t00.mkv").why.contains("no chapters"),
+            "the reason should name the evidence: {}",
+            by("C7_t00.mkv").why
+        );
+    }
+
+    /// Where nothing has chapters the signal says nothing, so length must decide alone —
+    /// otherwise a disc authored without any chapter markers would lose every title.
+    #[test]
+    fn chapterless_discs_still_classify_on_length() {
+        let titles = vec![t("a.mkv", 52.0, 0), t("b.mkv", 51.0, 0), t("c.mkv", 6.0, 0)];
+        let a = analyse(&titles, AnalysisParams::default());
+        assert_eq!(a.main_titles().count(), 2, "the two long titles are content");
+    }
+
+    /// And a disc where everything has chapters is unaffected.
+    #[test]
+    fn discs_where_everything_has_chapters_are_unaffected() {
+        let titles = vec![t("a.mkv", 52.0, 4), t("b.mkv", 51.0, 4)];
+        let a = analyse(&titles, AnalysisParams::default());
+        assert_eq!(a.main_titles().count(), 2);
     }
 }
