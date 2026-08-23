@@ -169,6 +169,17 @@ pub struct Job {
     /// Identification result, once stage 3 has run.
     #[serde(default)]
     pub identification: Option<Identification>,
+    /// Set when this job describes a file that was already in the library rather than
+    /// one this tool dumped.
+    ///
+    /// Recorded because it is a real difference in what is known. A ripped job carries
+    /// the drive, the probe, redumper's per-sector `.state` and the logs — evidence about
+    /// how the bytes came off the disc. An adopted job has none of that: all that is
+    /// known is that the file's hash matches a datfile entry today. That is enough to
+    /// name and repack it safely, and not enough to call it a verified dump, so the two
+    /// must stay distinguishable.
+    #[serde(default)]
+    pub adopted_from: Option<String>,
 }
 
 impl Job {
@@ -185,6 +196,7 @@ impl Job {
             backend: None,
             error: None,
             identification: None,
+            adopted_from: None,
         }
     }
 

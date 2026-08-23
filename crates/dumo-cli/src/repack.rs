@@ -153,7 +153,6 @@ struct Plan {
     slug: String,
     title: String,
     format: chdman::DiscFormat,
-    sha1: String,
 }
 
 impl Plan {
@@ -222,7 +221,6 @@ fn plan_job(job_dir: &Path, cfg: &Config) -> Result<Option<Plan>> {
         slug,
         title: id.title.clone(),
         format,
-        sha1: String::new(),
     }))
 }
 

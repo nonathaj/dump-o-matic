@@ -9,6 +9,7 @@
 //! destroy, and the ones that cannot say that too. Keep those statements true when
 //! changing behaviour.
 
+mod adopt;
 mod identify;
 mod migrate;
 mod repack;
@@ -109,6 +110,30 @@ enum Command {
         /// Solve all matching video discs together as one box set.
         #[arg(long)]
         set: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Adopt existing library files that this tool did not rip (stage 0).
+    ///
+    /// Hashes loose disc images against the datfiles and, on an exact match, creates a
+    /// job describing what each one is and where it already lives — after which the
+    /// ordinary commands work on them.
+    ///
+    /// Nothing is moved, renamed or deleted: adopting only records what a file is. Files
+    /// with no exact match are reported and left alone, since a guess here would turn
+    /// into a wrong rename later. Adopted jobs are marked as such, because a matching
+    /// hash is not the same evidence as a verified dump.
+    Adopt {
+        /// Directory to scan. Defaults to every configured destination root.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -235,6 +260,14 @@ fn main() -> Result<()> {
             show,
             set,
         }),
+        Command::Adopt { path, dry_run, yes, config } => {
+            adopt::run(adopt::AdoptArgs {
+                path,
+                dry_run,
+                assume_yes: yes,
+                config_file: config,
+            })
+        }
         Command::Repack { job, dry_run, yes, config } => {
             repack::run(repack::RepackArgs {
                 job,
