@@ -180,6 +180,13 @@ pub struct Job {
     /// must stay distinguishable.
     #[serde(default)]
     pub adopted_from: Option<String>,
+    /// Artifacts deliberately released by `clean`, kept as a record of what was here.
+    ///
+    /// They are removed from `artifacts` so the manifest keeps describing what is
+    /// actually on disk, but the fact of their existence is not forgotten: a reclaimed
+    /// file is not a lost one, and `verify` must not report it as missing.
+    #[serde(default)]
+    pub reclaimed: Vec<String>,
 }
 
 impl Job {
@@ -197,6 +204,7 @@ impl Job {
             error: None,
             identification: None,
             adopted_from: None,
+            reclaimed: Vec::new(),
         }
     }
 

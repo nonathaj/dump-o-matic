@@ -222,6 +222,12 @@ enum Command {
     Clean {
         /// Job id or a fragment of one. Omit to consider every migrated job.
         job: Option<String>,
+        /// Also drop the raw stream, sector state and subchannel data.
+        ///
+        /// These are irreplaceable — nothing can regenerate them, least of all the packed
+        /// image, which discards exactly this information. Off by default.
+        #[arg(long)]
+        provenance: bool,
         /// Show what would happen without deleting anything.
         #[arg(long)]
         dry_run: bool,
@@ -342,9 +348,10 @@ fn main() -> Result<()> {
                 config_file: config,
             })
         }
-        Command::Clean { job, dry_run, yes, config } => {
+        Command::Clean { job, provenance, dry_run, yes, config } => {
             clean::run(clean::CleanArgs {
                 job,
+                provenance,
                 dry_run,
                 assume_yes: yes,
                 config_file: config,
