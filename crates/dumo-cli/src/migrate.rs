@@ -263,6 +263,37 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         }
     }
 
+    // Show removals in the plan, not just writes. A dry run that only lists what would
+    // be created is the wrong half of the picture when the command can also delete.
+    let mut retiring: Vec<PathBuf> = Vec::new();
+    for p in &to_move {
+        let job = Job::load(&p.job_dir)?;
+        let Some(id) = job.identification.as_ref() else {
+            continue;
+        };
+        for rel in &id.superseded {
+            let category = category_of(rel);
+            if let Some(d) = candidates.iter().find(|d| d.accepts(&category)) {
+                let dest = destination_path(&d.root, rel);
+                if dest.is_file() && !retiring.contains(&dest) {
+                    retiring.push(dest);
+                }
+            }
+            let staged = cfg.staging.root.join(rel);
+            if staged.is_file() && !retiring.contains(&staged) {
+                retiring.push(staged);
+            }
+        }
+    }
+    if !retiring.is_empty() {
+        println!();
+        println!("To be retired once the replacements verify (superseded by a repack):");
+        for p in &retiring {
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            println!("  {} ({})", p.display(), human_size(size));
+        }
+    }
+
     let reclaim = cfg.staging.reclaim_after_migrate;
     println!(
         "Staging copies will be {} after verification.",
@@ -345,6 +376,10 @@ pub fn run(args: MigrateArgs) -> Result<()> {
             })
             .unwrap_or(false);
         if all_done {
+            // Only now may anything be removed. The replacement exists at the
+            // destination and has been verified there, so retiring what it superseded
+            // cannot leave the content without a copy.
+            retire_superseded(&mut job, &cfg, &candidates);
             job.stage = JobStage::Migrated;
             job.save(dir)?;
             println!();
@@ -367,6 +402,79 @@ pub fn run(args: MigrateArgs) -> Result<()> {
     Ok(())
 }
 
+/// Remove files a repack replaced, from permanent storage and from staging.
+///
+/// Called only after every current file of the job has landed at its destination and
+/// been verified by re-read. That ordering is the safety property: at no point between
+/// the repack and this call does the content exist in only one place.
+///
+/// A failure to remove is reported and dropped rather than failing the migration — the
+/// new content is already safely in place, and a leftover old file is untidy, not
+/// dangerous. The path stays recorded so a later run tries again.
+fn retire_superseded(
+    job: &mut Job,
+    cfg: &Config,
+    candidates: &[&dumo_core::config::DestinationConfig],
+) {
+    if job
+        .identification
+        .as_ref()
+        .map(|id| id.superseded.is_empty())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let old: Vec<String> = job
+        .identification
+        .as_ref()
+        .map(|id| id.superseded.clone())
+        .unwrap_or_default();
+
+    let mut still_pending = Vec::new();
+    for rel in old {
+        let mut failed = false;
+        let category = category_of(&rel);
+        if let Some(d) = candidates.iter().find(|d| d.accepts(&category)) {
+            let dest = destination_path(&d.root, &rel);
+            // Guard against a repack that did not actually change the file name: never
+            // delete something the job still lists as current.
+            let still_current = job
+                .identification
+                .as_ref()
+                .map(|id| id.files.iter().any(|f| destination_path(&d.root, &f.path) == dest))
+                .unwrap_or(false);
+            if still_current {
+                continue;
+            }
+            if dest.is_file() {
+                match std::fs::remove_file(&dest) {
+                    Ok(()) => println!("  retired {} (replaced)", dest.display()),
+                    Err(e) => {
+                        println!("  could not retire {}: {e}", dest.display());
+                        failed = true;
+                    }
+                }
+            }
+        }
+        let staged = cfg.staging.root.join(&rel);
+        if staged.is_file() {
+            match std::fs::remove_file(&staged) {
+                Ok(()) => println!("  retired staging copy {rel}"),
+                Err(e) => {
+                    println!("  could not retire staging copy {rel}: {e}");
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            still_pending.push(rel);
+        }
+    }
+    if let Some(id) = job.identification.as_mut() {
+        id.superseded = still_pending;
+    }
+}
+
 struct Plan {
     job_dir: PathBuf,
     src: PathBuf,
@@ -382,7 +490,7 @@ struct Plan {
 ///
 /// Staged paths look like `ready/ps2/Title.iso`; the `ready/` prefix is a staging
 /// concept and is dropped so permanent storage sees `ps2/Title.iso`.
-fn destination_path(dest_root: &Path, staging_relative: &str) -> PathBuf {
+pub fn destination_path(dest_root: &Path, staging_relative: &str) -> PathBuf {
     let rel = staging_relative
         .strip_prefix("ready/")
         .unwrap_or(staging_relative);
@@ -396,7 +504,7 @@ fn destination_path(dest_root: &Path, staging_relative: &str) -> PathBuf {
 ///
 /// `ready/games/ps2/Title.iso` -> `games`. This is the key that routes a file to a
 /// destination, which matters once movies, shows and games live on separate shares.
-fn category_of(staging_relative: &str) -> String {
+pub fn category_of(staging_relative: &str) -> String {
     staging_relative
         .strip_prefix("ready/")
         .unwrap_or(staging_relative)
@@ -453,7 +561,7 @@ fn is_network_filesystem(path: &Path) -> bool {
     matches!(t, SMB2_MAGIC | CIFS_MAGIC | SMB_MAGIC | NFS_MAGIC | FUSE_MAGIC)
 }
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const GB: f64 = 1_000_000_000.0;
     const MB: f64 = 1_000_000.0;
     let b = bytes as f64;
@@ -464,7 +572,7 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-fn confirm(prompt: &str) -> Result<bool> {
+pub fn confirm(prompt: &str) -> Result<bool> {
     print!("{prompt} [y/N] ");
     std::io::stdout().flush()?;
     let mut input = String::new();

@@ -721,6 +721,7 @@ fn record_identification(
         confidence: m.confidence,
         source: file_name(&m.source),
         files,
+        superseded: Vec::new(),
         identified_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1272,7 +1273,12 @@ fn solve_one_set(
             v.subtitle_pick
                 .map(|p| format!("E{p:02}"))
                 .unwrap_or_else(|| "-".into()),
-            if v.signals_agree { "agree" } else { "" }
+            match (v.subtitle_confirms(), v.runtime_confirms()) {
+                (true, true) => "both confirm",
+                (true, false) => "dialogue confirms",
+                (false, true) => "runtime confirms",
+                (false, false) => "",
+            }
         );
     }
 

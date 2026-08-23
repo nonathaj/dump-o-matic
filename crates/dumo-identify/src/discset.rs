@@ -344,10 +344,14 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
                 .to_string(),
         );
     } else {
-        let agreed = verdicts.iter().filter(|v| v.signals_agree).count();
+        // Report corroboration of the answer, not agreement between the signals: the
+        // latter reads as a problem when it is only the weaker signal being weak.
+        let confirmed = verdicts.iter().filter(|v| v.subtitle_confirms()).count();
+        let rt = verdicts.iter().filter(|v| v.runtime_confirms()).count();
         evidence.push(format!(
-            "{with_dialogue} of {total_titles} title(s) had dialogue to compare; runtime and \
-             dialogue independently picked the same episode for {agreed} of them"
+            "{with_dialogue} of {total_titles} title(s) had dialogue; choosing freely across \
+             the whole season it reached this same placement for {confirmed} of them \
+             (runtime alone: {rt})"
         ));
     }
 

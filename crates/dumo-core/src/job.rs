@@ -132,6 +132,15 @@ pub struct Identification {
     pub source: String,
     /// Files now sitting in `ready/` under their final names.
     pub files: Vec<ReadyFile>,
+    /// Staging-relative paths this identification *replaced*, still to be cleaned up.
+    ///
+    /// Written when content is repacked into a different container — an `.iso` becoming
+    /// a `.chd`, say. The old file may already have been migrated to permanent storage,
+    /// so it cannot simply be deleted here: it is recorded, and removed only once its
+    /// replacement has been placed and verified at the destination. That ordering is the
+    /// whole point of the field, so nothing is ever deleted before its successor exists.
+    #[serde(default)]
+    pub superseded: Vec<String>,
     /// Unix timestamp of identification.
     pub identified_at: u64,
 }

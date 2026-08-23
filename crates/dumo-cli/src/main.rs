@@ -1,10 +1,17 @@
 //! `dump-o-matic` command-line interface.
 //!
-//! Currently implements the read-only half of the pipeline: drive discovery and Stage 1
-//! disc probing. No command in this binary writes to a disc or to your filesystem.
+//! The four pipeline stages, plus the tools to inspect them: probe a disc (1), rip it
+//! into staging (2), identify and package what came off it (3), and migrate it to
+//! permanent storage (4).
+//!
+//! Help text is part of the safety story here, not decoration. Several commands write,
+//! and `migrate` can remove files — so each command's help says plainly what it can
+//! destroy, and the ones that cannot say that too. Keep those statements true when
+//! changing behaviour.
 
 mod identify;
 mod migrate;
+mod repack;
 mod rip;
 mod verify;
 
@@ -18,7 +25,16 @@ use std::path::PathBuf;
 #[command(
     name = "dump-o-matic",
     version,
-    about = "Staged media ripping pipeline (read-only commands implemented so far)"
+    about = "Staged media ripping pipeline: probe, rip, identify, migrate",
+    long_about = "\
+Staged media ripping pipeline for discs: probe (1), rip to staging (2), identify and
+package (3), migrate to permanent storage (4).
+
+Most commands only read. Those that write say so in their own help. Only `migrate` ever
+removes anything, and only after the replacement copy has been written to its destination
+and verified by reading it back.
+
+Content is never deleted to make room, and an existing file is never overwritten."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -71,11 +87,20 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Identify staged content against datfiles (stage 3, read-only).
+    /// Identify staged content against datfiles (stage 3).
+    ///
+    /// Reports what it found and stops, unless --apply is given. Nothing is ever
+    /// deleted, and an existing file at a destination name is refused rather than
+    /// overwritten.
     Identify {
         /// Job id or a fragment of one. Omit to identify every job.
         job: Option<String>,
         /// Move exactly-matched files into ready/ under their canonical names.
+        ///
+        /// Only exact hash matches are moved, and only when every file of a multi-file
+        /// set has been verified. Where the platform's container policy calls for it
+        /// (games.chd_platforms) the set is packed into a CHD, which is unpacked again
+        /// and checked against the datfile before it is accepted.
         #[arg(long)]
         apply: bool,
         /// Search term for a video disc, overriding the guess from the volume label.
@@ -84,10 +109,41 @@ enum Command {
         /// Solve all matching video discs together as one box set.
         #[arg(long)]
         set: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Re-package identified content into the configured container (stage 3b).
+    ///
+    /// For content filed before a container policy changed — an `.iso` that should now
+    /// be a `.chd`. Only ever adds: the replacement is written to staging and the old
+    /// path recorded, and `migrate` retires it once the new file verifies at the
+    /// destination.
+    Repack {
+        /// Job id or a fragment of one. Omit to consider every eligible job.
+        job: Option<String>,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
     },
     /// Migrate identified content to permanent storage (stage 4).
+    ///
+    /// Copies each file to its destination and verifies it by reading the destination
+    /// back and comparing hashes. An existing file at the destination is never
+    /// overwritten.
+    ///
+    /// This is the only command that removes anything, and it does so only after the new
+    /// copy is verified in place. It retires files that a `repack` replaced, from both
+    /// the destination and staging, and it removes staging copies when
+    /// staging.reclaim_after_migrate is set.
+    ///
+    /// Use --dry-run first to see exactly what would be written and removed.
     Migrate {
         /// Job id or a fragment of one. Omit to migrate every eligible job.
         job: Option<String>,
@@ -100,23 +156,35 @@ enum Command {
         /// Do not prompt for confirmation.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
     },
     /// Re-verify staged artifacts against their manifest hashes.
+    ///
+    /// Re-hashes every artifact a job recorded, re-runs the rip-time integrity checks,
+    /// and re-hashes whatever was filed into ready/. Read-only unless --update is given.
     Verify {
         /// Job id or a fragment of one. Omit to verify every job.
         job: Option<String>,
         /// Update the recorded stage if the verdict changed.
+        ///
+        /// A job that fails verification is marked failed. A failed job that now passes
+        /// every check is promoted back to ripped — which is how a job rejected by a
+        /// since-corrected integrity check recovers without being re-dumped. No file is
+        /// touched either way.
         #[arg(long)]
         update: bool,
+        /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// List jobs in the staging area.
+    /// List jobs in the staging area and the stage each has reached.
     Jobs {
+        /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
     },
@@ -167,6 +235,14 @@ fn main() -> Result<()> {
             show,
             set,
         }),
+        Command::Repack { job, dry_run, yes, config } => {
+            repack::run(repack::RepackArgs {
+                job,
+                dry_run,
+                assume_yes: yes,
+                config_file: config,
+            })
+        }
         Command::Migrate { job, destination, dry_run, yes, config } => {
             migrate::run(migrate::MigrateArgs {
                 job,
@@ -490,4 +566,60 @@ fn print_probe(p: &DiscProbe) {
 
     println!();
     println!("Probed in {} ms", p.probe_millis);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// clap's own consistency check: duplicate flags, bad defaults, malformed argument
+    /// definitions. These are only caught at runtime otherwise, and only on the code path
+    /// that happens to use the broken argument.
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    /// The top-level help is the one thing every user reads, and it is a safety
+    /// statement: it is where someone learns that this tool can delete files. It said
+    /// "read-only commands implemented so far" long after rip, migrate and repack landed.
+    #[test]
+    fn top_level_help_does_not_claim_to_be_read_only() {
+        let about = Cli::command()
+            .get_long_about()
+            .map(|s| s.to_string())
+            .expect("a long_about");
+        assert!(
+            !about.to_lowercase().contains("read-only"),
+            "the tool writes and deletes; the summary must not say otherwise"
+        );
+        assert!(
+            about.contains("verified"),
+            "the summary should say removals happen only after verification"
+        );
+    }
+
+    /// Every subcommand needs at least a one-line summary; an unexplained command in the
+    /// list is worse than no command.
+    #[test]
+    fn every_subcommand_is_described() {
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                sub.get_about().is_some(),
+                "subcommand {name} has no description"
+            );
+            for arg in sub.get_arguments() {
+                assert!(
+                    arg.get_help().is_some() || arg.get_long_help().is_some(),
+                    "{name} --{} has no help text",
+                    arg.get_id()
+                );
+            }
+        }
+    }
 }

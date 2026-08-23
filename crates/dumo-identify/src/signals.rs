@@ -224,40 +224,84 @@ pub struct TitleVerdict {
     pub runtime_pick: u32,
     /// What dialogue alone would have picked, if there was a subtitle track.
     pub subtitle_pick: Option<u32>,
-    /// Whether the independent signals concur.
+    /// Whether the two independent signals point at the same episode.
+    ///
+    /// Informational only. It is deliberately *not* what confidence rests on: when one
+    /// signal is much weaker than the other, they disagree constantly and it says
+    /// nothing about whether the answer is right. Measured on a real box set, runtime
+    /// and dialogue agreed on 2 titles of 10 while the chosen assignment was correct for
+    /// all 10 — the disagreement was entirely runtime being poor.
     pub signals_agree: bool,
     /// Margin over the runner-up on the combined score.
     pub margin: f64,
 }
 
-/// Derive confidence from agreement between independent signals, not from one score.
+impl TitleVerdict {
+    /// Whether dialogue, choosing freely across the whole season, arrived at the episode
+    /// the constrained solve chose.
+    pub fn subtitle_confirms(&self) -> bool {
+        self.subtitle_pick == Some(self.chosen_episode)
+    }
+
+    /// The same for runtime. Reported, but not counted towards confidence — see
+    /// [`confidence_from`].
+    pub fn runtime_confirms(&self) -> bool {
+        self.runtime_pick == self.chosen_episode
+    }
+}
+
+/// Derive confidence from how far the chosen answer is independently corroborated.
 ///
-/// Two signals that fail in unrelated ways agreeing is much better evidence than either
-/// being individually confident. Still never [`Confidence::Exact`]: that is reserved for
-/// cryptographic matches, and this is inference however well it concurs.
+/// The question worth asking is not "do the signals agree with each other" but "does a
+/// signal, computed without the constraint that produced this answer, arrive at the same
+/// answer anyway". Those are different, and the difference matters: [`subtitle_pick`] is
+/// a free argmax over every episode in the season, while the chosen placement comes from
+/// a joint solve that forces consecutive, non-overlapping runs in disc order. The two
+/// computations share only the underlying scores, so the unconstrained one landing on the
+/// constrained one's answer is real evidence rather than a restatement.
+///
+/// Runtime corroboration is not counted towards [`Confidence::Strong`]. On real data it
+/// picks the right episode roughly at chance — several episodes of a series share a
+/// runtime — and its actual value is in the *fit* of a whole arrangement, which the set
+/// margin already measures. Counting it here would let a weak signal vote twice.
+///
+/// [`Confidence::Exact`] is never returned: it is reserved for hash identity, and no
+/// amount of inference earns it.
+///
+/// [`subtitle_pick`]: TitleVerdict::subtitle_pick
 pub fn confidence_from(verdicts: &[TitleVerdict]) -> Confidence {
+    confidence_from_with(verdicts, &ScoringParams::default())
+}
+
+/// [`confidence_from`] with explicit tuning.
+pub fn confidence_from_with(verdicts: &[TitleVerdict], params: &ScoringParams) -> Confidence {
     if verdicts.is_empty() {
         return Confidence::Unknown;
     }
-    let with_subs = verdicts.iter().filter(|v| v.subtitle_pick.is_some()).count();
-    let agreeing = verdicts.iter().filter(|v| v.signals_agree).count();
-    let params = ScoringParams::default();
-    let thin_margin = verdicts.iter().any(|v| v.margin < params.min_margin);
+    // A single arrangement that is barely better than the next one is not something to
+    // accept unattended, however well the signals corroborate it.
+    if verdicts.iter().any(|v| v.margin < params.min_margin) {
+        return Confidence::Weak;
+    }
 
-    if with_subs == verdicts.len() && agreeing == verdicts.len() && !thin_margin {
-        // Every title had both signals available, and they all concurred.
+    let with_subs: Vec<&TitleVerdict> = verdicts
+        .iter()
+        .filter(|v| v.subtitle_pick.is_some())
+        .collect();
+    // Dialogue is the only signal discriminating enough to carry this. With none of it,
+    // the result rests on runtime alone and stays Weak by construction.
+    if with_subs.len() * 2 < verdicts.len() || with_subs.len() < 2 {
+        return Confidence::Weak;
+    }
+
+    let confirming = with_subs.iter().filter(|v| v.subtitle_confirms()).count();
+    if confirming * 3 >= with_subs.len() * 2 {
         Confidence::Strong
     } else {
         Confidence::Weak
     }
 }
 
-/// Assign titles to episodes so that no episode is used twice.
-///
-/// Scoring each title independently lets two titles claim the same episode, which is
-/// never right for a disc — and it happened on real data, with two titles both matching
-/// the same synopsis. Assigning greedily over the strongest pairings first, and retiring
-/// each episode once taken, removes that failure.
 pub fn assign_unique(scores: &[(usize, u32, f64)], n_titles: usize) -> Vec<Option<(u32, f64)>> {
     let mut ranked = scores.to_vec();
     ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
@@ -417,31 +461,101 @@ mod tests {
     }
 
     #[test]
-    fn agreement_between_signals_yields_strong_confidence() {
-        let v = vec![TitleVerdict {
-            title_name: "a".into(),
-            chosen_episode: 1,
-            scores: SignalScores { runtime: 1.0, subtitle: Some(0.8) },
-            runtime_pick: 1,
-            subtitle_pick: Some(1),
-            signals_agree: true,
-            margin: 0.3,
-        }];
+    fn dialogue_corroborating_the_chosen_answer_yields_strong_confidence() {
+        // Two titles whose unconstrained dialogue argmax lands on the episode the joint
+        // solve chose. Runtime disagrees with both, which is exactly the real-world case
+        // this rule exists for.
+        let v = vec![
+            verdict(1, 1, Some(1), 7, 0.3),
+            verdict(2, 2, Some(2), 7, 0.3),
+        ];
+        assert_eq!(confidence_from(&v), Confidence::Strong);
+    }
+
+    /// A weak signal disagreeing must not drag down an answer the strong one confirms.
+    ///
+    /// Measured on a real box set: runtime and dialogue agreed on 2 titles of 10, yet
+    /// dialogue independently reached the correct placement for 9 and every one of the 10
+    /// was right. Judging on signal-versus-signal agreement called that Weak.
+    #[test]
+    fn runtime_disagreeing_does_not_weaken_a_dialogue_confirmed_answer() {
+        let v: Vec<TitleVerdict> = (1..=10)
+            .map(|n| {
+                // Runtime picks the same wrong episode over and over, as it does when
+                // several episodes share a duration.
+                let subtitle_pick = if n == 2 { Some(18) } else { Some(n) };
+                verdict(n, n, subtitle_pick, 21, 0.3)
+            })
+            .collect();
+        assert_eq!(
+            v.iter().filter(|x| x.signals_agree).count(),
+            0,
+            "the signals disagree everywhere"
+        );
         assert_eq!(confidence_from(&v), Confidence::Strong);
     }
 
     #[test]
-    fn disagreement_yields_weak_confidence() {
-        let v = vec![TitleVerdict {
-            title_name: "a".into(),
-            chosen_episode: 1,
-            scores: SignalScores { runtime: 1.0, subtitle: Some(0.8) },
-            runtime_pick: 1,
-            subtitle_pick: Some(4),
-            signals_agree: false,
-            margin: 0.3,
-        }];
+    fn dialogue_pointing_elsewhere_yields_weak_confidence() {
+        let v = vec![
+            verdict(1, 1, Some(4), 1, 0.3),
+            verdict(2, 2, Some(9), 2, 0.3),
+        ];
         assert_eq!(confidence_from(&v), Confidence::Weak);
+    }
+
+    /// Runtime alone can never reach a confidence worth acting on unattended.
+    #[test]
+    fn no_dialogue_is_always_weak_however_well_runtime_fits() {
+        let v = vec![
+            verdict(1, 1, None, 1, 0.9),
+            verdict(2, 2, None, 2, 0.9),
+        ];
+        assert_eq!(confidence_from(&v), Confidence::Weak);
+    }
+
+    /// One title cannot corroborate itself: with no set constraint to satisfy, the
+    /// unconstrained argmax and the chosen answer are nearly the same computation.
+    #[test]
+    fn a_single_title_is_never_strong() {
+        let v = vec![verdict(1, 1, Some(1), 1, 0.9)];
+        assert_eq!(confidence_from(&v), Confidence::Weak);
+    }
+
+    /// A thin margin over the next arrangement overrides any amount of corroboration.
+    #[test]
+    fn a_thin_margin_caps_confidence_at_weak() {
+        let v = vec![
+            verdict(1, 1, Some(1), 1, 0.001),
+            verdict(2, 2, Some(2), 2, 0.001),
+        ];
+        assert_eq!(confidence_from(&v), Confidence::Weak);
+    }
+
+    #[test]
+    fn no_verdicts_is_unknown() {
+        assert_eq!(confidence_from(&[]), Confidence::Unknown);
+    }
+
+    fn verdict(
+        n: u32,
+        chosen: u32,
+        subtitle_pick: Option<u32>,
+        runtime_pick: u32,
+        margin: f64,
+    ) -> TitleVerdict {
+        TitleVerdict {
+            title_name: format!("t{n:02}.mkv"),
+            chosen_episode: chosen,
+            scores: SignalScores {
+                runtime: 0.95,
+                subtitle: subtitle_pick.map(|_| 0.8),
+            },
+            runtime_pick,
+            subtitle_pick,
+            signals_agree: subtitle_pick == Some(runtime_pick),
+            margin,
+        }
     }
 
     /// Agreement is not enough if the win was almost a tie.
