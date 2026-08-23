@@ -181,7 +181,31 @@ pub fn run(args: AdoptArgs) -> Result<()> {
                 });
             }
             _ => {
-                println!("no datfile match");
+                // A CD-based game ripped as an .iso is a common and confusing near-miss:
+                // it holds 2048 bytes per sector where Redump holds all 2352, so it
+                // describes the same disc but can never share a hash. Say so, rather
+                // than leaving the operator with a bare "no match".
+                let near = set.find_by_cd_sector_count(digests.size);
+                match near.first() {
+                    Some(m) => {
+                        println!("no hash match");
+                        println!(
+                            "      sector count matches {:?}, which Redump holds as a raw",
+                            m.game.name
+                        );
+                        println!(
+                            "      2352-byte .bin. This looks like the same disc ripped as a"
+                        );
+                        println!(
+                            "      2048-byte .iso, which drops the sector headers and error"
+                        );
+                        println!(
+                            "      correction — so it cannot be verified or converted back."
+                        );
+                        println!("      Re-dump the disc with `rip` to get an archival copy.");
+                    }
+                    None => println!("no datfile match"),
+                }
                 unmatched.push(path.clone());
             }
         }

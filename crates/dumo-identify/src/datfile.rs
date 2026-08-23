@@ -223,6 +223,11 @@ impl DatMatch {
     }
 }
 
+/// Bytes of user data in a Mode1/Mode2-Form1 CD sector, as an `.iso` stores it.
+pub const CD_USER_BYTES: u64 = 2048;
+/// Bytes in a raw CD sector, as Redump stores it in a `.bin`.
+pub const CD_RAW_BYTES: u64 = 2352;
+
 /// A searchable collection of datfiles.
 #[derive(Debug, Default)]
 pub struct DatfileSet {
@@ -290,6 +295,36 @@ impl DatfileSet {
 
     pub fn game_count(&self) -> usize {
         self.datfiles.iter().map(|d| d.games.len()).sum()
+    }
+
+    /// Find titles whose raw CD track has the same *sector count* as a 2048-byte image.
+    ///
+    /// Explains a specific and otherwise baffling near-miss. A CD-based game ripped as an
+    /// `.iso` holds only the 2048 bytes of user data per sector, while Redump's `.bin`
+    /// holds all 2352 — the sector headers, EDC and ECC are simply absent from the `.iso`.
+    /// The two describe the same disc and can never share a hash, and the `.iso` cannot be
+    /// converted back because the discarded bytes are gone.
+    ///
+    /// Matching on sector count identifies the title anyway, which turns "no datfile
+    /// match" into something the operator can act on: the disc must be re-dumped raw to
+    /// be verifiable. Deliberately kept out of [`DatfileSet::find`] — this is a
+    /// diagnostic, never an identification.
+    pub fn find_by_cd_sector_count(&self, iso_bytes: u64) -> Vec<DatMatch> {
+        if iso_bytes == 0 || iso_bytes % CD_USER_BYTES != 0 {
+            return Vec::new();
+        }
+        let raw = (iso_bytes / CD_USER_BYTES) * CD_RAW_BYTES;
+        let mut out = Vec::new();
+        for (di, dat) in self.datfiles.iter().enumerate() {
+            for (gi, game) in dat.games.iter().enumerate() {
+                for (ri, rom) in game.roms.iter().enumerate() {
+                    if rom.size == raw && rom.name.to_ascii_lowercase().ends_with(".bin") {
+                        out.push(self.build_match((di, gi, ri), "cd sector count"));
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn build_match(&self, key: (usize, usize, usize), matched_on: &'static str) -> DatMatch {
@@ -468,5 +503,48 @@ mod tests {
         let err = Datfile::parse("<datafile><header></header></datafile>", Path::new("x.dat"))
             .unwrap_err();
         assert!(matches!(err, IdentifyError::Parse { .. }));
+    }
+
+    /// The real case this exists for: a PS2 CD game sitting in a library as a 2048-byte
+    /// .iso, where Redump lists a 2352-byte .bin of the same 209,780 sectors.
+    #[test]
+    fn cd_sector_count_explains_an_iso_of_a_cd_game() {
+        let mut set = DatfileSet::default();
+        set.add(Datfile {
+            platform: "Sony - PlayStation 2".into(),
+            version: None,
+            source_path: "t.dat".into(),
+            games: vec![Game {
+                name: "Pinball Hall of Fame - The Gottlieb Collection (USA)".into(),
+                category: Some("Games".into()),
+                roms: vec![
+                    Rom {
+                        name: "Pinball Hall of Fame - The Gottlieb Collection (USA).cue".into(),
+                        size: 118,
+                        crc32: "2958bb94".into(),
+                        md5: String::new(),
+                        sha1: String::new(),
+                    },
+                    Rom {
+                        name: "Pinball Hall of Fame - The Gottlieb Collection (USA).bin".into(),
+                        size: 493_402_560,
+                        crc32: "984c35d3".into(),
+                        md5: String::new(),
+                        sha1: String::new(),
+                    },
+                ],
+            }],
+        });
+
+        let hits = set.find_by_cd_sector_count(429_629_440);
+        assert_eq!(hits.len(), 1, "the 209,780-sector disc should be recognised");
+        assert!(hits[0].game.name.starts_with("Pinball Hall of Fame"));
+        assert_eq!(hits[0].matched_on, "cd sector count");
+
+        // A size that is not a whole number of 2048-byte sectors cannot be an iso.
+        assert!(set.find_by_cd_sector_count(429_629_441).is_empty());
+        // Nor should an unrelated size collide.
+        assert!(set.find_by_cd_sector_count(4_116_250_624).is_empty());
+        assert!(set.find_by_cd_sector_count(0).is_empty());
     }
 }
