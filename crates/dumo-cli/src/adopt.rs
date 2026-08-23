@@ -67,13 +67,75 @@ pub fn run(args: AdoptArgs) -> Result<()> {
     // Files an existing job already accounts for must not be adopted twice.
     let known = known_paths(&cfg)?;
 
+    // Only look where a match is possible. A destination root holds one directory per
+    // platform, and hashing a file whose platform has no datfile loaded cannot produce an
+    // identification — it can only cost a full read. On a network share that is the
+    // difference between minutes and hours: measured on this library, scanning
+    // everything meant reading ~300 GB of Xbox 360 images to prove nothing, against
+    // 11 PlayStation 2 files that could actually match.
+    let covered: Vec<String> = set
+        .datfiles()
+        .iter()
+        .filter_map(|d| es_de_slug(&d.platform).map(str::to_string))
+        .collect();
+    println!(
+        "Platforms with datfiles: {}",
+        if covered.is_empty() {
+            "none".to_string()
+        } else {
+            covered.join(", ")
+        }
+    );
+
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     for root in &roots {
         if !root.is_dir() {
             println!("  {} is not a directory; skipping", root.display());
             continue;
         }
-        collect_images(root, &mut candidates);
+        // A root that *is* a platform directory is scanned whole — that is what an
+        // explicit --path at a platform means.
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if covered.contains(&name) {
+            collect_images(root, &mut candidates);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let n = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if covered.contains(&n) {
+                    collect_images(&p, &mut candidates);
+                } else {
+                    skipped.push(n);
+                }
+            }
+        }
+        // Loose files directly in the root have no platform to infer, so they are still
+        // worth hashing; there are rarely many.
+        for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_file() && is_image(&p) && !file_name(&p).starts_with('.') {
+                candidates.push(p);
+            }
+        }
+    }
+    if !skipped.is_empty() {
+        skipped.sort();
+        skipped.dedup();
+        println!(
+            "Skipped {} platform director{} with no datfile loaded: {}",
+            skipped.len(),
+            if skipped.len() == 1 { "y" } else { "ies" },
+            skipped.join(", ")
+        );
     }
     candidates.sort();
     candidates.retain(|p| !known.contains(p));
@@ -264,14 +326,19 @@ fn collect_images(dir: &Path, out: &mut Vec<PathBuf>) {
         if name.starts_with('.') {
             continue;
         }
-        let ext = p
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        if IMAGE_EXTS.contains(&ext.as_str()) {
+        if is_image(&p) {
             out.push(p);
         }
     }
+}
+
+/// Whether a path looks like a disc image worth hashing.
+fn is_image(p: &Path) -> bool {
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    IMAGE_EXTS.contains(&ext.as_str())
 }
 
 fn file_name(p: &Path) -> String {
@@ -350,5 +417,15 @@ mod tests {
         let mut out = Vec::new();
         collect_images(Path::new("/definitely/not/here"), &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn is_image_accepts_disc_containers_case_insensitively() {
+        for n in ["a.iso", "a.ISO", "a.chd", "a.cue", "a.bin"] {
+            assert!(is_image(Path::new(n)), "{n} should be an image");
+        }
+        for n in ["a.txt", "a.sav", "a.png", "a.m3u", "a", "a.iso.part"] {
+            assert!(!is_image(Path::new(n)), "{n} should not be an image");
+        }
     }
 }
