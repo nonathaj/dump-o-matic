@@ -19,62 +19,76 @@ use std::collections::HashSet;
 
 /// Everything needed to score titles against one candidate season.
 ///
-/// Built once per season rather than per arrangement: the solver enumerates every
-/// consistent placement, so tokenising synopses inside the inner loop would dominate the
-/// run time for no benefit.
+/// Scores are computed **once per (title, episode) pair** and cached. The solver
+/// enumerates every consistent arrangement of the set and evaluates the same pairings
+/// inside each one, so scoring on demand is quadratically wasteful: a five-disc set ran
+/// for over 72 minutes without finishing, re-stemming ~1,500 dialogue words on each of
+/// roughly 340,000 evaluations. There are only titles x episodes distinct pairings — 390
+/// for that same set — so the table is small and the solve becomes table lookups.
 struct SeasonScorer<'a> {
     episodes: &'a [Episode],
-    /// Tokenised reference text per episode, index-aligned with `episodes`.
-    references: Vec<HashSet<String>>,
-    /// Which words are informative *for this season* — measured, not hardcoded. A term
-    /// appearing in every synopsis of a series carries no information about which
-    /// episode this is, whatever the language.
-    corpus: Corpus,
     params: ScoringParams,
+    /// `cost[title][episode]`, indexed by position in the flattened title list.
+    cost: Vec<Vec<f64>>,
+    /// `scores[title][episode]`, kept for reporting each signal separately.
+    scores: Vec<Vec<SignalScores>>,
 }
 
 impl<'a> SeasonScorer<'a> {
-    fn new(season: &'a Season, params: ScoringParams) -> Self {
+    /// `titles` must be the flattened list, in disc order, that the solver will index.
+    fn new(season: &'a Season, titles: &[&DiscTitle], params: ScoringParams) -> Self {
+        // Reference text and its weighting depend only on the season, so both are built
+        // once here rather than per pairing.
         let references: Vec<HashSet<String>> = season
             .episodes
             .iter()
-            .map(|e| dumo_core::text::tokenize(&e.reference_text()))
+            .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
             .collect();
         let corpus = Corpus::from_references(references.iter());
+        // Likewise the dialogue: stemming it is the expensive part, and it does not
+        // change between episodes.
+        let dialogue: Vec<Option<HashSet<String>>> = titles
+            .iter()
+            .map(|t| t.dialogue.as_ref().map(signals::stem_all))
+            .collect();
+
+        let mut scores = Vec::with_capacity(titles.len());
+        let mut cost = Vec::with_capacity(titles.len());
+        for (ti, t) in titles.iter().enumerate() {
+            let mut srow = Vec::with_capacity(season.episodes.len());
+            let mut crow = Vec::with_capacity(season.episodes.len());
+            for (ei, e) in season.episodes.iter().enumerate() {
+                let sc = SignalScores {
+                    runtime: signals::runtime_score_with(t.duration_secs / 60.0, e, &params),
+                    subtitle: dialogue[ti].as_ref().map(|d| {
+                        signals::subtitle_score_stemmed(d, &references[ei], &corpus)
+                    }),
+                };
+                crow.push(1.0 - sc.combined_with(&params));
+                srow.push(sc);
+            }
+            scores.push(srow);
+            cost.push(crow);
+        }
+
         Self {
             episodes: &season.episodes,
-            references,
-            corpus,
             params,
+            cost,
+            scores,
         }
     }
 
-    /// Both signals' opinions of one pairing.
-    fn scores(&self, title: &DiscTitle, idx: usize) -> SignalScores {
-        let e = &self.episodes[idx];
-        SignalScores {
-            runtime: signals::runtime_score_with(title.duration_secs / 60.0, e, &self.params),
-            subtitle: title.dialogue.as_ref().map(|d| {
-                signals::subtitle_score_weighted(d, &self.references[idx], &self.corpus)
-            }),
-        }
-    }
-
-    /// Cost of a pairing: lower is better, so the solver still minimises.
-    fn cost(&self, title: &DiscTitle, idx: usize) -> f64 {
-        1.0 - self.scores(title, idx).combined_with(&self.params)
-    }
-
-    /// Which episode in the whole season a single signal would pick on its own.
-    fn best_by(&self, title: &DiscTitle, f: impl Fn(&SignalScores) -> Option<f64>) -> Option<u32> {
+    /// Which episode a single signal would pick for this title, on its own.
+    fn best_by(&self, title: usize, f: impl Fn(&SignalScores) -> Option<f64>) -> Option<u32> {
         (0..self.episodes.len())
-            .filter_map(|i| f(&self.scores(title, i)).map(|s| (i, s)))
+            .filter_map(|i| f(&self.scores[title][i]).map(|s| (i, s)))
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| self.episodes[i].number)
     }
 }
 
-/// One disc awaiting placement.
+/// One disc awaiting placement./// One disc awaiting placement.
 #[derive(Debug, Clone)]
 pub struct SetDisc {
     /// Disc number within the set, from the volume label.
@@ -129,15 +143,20 @@ impl SetSolution {
 /// Every title is counted now, not just those whose episode publishes a runtime: a
 /// missing runtime scores neutrally rather than dropping out, and dialogue can still
 /// decide the pairing on its own.
-fn window_cost(titles: &[DiscTitle], sc: &SeasonScorer, start: usize) -> Option<(f64, usize)> {
-    if start + titles.len() > sc.episodes.len() {
+fn window_cost(
+    sc: &SeasonScorer,
+    title_offset: usize,
+    len: usize,
+    start: usize,
+) -> Option<(f64, usize)> {
+    if start + len > sc.episodes.len() {
         return None;
     }
     let mut total = 0.0;
-    for (i, t) in titles.iter().enumerate() {
-        total += sc.cost(t, start + i);
+    for i in 0..len {
+        total += sc.cost[title_offset + i][start + i];
     }
-    Some((total, titles.len()))
+    Some((total, len))
 }
 
 /// Mean absolute runtime difference over a window, for reporting in minutes.
@@ -174,14 +193,16 @@ fn arrangements(
     if idx == discs.len() {
         let mut total = 0.0;
         let mut counted = 0;
+        let mut offset = 0usize;
         for (d, &s) in discs.iter().zip(acc.iter()) {
-            match window_cost(&d.titles, sc, s) {
+            match window_cost(sc, offset, d.titles.len(), s) {
                 Some((c, n)) => {
                     total += c;
                     counted += n;
                 }
                 None => return,
             }
+            offset += d.titles.len();
         }
         out.push((total, counted, acc.clone()));
         return;
@@ -219,11 +240,14 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         .filter(|t| t.dialogue.is_some())
         .count();
 
+    // The solver indexes titles by position in this flattened, disc-ordered list.
+    let flat: Vec<&DiscTitle> = ordered.iter().flat_map(|d| d.titles.iter()).collect();
+
     let mut best: Option<(f64, Vec<usize>, &Season)> = None;
     let mut second_best: Option<f64> = None;
 
     for season in seasons {
-        let sc = SeasonScorer::new(season, params);
+        let sc = SeasonScorer::new(season, &flat, params);
         let mut found = Vec::new();
         arrangements(&ordered, &sc, 0, 0, &mut Vec::new(), &mut found);
         if found.is_empty() {
@@ -252,7 +276,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     }
 
     let (mean_cost, starts, season) = best?;
-    let sc = SeasonScorer::new(season, params);
+    let sc = SeasonScorer::new(season, &flat, params);
 
     // Per-title verdicts: what each signal would have said on its own, so confidence can
     // rest on independent signals agreeing rather than on one number being small.
@@ -261,6 +285,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     let mut runtime_total = 0.0;
     let mut runtime_counted = 0usize;
 
+    let mut title_offset = 0usize;
     for (d, &start) in ordered.iter().zip(starts.iter()) {
         let window = &season.episodes[start..start + d.titles.len()];
         let matches: Vec<TitleMatch> = d
@@ -280,9 +305,12 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
 
         for (i, t) in d.titles.iter().enumerate() {
             let idx = start + i;
-            let scores = sc.scores(t, idx);
-            let runtime_pick = sc.best_by(t, |s| Some(s.runtime)).unwrap_or(0);
-            let subtitle_pick = t.dialogue.as_ref().and_then(|_| sc.best_by(t, |s| s.subtitle));
+            let scores = sc.scores[title_offset + i][idx];
+            let runtime_pick = sc.best_by(title_offset + i, |s| Some(s.runtime)).unwrap_or(0);
+            let subtitle_pick = t
+                .dialogue
+                .as_ref()
+                .and_then(|_| sc.best_by(title_offset + i, |s| s.subtitle));
             let chosen = season.episodes[idx].number;
             verdicts.push(signals::TitleVerdict {
                 title_name: t.name.clone(),
@@ -308,6 +336,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             matches,
             mean_delta: window_runtime_delta(&d.titles, &season.episodes, start),
         });
+        title_offset += d.titles.len();
     }
 
     let mean_delta = if runtime_counted == 0 {

@@ -190,12 +190,27 @@ pub fn subtitle_score_weighted(
     if reference.is_empty() || dialogue_words.is_empty() {
         return 0.0;
     }
-    let dialogue = stem_all(dialogue_words);
-    let reference_stems = stem_all(reference);
+    subtitle_score_stemmed(&stem_all(dialogue_words), &stem_all(reference), corpus)
+}
 
+/// [`subtitle_score_weighted`] over inputs that are already stemmed.
+///
+/// Stemming dominates this function, and a solver that evaluates the same pairing inside
+/// thousands of candidate arrangements must not redo it every time. Measured before this
+/// split existed: a five-disc set took over 72 minutes and had not finished, re-stemming
+/// ~1,500 dialogue words on each of roughly 340,000 evaluations. Callers in a loop should
+/// stem once and use this.
+pub fn subtitle_score_stemmed(
+    dialogue: &HashSet<String>,
+    reference_stems: &HashSet<String>,
+    corpus: &Corpus,
+) -> f64 {
+    if reference_stems.is_empty() || dialogue.is_empty() {
+        return 0.0;
+    }
     let mut total = 0.0;
     let mut hit = 0.0;
-    for w in &reference_stems {
+    for w in reference_stems {
         let weight = corpus.weight(w);
         total += weight;
         if dialogue.contains(w) {
