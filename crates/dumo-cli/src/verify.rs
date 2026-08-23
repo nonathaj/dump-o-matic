@@ -73,9 +73,19 @@ fn verify_one(
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
 
-    if job.artifacts.is_empty() {
-        println!("  no artifacts recorded — nothing to verify");
-        return Ok(false);
+    // A job with no artifacts is not necessarily a job with nothing to check. An adopted
+    // job never had artifacts — it was never ripped — but it does name files in the
+    // library, and those are exactly what wants verifying. Bail only when there is
+    // genuinely nothing on either side.
+    let ready_count = job
+        .identification
+        .as_ref()
+        .map(|id| id.files.len())
+        .unwrap_or(0);
+    if job.artifacts.is_empty() && ready_count == 0 {
+        println!("  nothing recorded to verify");
+        // Not a failure: an interrupted or empty job is a state, not a corruption.
+        return Ok(true);
     }
 
     let mut problems: Vec<String> = Vec::new();
