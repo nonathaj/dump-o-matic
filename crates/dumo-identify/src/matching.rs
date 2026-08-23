@@ -46,6 +46,22 @@ pub struct SeasonMatch {
     pub disc_hint_used: bool,
     /// Every scored window: (mean, max, counted, start index).
     pub all_windows: Vec<(f64, f64, usize, usize)>,
+    /// How many titles in the chosen window actually had a runtime to compare against.
+    ///
+    /// Kept because the mean is meaningless without it: TMDB often publishes no runtime
+    /// for documentary episodes, and a "1.5 min average" over one title of three is a
+    /// measurement of that one title, not of the window.
+    pub counted: usize,
+}
+
+/// Whether enough of the window was actually measured to claim more than weak confidence.
+///
+/// Regression guard for a real overconfidence bug: a disc of three titles was reported as
+/// a **strong** match to a season when two of the three episodes had no published runtime
+/// and were never scored. The evidence line said so in as many words while the verdict
+/// ignored it. One corroborating measurement is not corroboration.
+pub fn enough_measured(counted: usize, titles: usize) -> bool {
+    counted >= 2 && counted * 3 >= titles * 2
 }
 
 impl SeasonMatch {
@@ -260,7 +276,10 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
 
     // Confidence reflects both how close the fit is and how distinctive it is. A tight
     // fit that a dozen other windows also achieve is not evidence of anything.
-    let confidence = if mean_delta <= 2.0 && margin.map(|m| m >= 2.0).unwrap_or(true) {
+    let confidence = if enough_measured(counted, k)
+        && mean_delta <= 2.0
+        && margin.map(|m| m >= 2.0).unwrap_or(true)
+    {
         Confidence::Strong
     } else {
         Confidence::Weak
@@ -279,8 +298,14 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
     ];
     if counted < k {
         evidence.push(format!(
-            "{} of {k} episodes had no runtime in TMDB and were not scored",
-            k - counted
+            "{} of {k} episodes had no runtime in TMDB and were not scored{}",
+            k - counted,
+            if enough_measured(counted, k) {
+                ""
+            } else {
+                " — too little of this window was measured to claim more than weak \
+                 confidence, whatever the average says"
+            }
         ));
     }
     match margin {
@@ -316,6 +341,7 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
     }
 
     Some(SeasonMatch {
+        counted,
         season: season.number,
         first_episode: window.first().map(|e| e.number).unwrap_or(0),
         matches,
@@ -363,7 +389,8 @@ pub fn match_seasons(
         out[0].runner_up_delta = Some(strongest_alternative);
         // A tie broken by the disc number is still not proof, but it is a real
         // independent signal, so it is worth distinguishing from an unresolved tie.
-        out[0].confidence = if best <= 2.0 && margin >= 2.0 {
+        let measured = enough_measured(out[0].counted, out[0].matches.len());
+        out[0].confidence = if measured && best <= 2.0 && margin >= 2.0 {
             Confidence::Strong
         } else {
             Confidence::Weak
@@ -616,5 +643,73 @@ mod tests {
     fn query_from_label_handles_odd_input() {
         assert_eq!(query_from_label(""), "");
         assert_eq!(query_from_label("DISC_1"), "");
+    }
+
+    /// Regression test for a real overconfidence bug.
+    ///
+    /// A disc of three titles was reported as a **strong** match to a season where two of
+    /// the three episodes had no published runtime and were never scored. The "1.5 min
+    /// average" was a measurement of one title, and the evidence line even said two were
+    /// unscored — while the verdict ignored it. On real data the answer was also wrong:
+    /// the disc belonged to season 1 and it chose season 3.
+    #[test]
+    fn a_mostly_unmeasured_window_is_never_strong() {
+        let season = Season {
+            number: 3,
+            episodes: vec![
+                Episode { season: 3, number: 27, name: "Seau".into(), runtime_mins: None, air_date: None, overview: None },
+                Episode { season: 3, number: 28, name: "42 to 1".into(), runtime_mins: None, air_date: None, overview: None },
+                Episode { season: 3, number: 29, name: "Deion's Double Play".into(), runtime_mins: Some(50), air_date: None, overview: None },
+            ],
+        };
+        let titles = vec![title("a.mkv", 17.0), title("b.mkv", 104.0), title("c.mkv", 52.0)];
+
+        let m = match_season(&titles, &season).expect("matched");
+        assert_eq!(m.counted, 1, "only one episode had a runtime to compare");
+        assert_eq!(
+            m.confidence,
+            Confidence::Weak,
+            "one measurement out of three cannot be strong"
+        );
+        assert!(
+            m.evidence.iter().any(|e| e.contains("too little of this window was measured")),
+            "the report must explain the downgrade: {:?}",
+            m.evidence
+        );
+    }
+
+    #[test]
+    fn measurement_coverage_thresholds() {
+        // A single measurement never suffices, however many titles there are.
+        assert!(!enough_measured(1, 1));
+        assert!(!enough_measured(1, 3));
+        // Two of three is the boundary and counts.
+        assert!(enough_measured(2, 3));
+        assert!(enough_measured(3, 3));
+        // One of two does not.
+        assert!(!enough_measured(1, 2));
+        assert!(enough_measured(2, 2));
+        // Two of five does not.
+        assert!(!enough_measured(2, 5));
+        assert!(enough_measured(4, 5));
+        assert!(!enough_measured(0, 0));
+    }
+
+    /// A fully measured window is still allowed to be strong; the guard must not make
+    /// every match weak.
+    #[test]
+    fn a_fully_measured_distinctive_window_is_still_strong() {
+        let season = Season {
+            number: 1,
+            episodes: vec![
+                Episode { season: 1, number: 1, name: "A".into(), runtime_mins: Some(30), air_date: None, overview: None },
+                Episode { season: 1, number: 2, name: "B".into(), runtime_mins: Some(60), air_date: None, overview: None },
+                Episode { season: 1, number: 3, name: "C".into(), runtime_mins: Some(90), air_date: None, overview: None },
+            ],
+        };
+        let titles = vec![title("a.mkv", 30.0), title("b.mkv", 60.0)];
+        let m = match_season(&titles, &season).expect("matched");
+        assert_eq!(m.counted, 2);
+        assert_eq!(m.confidence, Confidence::Strong);
     }
 }

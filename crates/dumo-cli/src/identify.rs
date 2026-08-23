@@ -284,6 +284,19 @@ fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashSet<Str
     (words.len() >= 20).then_some(words)
 }
 
+/// Describe a runtime difference, or say there was nothing to compare.
+///
+/// TMDB publishes no runtime for many documentary episodes, which used to surface as
+/// "delta NaN min" — indistinguishable from a bug, and easy to read past. An unmeasured
+/// pairing should look unmeasured.
+fn delta_note(delta_mins: f64) -> String {
+    if delta_mins.is_nan() {
+        "no runtime published".to_string()
+    } else {
+        format!("delta {delta_mins:.0} min")
+    }
+}
+
 /// Rebuild cue sheets into Redump's canonical form, completing CD sets.
 ///
 /// A CD dump's `.cue` is generated text that names its track files. redumper names them
@@ -954,13 +967,13 @@ fn analyse_video(
     );
     for m in &best.matches {
         println!(
-            "    {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<44} (delta {:.0} min)",
+            "    {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<44} ({})",
             m.title_name,
             m.title_mins,
             m.episode.season,
             m.episode.number,
             truncate(&m.episode.name, 44),
-            m.delta_mins
+            delta_note(m.delta_mins)
         );
     }
     println!(
@@ -1290,13 +1303,13 @@ fn solve_one_set(
         println!("Disc {} ({})", p.disc_number, p.job_id);
         for m in &p.matches {
             println!(
-                "  {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<40} (delta {:.0} min)",
+                "  {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<40} ({})",
                 m.title_name,
                 m.title_mins,
                 m.episode.season,
                 m.episode.number,
                 truncate(&m.episode.name, 40),
-                m.delta_mins
+                delta_note(m.delta_mins)
             );
         }
         for m in &p.matches {
