@@ -966,10 +966,13 @@ fn analyse_video(
     println!(
         "  Confidence: {}  ({})",
         best.confidence,
+        // "strong (needs confirmation)" reads as a contradiction without saying why. It
+        // is not a hedge on the evidence: video identification is inference, and only
+        // hash identity is ever filed unattended.
         if best.confidence.is_auto_acceptable() {
             "eligible for unattended acceptance"
         } else {
-            "needs confirmation"
+            "inferred — only exact hash matches are filed unattended"
         }
     );
     for e in &best.evidence {
@@ -1246,7 +1249,7 @@ fn solve_one_set(
         if solution.confidence.is_auto_acceptable() {
             "eligible for unattended acceptance"
         } else {
-            "needs confirmation"
+            "inferred — only exact hash matches are filed unattended"
         }
     );
     for e in &solution.evidence {
