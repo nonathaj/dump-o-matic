@@ -42,7 +42,9 @@ impl Default for RipArgs {
     }
 }
 
-pub fn run(args: RipArgs) -> Result<()> {
+/// Rip the disc in a drive. Returns the job id, so a caller driving the whole pipeline
+/// knows which job to carry forward.
+pub fn run(args: RipArgs) -> Result<Option<String>> {
     let cfg = Config::load(args.config_file.as_deref())?;
 
     // Configuration must be sound before we touch a disc.
@@ -188,12 +190,12 @@ pub fn run(args: RipArgs) -> Result<()> {
         println!();
         println!("Dry run: would create {} and rip {} title(s).", job_dir.display(), selected.len());
         println!("Nothing was written.");
-        return Ok(());
+        return Ok(None);
     }
 
     if !args.assume_yes && !confirm("Proceed with rip?")? {
         println!("Aborted; nothing was written.");
-        return Ok(());
+        return Ok(None);
     }
 
     // --- Rip ---
@@ -307,7 +309,7 @@ pub fn run(args: RipArgs) -> Result<()> {
     println!("Next: dump-o-matic identify {job_id}");
     println!("      or --set with the other discs of a box set, to solve them together.");
 
-    Ok(())
+    Ok(Some(job_id))
 }
 
 /// Rip a game or data disc with redumper, producing an archival image.
@@ -316,7 +318,7 @@ fn rip_game(
     device: &str,
     probe: &dumo_core::DiscProbe,
     args: &RipArgs,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let backend_version = dumo_backends::redumper::version()
         .context("checking redumper (install it from https://github.com/superg/redumper)")?;
     println!("Backend: {backend_version}");
@@ -360,12 +362,12 @@ fn rip_game(
             job_dir.display()
         );
         println!("Nothing was written.");
-        return Ok(());
+        return Ok(None);
     }
 
     if !args.assume_yes && !confirm("Proceed with dump?")? {
         println!("Aborted; nothing was written.");
-        return Ok(());
+        return Ok(None);
     }
 
     Job::create_dir(&job_dir)?;
@@ -605,7 +607,7 @@ fn rip_game(
         println!();
         println!("Next: dump-o-matic identify {job_id}");
     }
-    Ok(())
+    Ok(Some(job_id))
 }
 
 /// Shared pre-flight space check.

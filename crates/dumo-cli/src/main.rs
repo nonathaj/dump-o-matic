@@ -14,6 +14,7 @@ mod identify;
 mod migrate;
 mod repack;
 mod rip;
+mod run;
 mod verify;
 
 use anyhow::{Context, Result};
@@ -70,6 +71,30 @@ enum Command {
         /// Rip only this title index. Default: every title long enough to qualify.
         #[arg(long)]
         title: Option<u32>,
+        /// Ignore titles shorter than this many seconds.
+        #[arg(long, default_value_t = 300)]
+        min_length: u32,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Rip the disc in a drive and take it as far through the pipeline as it can go.
+    ///
+    /// Runs rip, identify, repack and migrate in sequence, stopping at the first stage
+    /// that cannot proceed without you and saying why. Exact hash matches go all the way
+    /// to permanent storage unattended; anything identified by inference — every video
+    /// disc, for now — stops after ripping for you to confirm.
+    ///
+    /// Stopping early is a normal outcome, not a failure, and does not exit non-zero.
+    Run {
+        /// Device to rip. Defaults to the first drive found.
+        device: Option<String>,
         /// Ignore titles shorter than this many seconds.
         #[arg(long, default_value_t = 300)]
         min_length: u32,
@@ -238,6 +263,15 @@ fn main() -> Result<()> {
         Command::Drives { json } => cmd_drives(json),
         Command::Probe { device, json } => cmd_probe(device, json),
         Command::Config { action } => cmd_config(action),
+        Command::Run { device, min_length, dry_run, yes, config } => {
+            run::run(run::RunArgs {
+                device,
+                min_length,
+                dry_run,
+                assume_yes: yes,
+                config_file: config,
+            })
+        }
         Command::Rip {
             device,
             title,
@@ -252,7 +286,8 @@ fn main() -> Result<()> {
             dry_run,
             assume_yes: yes,
             config_file: config,
-        }),
+        })
+        .map(|_| ()),
         Command::Identify { job, apply, show, set, config } => identify::run(identify::IdentifyArgs {
             job,
             config_file: config,
