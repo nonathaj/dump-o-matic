@@ -136,6 +136,14 @@ enum Command {
         /// Solve all matching video discs together as one box set.
         #[arg(long)]
         set: bool,
+        /// Also file video identifications, which are always inference.
+        ///
+        /// Requires --apply. Video has no hash to check against, so a match is a
+        /// judgement about runtimes and dialogue rather than proof. This flag is how you
+        /// say you have reviewed the proposal and accept it; nothing else in the tool
+        /// will file an inferred match, and `run` never passes it.
+        #[arg(long, requires = "apply")]
+        accept_inferred: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -316,13 +324,16 @@ fn main() -> Result<()> {
             config_file: config,
         })
         .map(|_| ()),
-        Command::Identify { job, apply, show, set, config } => identify::run(identify::IdentifyArgs {
-            job,
-            config_file: config,
-            apply,
-            show,
-            set,
-        }),
+        Command::Identify { job, apply, show, set, accept_inferred, config } => {
+            identify::run(identify::IdentifyArgs {
+                job,
+                config_file: config,
+                apply,
+                show,
+                set,
+                accept_inferred,
+            })
+        }
         Command::Adopt { path, dry_run, yes, config } => {
             adopt::run(adopt::AdoptArgs {
                 path,

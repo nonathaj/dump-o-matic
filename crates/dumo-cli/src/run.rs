@@ -63,6 +63,8 @@ pub fn run(args: RunArgs) -> Result<()> {
         apply: true,
         show: None,
         set: false,
+        // Never. An inferred match is a judgement call and this is the unattended path.
+        accept_inferred: false,
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {
