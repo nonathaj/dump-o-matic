@@ -55,6 +55,35 @@ pub fn runtime_score_with(title_mins: f64, episode: &Episode, p: &ScoringParams)
     }
 }
 
+/// Whether these two runtimes are too far apart for the pairing to be possible at all.
+///
+/// Runtime plays two different roles and they need different treatment. It is a *weak
+/// discriminator* — episodes of a series routinely run to the same minute, which is why
+/// it is down-weighted against dialogue. But it is a *strong disqualifier*: a 103 minute
+/// film cannot be a 51 minute episode, and that is not weak evidence, it is proof.
+///
+/// Conflating the two produced a real misplacement. A 103 minute title scored 0.00 on
+/// runtime against a 51 minute episode — the worst possible score — and the weighted sum
+/// let a 0.82 dialogue score override it anyway, sending two discs into the wrong season
+/// while a near-exact fit sat unused. Scoring cannot express "impossible"; only a veto
+/// can.
+///
+/// Both an absolute and a proportional threshold must be crossed, so that two long films
+/// are not separated merely because a third of a long runtime is a lot of minutes.
+pub fn runtime_is_implausible(title_mins: f64, episode: &Episode, p: &ScoringParams) -> bool {
+    let Some(rt) = episode.runtime_mins else {
+        // Nothing published: absent evidence cannot disqualify anything.
+        return false;
+    };
+    let rt = f64::from(rt);
+    if rt <= 0.0 || title_mins <= 0.0 {
+        return false;
+    }
+    let delta = (title_mins - rt).abs();
+    let longer = title_mins.max(rt);
+    delta > p.runtime_veto_mins && delta / longer > p.runtime_veto_fraction
+}
+
 /// [`runtime_score_with`] using default tuning.
 pub fn runtime_score(title_mins: f64, episode: &Episode) -> f64 {
     runtime_score_with(title_mins, episode, &ScoringParams::default())
@@ -75,6 +104,21 @@ pub struct ScoringParams {
     pub subtitle_weight: f64,
     /// A win narrower than this over the runner-up is treated as a tie.
     pub min_margin: f64,
+    /// A runtime difference this large, in minutes, rules a pairing out entirely —
+    /// provided it is also a large *fraction* of the longer of the two.
+    pub runtime_veto_mins: f64,
+    /// ...that fraction. Both conditions must hold, so a long film is not vetoed against
+    /// another long film merely because the absolute gap is big.
+    pub runtime_veto_fraction: f64,
+    /// Cost charged per episode skipped *between* two discs of a set.
+    ///
+    /// The discs of a box set run continuously — verified against a confirmed
+    /// twelve-disc layout, where all 25 known-correct placements were contiguous with no
+    /// gaps whatever. Leaving a gap free of charge let the solver skip five episodes and
+    /// three seasons to reach a slightly better-scoring window, which is how two discs
+    /// ended up in the wrong season. Small enough that a genuine gap of an episode or two
+    /// is affordable; large enough that skipping dozens is not.
+    pub gap_penalty: f64,
 }
 
 impl Default for ScoringParams {
@@ -83,6 +127,12 @@ impl Default for ScoringParams {
             runtime_tolerance_mins: 10.0,
             subtitle_weight: 0.65,
             min_margin: 0.05,
+            // A 103 minute film is not a 51 minute episode. Runtimes vary by a few
+            // minutes between a broadcast and a disc cut, and occasionally by more, but
+            // not by a third of the running time.
+            runtime_veto_mins: 15.0,
+            runtime_veto_fraction: 0.35,
+            gap_penalty: 0.05,
         }
     }
 }
@@ -626,5 +676,68 @@ mod tests {
         assert!(both.combined() < 1.0);
         assert!(both.combined() > 0.6);
         assert_eq!(runtime_only.combined(), 1.0);
+    }
+
+    /// The real misplacement this exists to prevent.
+    ///
+    /// A 103 minute film was matched to a 51 minute episode. Runtime scored 0.00 — the
+    /// worst possible — and a 0.82 dialogue score still carried it, because a weighted
+    /// sum cannot express "impossible". Two discs went into the wrong season while a
+    /// near-exact fit went unused.
+    #[test]
+    fn a_feature_length_title_cannot_be_a_short_episode() {
+        let p = ScoringParams::default();
+        let ep = |rt: u32| Episode {
+            season: 1, number: 1, name: String::new(),
+            runtime_mins: Some(rt), air_date: None, overview: None,
+        };
+        assert!(runtime_is_implausible(103.0, &ep(51), &p), "103 min is not a 51 min episode");
+        assert!(runtime_is_implausible(52.0, &ep(103), &p), "and the reverse");
+    }
+
+    /// The veto must not fire on the ordinary variation between a broadcast and a disc
+    /// cut, or the correct placements it is meant to protect would be excluded too.
+    #[test]
+    fn ordinary_runtime_variation_is_not_vetoed() {
+        let p = ScoringParams::default();
+        let ep = |rt: u32| Episode {
+            season: 1, number: 1, name: String::new(),
+            runtime_mins: Some(rt), air_date: None, overview: None,
+        };
+        // Every one of these is a placement the twelve-disc set got right.
+        assert!(!runtime_is_implausible(52.0, &ep(51), &p));
+        assert!(!runtime_is_implausible(54.0, &ep(53), &p));
+        assert!(!runtime_is_implausible(103.0, &ep(101), &p));
+        assert!(!runtime_is_implausible(102.0, &ep(102), &p));
+        assert!(!runtime_is_implausible(80.0, &ep(80), &p));
+        assert!(!runtime_is_implausible(69.0, &ep(69), &p));
+    }
+
+    /// Two long titles must not be separated just because a third of a long runtime is a
+    /// lot of minutes — the proportional test is why both conditions are required.
+    #[test]
+    fn both_an_absolute_and_a_proportional_gap_are_required() {
+        let p = ScoringParams::default();
+        let ep = |rt: u32| Episode {
+            season: 1, number: 1, name: String::new(),
+            runtime_mins: Some(rt), air_date: None, overview: None,
+        };
+        // 20 minutes apart, but only 17% of the longer: not vetoed.
+        assert!(!runtime_is_implausible(120.0, &ep(100), &p));
+        // 40% apart, but only 10 minutes: not vetoed either.
+        assert!(!runtime_is_implausible(25.0, &ep(15), &p));
+        // Both: vetoed.
+        assert!(runtime_is_implausible(100.0, &ep(50), &p));
+    }
+
+    /// An episode with no published runtime cannot disqualify anything.
+    #[test]
+    fn a_missing_runtime_never_vetoes() {
+        let p = ScoringParams::default();
+        let ep = Episode {
+            season: 1, number: 1, name: String::new(),
+            runtime_mins: None, air_date: None, overview: None,
+        };
+        assert!(!runtime_is_implausible(103.0, &ep, &p));
     }
 }

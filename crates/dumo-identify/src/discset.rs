@@ -56,13 +56,20 @@ impl<'a> SeasonScorer<'a> {
             let mut srow = Vec::with_capacity(episodes.len());
             let mut crow = Vec::with_capacity(episodes.len());
             for (ei, e) in episodes.iter().enumerate() {
+                let mins = t.duration_secs / 60.0;
                 let sc = SignalScores {
-                    runtime: signals::runtime_score_with(t.duration_secs / 60.0, e, &params),
+                    runtime: signals::runtime_score_with(mins, e, &params),
                     subtitle: dialogue[ti].as_ref().map(|d| {
                         signals::subtitle_score_stemmed(d, &references[ei], &corpus)
                     }),
                 };
-                crow.push(1.0 - sc.combined_with(&params));
+                // An impossible pairing is excluded outright rather than merely scored
+                // badly, so no amount of dialogue agreement can vote it back in.
+                crow.push(if signals::runtime_is_implausible(mins, e, &params) {
+                    f64::INFINITY
+                } else {
+                    1.0 - sc.combined_with(&params)
+                });
                 srow.push(sc);
             }
             scores.push(srow);
@@ -215,13 +222,13 @@ pub const MAX_CANDIDATE_EPISODES: usize = 2_000;
 /// Largest number of discs solved jointly.
 pub const MAX_SET_DISCS: usize = 100;
 
-fn place(discs: &[SetDisc], sc: &SeasonScorer) -> Option<SetPlacement> {
+fn place(discs: &[SetDisc], sc: &SeasonScorer, gap_penalty: f64) -> Option<SetPlacement> {
     let n = discs.len();
-    let episodes = sc.episodes.len();
-    if n == 0 || episodes == 0 {
+    let e_count = sc.episodes.len();
+    if n == 0 || e_count == 0 {
         return None;
     }
-    if episodes > MAX_CANDIDATE_EPISODES || n > MAX_SET_DISCS {
+    if e_count > MAX_CANDIDATE_EPISODES || n > MAX_SET_DISCS {
         return None;
     }
     let lens: Vec<usize> = discs.iter().map(|d| d.titles.len()).collect();
@@ -229,10 +236,9 @@ fn place(discs: &[SetDisc], sc: &SeasonScorer) -> Option<SetPlacement> {
         return None;
     }
     let total_titles: usize = lens.iter().sum();
-    if total_titles > episodes {
-        return None; // cannot fit at all
+    if total_titles > e_count {
+        return None;
     }
-    // Offset of each disc's first title within the flattened title list.
     let mut offsets = Vec::with_capacity(n);
     let mut acc = 0usize;
     for &k in &lens {
@@ -241,45 +247,75 @@ fn place(discs: &[SetDisc], sc: &SeasonScorer) -> Option<SetPlacement> {
     }
 
     let inf = f64::INFINITY;
-    // cost of disc i placed exactly at s, or infinity if it does not fit
+    let lam = gap_penalty;
     let at = |i: usize, s: usize| -> f64 {
         match window_cost(sc, offsets[i], lens[i], s) {
             Some((c, _)) => c,
             None => inf,
         }
     };
+    let width = e_count + 2;
 
-    // suffix[i][s]: discs i.. placed with disc i starting at >= s.
-    let mut suffix = vec![vec![inf; episodes + 2]; n + 1];
-    for s in 0..=episodes + 1 {
-        suffix[n][s] = 0.0;
+    // g[i][s]  — discs i.. with disc i starting exactly at s, gaps between them charged.
+    // trans[i][b] — the same but entered from a previous disc ending at b, so the gap
+    //               from b to wherever disc i starts is charged too.
+    //
+    // A linear penalty keeps this O(discs x episodes): minimising `lam*(s-b) + g[i][s]`
+    // over `s >= b` is a suffix minimum of `g[i][s] + lam*s`, shifted by `lam*b`.
+    let mut g = vec![vec![inf; width]; n];
+    let mut trans = vec![vec![inf; width]; n + 1];
+    for b in 0..width {
+        trans[n][b] = 0.0; // nothing after the last disc, and no trailing penalty
     }
+
     for i in (0..n).rev() {
-        // Walk starts downwards so the ">= s" minimum accumulates.
-        let mut best = inf;
-        for s in (0..=episodes).rev() {
-            if s + lens[i] <= episodes {
-                let here = at(i, s) + suffix[i + 1][s + lens[i]];
-                if here < best {
-                    best = here;
-                }
+        for s in 0..=e_count.saturating_sub(lens[i]) {
+            let cost = at(i, s);
+            g[i][s] = if cost.is_finite() {
+                cost + trans[i + 1][s + lens[i]]
+            } else {
+                inf
+            };
+        }
+        let mut m = inf;
+        for b in (0..=e_count).rev() {
+            let here = if g[i][b].is_finite() {
+                g[i][b] + lam * b as f64
+            } else {
+                inf
+            };
+            if here < m {
+                m = here;
             }
-            suffix[i][s] = best;
+            trans[i][b] = if m.is_finite() { m - lam * b as f64 } else { inf };
         }
     }
-    if !suffix[0][0].is_finite() {
+
+    // The first disc pays no penalty for where the set begins: a box set may legitimately
+    // start part-way into a series. Likewise nothing is charged after the last disc.
+    let mut best = inf;
+    for s in 0..=e_count.saturating_sub(lens[0]) {
+        if g[0][s] < best {
+            best = g[0][s];
+        }
+    }
+    if !best.is_finite() {
         return None;
     }
 
-    // Reconstruct the winner: at each disc take the earliest start achieving the optimum.
+    // Reconstruct: first disc by plain minimum, the rest through the penalised transition.
     let mut starts = Vec::with_capacity(n);
     let mut cursor = 0usize;
     for i in 0..n {
-        let target = suffix[i][cursor];
+        let target = if i == 0 { best } else { trans[i][cursor] };
         let mut chosen = None;
-        for s in cursor..=episodes.saturating_sub(lens[i]) {
-            let here = at(i, s) + suffix[i + 1][s + lens[i]];
-            if (here - target).abs() < 1e-9 {
+        for s in cursor..=e_count.saturating_sub(lens[i]) {
+            let candidate = if i == 0 {
+                g[i][s]
+            } else {
+                lam * (s - cursor) as f64 + g[i][s]
+            };
+            if (candidate - target).abs() < 1e-9 {
                 chosen = Some(s);
                 break;
             }
@@ -289,32 +325,42 @@ fn place(discs: &[SetDisc], sc: &SeasonScorer) -> Option<SetPlacement> {
         cursor = s + lens[i];
     }
 
-    // prefix[i][s]: discs 0..i all placed strictly before position s.
-    let mut prefix = vec![vec![inf; episodes + 2]; n + 1];
-    for s in 0..=episodes + 1 {
-        prefix[0][s] = 0.0;
+    // pf[i][s] — best cost for discs before i, given disc i starts at s (gap charged).
+    let mut pf = vec![vec![inf; width]; n + 1];
+    for s in 0..width {
+        pf[0][s] = 0.0;
     }
     for i in 0..n {
-        let mut best = inf;
-        for s in 0..=episodes {
-            if s >= lens[i] {
-                let here = at(i, s - lens[i]) + prefix[i][s - lens[i]];
-                if here < best {
-                    best = here;
-                }
+        // end_cost[e] — discs 0..=i placed with disc i ending exactly at e.
+        let mut end_cost = vec![inf; width];
+        for s in 0..=e_count.saturating_sub(lens[i]) {
+            let c = pf[i][s] + at(i, s);
+            if c < end_cost[s + lens[i]] {
+                end_cost[s + lens[i]] = c;
             }
-            prefix[i + 1][s] = best;
+        }
+        let mut m = inf;
+        for s in 0..=e_count {
+            let here = if end_cost[s].is_finite() {
+                end_cost[s] - lam * s as f64
+            } else {
+                inf
+            };
+            if here < m {
+                m = here;
+            }
+            pf[i + 1][s] = if m.is_finite() { m + lam * s as f64 } else { inf };
         }
     }
 
-    // Runner-up: the best arrangement that places at least one disc somewhere else.
+    // Runner-up: best arrangement placing at least one disc somewhere else.
     let mut runner = inf;
     for i in 0..n {
-        for s in 0..=episodes.saturating_sub(lens[i]) {
+        for s in 0..=e_count.saturating_sub(lens[i]) {
             if s == starts[i] {
                 continue;
             }
-            let c = prefix[i][s] + at(i, s) + suffix[i + 1][s + lens[i]];
+            let c = pf[i][s] + at(i, s) + trans[i + 1][s + lens[i]];
             if c < runner {
                 runner = c;
             }
@@ -324,7 +370,7 @@ fn place(discs: &[SetDisc], sc: &SeasonScorer) -> Option<SetPlacement> {
     let scored = total_titles.max(1) as f64;
     Some(SetPlacement {
         starts,
-        mean_cost: suffix[0][0] / scored,
+        mean_cost: best / scored,
         runner_up: runner.is_finite().then(|| runner / scored),
     })
 }
@@ -371,7 +417,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     }
 
     let sc = SeasonScorer::new(&flat_episodes, &flat, params);
-    let solved = place(&ordered, &sc)?;
+    let solved = place(&ordered, &sc, params.gap_penalty)?;
     let mean_cost = solved.mean_cost;
     let starts = solved.starts;
     let second_best = solved.runner_up;
@@ -815,6 +861,80 @@ mod tests {
             titles: vec![t("a.mkv", 45.0)],
         }];
         assert!(solve(&discs, &[season]).is_none());
+    }
+
+    /// The discs of a box set run continuously, and a gap is evidence against.
+    ///
+    /// Regression test for a confirmed misplacement. Ten discs placed correctly and
+    /// contiguously across S01E01-E25; the remaining two belonged on E26-E30. With gaps
+    /// free, the solver skipped those five episodes and three whole seasons to reach a
+    /// marginally better-scoring window in season 4 — and skipped an episode again
+    /// inside it. Charging for skipped episodes makes the contiguous reading win.
+    #[test]
+    fn a_gap_between_discs_costs_something() {
+        // Ten episodes; two discs of two titles each, all the same length so runtime
+        // cannot choose. Only the gap penalty distinguishes the arrangements.
+        let season = Season {
+            number: 1,
+            episodes: (1..=10).map(|n| ep(n, 50, &format!("Ep {n}"))).collect(),
+        };
+        let discs = vec![
+            SetDisc { disc_number: 1, job_id: "j1".into(), titles: vec![t("a.mkv", 50.0), t("b.mkv", 50.0)] },
+            SetDisc { disc_number: 2, job_id: "j2".into(), titles: vec![t("c.mkv", 50.0), t("d.mkv", 50.0)] },
+        ];
+        let sol = solve(&discs, &[season]).expect("solved");
+        let placed: Vec<u32> = sol
+            .placements
+            .iter()
+            .flat_map(|p| p.matches.iter().map(|m| m.episode.number))
+            .collect();
+        assert_eq!(placed, vec![1, 2, 3, 4], "discs should sit back to back");
+    }
+
+    /// The penalty must not become a hard rule: a set may legitimately begin part-way
+    /// into a series, and nothing after the last disc should be charged for either.
+    #[test]
+    fn leading_and_trailing_gaps_are_free() {
+        // Only episodes 4 and 5 have runtimes matching the disc, so the set must start
+        // at 4 despite three unused episodes before it and five after.
+        let mut episodes: Vec<Episode> = (1..=10).map(|n| ep(n, 20, &format!("Ep {n}"))).collect();
+        episodes[3] = ep(4, 90, "Long A");
+        episodes[4] = ep(5, 90, "Long B");
+        let season = Season { number: 1, episodes };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j1".into(),
+            titles: vec![t("a.mkv", 90.0), t("b.mkv", 90.0)],
+        }];
+        let sol = solve(&discs, &[season]).expect("solved");
+        let placed: Vec<u32> = sol.placements[0].matches.iter().map(|m| m.episode.number).collect();
+        assert_eq!(placed, vec![4, 5], "starting late must not be penalised");
+    }
+
+    /// A gap is discouraged, not forbidden — where the evidence clearly requires one it
+    /// must still be reachable.
+    #[test]
+    fn a_gap_is_still_possible_when_the_evidence_demands_it() {
+        // Runtime pins both discs: only episodes 1-2 can hold the 50 minute titles and
+        // only 8-9 can hold the 120 minute ones, so the gap between them is forced.
+        // (Episodes 3-7 are far too short for either, and the veto excludes them.)
+        let mut episodes: Vec<Episode> = (1..=10).map(|n| ep(n, 20, &format!("Ep {n}"))).collect();
+        episodes[0] = ep(1, 50, "Mid A");
+        episodes[1] = ep(2, 50, "Mid B");
+        episodes[7] = ep(8, 120, "Long A");
+        episodes[8] = ep(9, 120, "Long B");
+        let season = Season { number: 1, episodes };
+        let discs = vec![
+            SetDisc { disc_number: 1, job_id: "j1".into(), titles: vec![t("a.mkv", 50.0), t("b.mkv", 50.0)] },
+            SetDisc { disc_number: 2, job_id: "j2".into(), titles: vec![t("c.mkv", 120.0), t("d.mkv", 120.0)] },
+        ];
+        let sol = solve(&discs, &[season]).expect("solved");
+        let placed: Vec<u32> = sol
+            .placements
+            .iter()
+            .flat_map(|p| p.matches.iter().map(|m| m.episode.number))
+            .collect();
+        assert_eq!(placed, vec![1, 2, 8, 9]);
     }
 
     fn ep_with(n: u32, rt: u32, name: &str, overview: &str) -> Episode {
