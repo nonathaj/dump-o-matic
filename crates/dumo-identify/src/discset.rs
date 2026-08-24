@@ -179,48 +179,154 @@ fn window_runtime_delta(titles: &[DiscTitle], episodes: &[Episode], start: usize
     }
 }
 
-/// Enumerate every consistent arrangement of the set within one season.
+/// Best and next-best placements of the whole set, by dynamic programming.
 ///
-/// Discs are placed in disc-number order at strictly increasing, non-overlapping
-/// positions. Returns `(total cost, counted titles, start index per disc)`.
-fn arrangements(
-    discs: &[SetDisc],
-    sc: &SeasonScorer,
-    idx: usize,
-    min_start: usize,
-    acc: &mut Vec<usize>,
-    out: &mut Vec<(f64, usize, Vec<usize>)>,
-) {
-    if idx == discs.len() {
-        let mut total = 0.0;
-        let mut counted = 0;
-        let mut offset = 0usize;
-        for (d, &s) in discs.iter().zip(acc.iter()) {
-            match window_cost(sc, offset, d.titles.len(), s) {
-                Some((c, n)) => {
-                    total += c;
-                    counted += n;
-                }
-                None => return,
-            }
-            offset += d.titles.len();
-        }
-        out.push((total, counted, acc.clone()));
-        return;
+/// Placing discs in order at strictly increasing, non-overlapping positions is a
+/// shortest-path problem, and it must be solved as one. Enumerating the arrangements
+/// instead is fine while the candidate list is one short season — twelve discs of 30
+/// titles against a 30-episode season admit exactly one arrangement — but the moment the
+/// search widened to every episode of the series it became C(82, 12), about 10^14
+/// placements. Materialising them killed the process after it had allocated 128 GB.
+///
+/// Two tables make it linear instead:
+///   `suffix[i][s]` — best cost for discs `i..` given disc `i` starts at or after `s`
+///   `prefix[i][s]` — best cost for discs `..i` all placed strictly before `s`
+///
+/// Their sum around a pinned placement gives the best arrangement containing it, which
+/// yields both the winner and a runner-up that genuinely differs somewhere.
+struct SetPlacement {
+    /// Start index of each disc, in disc order.
+    starts: Vec<usize>,
+    /// Mean cost per scored title of the winning arrangement.
+    mean_cost: f64,
+    /// Mean cost of the best arrangement that places some disc differently.
+    runner_up: Option<f64>,
+}
+
+/// Largest candidate list this will consider, in episodes.
+///
+/// The tables below are `(discs + 1) x (episodes + 2)` doubles — a few megabytes even for
+/// an absurdly long series — so this is not about the DP. It is a backstop against a
+/// future change reintroducing something super-linear: an explicit ceiling fails a solve
+/// loudly instead of letting a bug consume the machine. A series with more episodes than
+/// this is beyond what disc-order matching can meaningfully constrain anyway.
+pub const MAX_CANDIDATE_EPISODES: usize = 2_000;
+
+/// Largest number of discs solved jointly.
+pub const MAX_SET_DISCS: usize = 100;
+
+fn place(discs: &[SetDisc], sc: &SeasonScorer) -> Option<SetPlacement> {
+    let n = discs.len();
+    let episodes = sc.episodes.len();
+    if n == 0 || episodes == 0 {
+        return None;
+    }
+    if episodes > MAX_CANDIDATE_EPISODES || n > MAX_SET_DISCS {
+        return None;
+    }
+    let lens: Vec<usize> = discs.iter().map(|d| d.titles.len()).collect();
+    if lens.iter().any(|&k| k == 0) {
+        return None;
+    }
+    let total_titles: usize = lens.iter().sum();
+    if total_titles > episodes {
+        return None; // cannot fit at all
+    }
+    // Offset of each disc's first title within the flattened title list.
+    let mut offsets = Vec::with_capacity(n);
+    let mut acc = 0usize;
+    for &k in &lens {
+        offsets.push(acc);
+        acc += k;
     }
 
-    let k = discs[idx].titles.len();
-    if k == 0 {
-        return;
+    let inf = f64::INFINITY;
+    // cost of disc i placed exactly at s, or infinity if it does not fit
+    let at = |i: usize, s: usize| -> f64 {
+        match window_cost(sc, offsets[i], lens[i], s) {
+            Some((c, _)) => c,
+            None => inf,
+        }
+    };
+
+    // suffix[i][s]: discs i.. placed with disc i starting at >= s.
+    let mut suffix = vec![vec![inf; episodes + 2]; n + 1];
+    for s in 0..=episodes + 1 {
+        suffix[n][s] = 0.0;
     }
-    let mut start = min_start;
-    while start + k <= sc.episodes.len() {
-        acc.push(start);
-        // The next disc must begin after this one ends: no overlap, disc order preserved.
-        arrangements(discs, sc, idx + 1, start + k, acc, out);
-        acc.pop();
-        start += 1;
+    for i in (0..n).rev() {
+        // Walk starts downwards so the ">= s" minimum accumulates.
+        let mut best = inf;
+        for s in (0..=episodes).rev() {
+            if s + lens[i] <= episodes {
+                let here = at(i, s) + suffix[i + 1][s + lens[i]];
+                if here < best {
+                    best = here;
+                }
+            }
+            suffix[i][s] = best;
+        }
     }
+    if !suffix[0][0].is_finite() {
+        return None;
+    }
+
+    // Reconstruct the winner: at each disc take the earliest start achieving the optimum.
+    let mut starts = Vec::with_capacity(n);
+    let mut cursor = 0usize;
+    for i in 0..n {
+        let target = suffix[i][cursor];
+        let mut chosen = None;
+        for s in cursor..=episodes.saturating_sub(lens[i]) {
+            let here = at(i, s) + suffix[i + 1][s + lens[i]];
+            if (here - target).abs() < 1e-9 {
+                chosen = Some(s);
+                break;
+            }
+        }
+        let s = chosen?;
+        starts.push(s);
+        cursor = s + lens[i];
+    }
+
+    // prefix[i][s]: discs 0..i all placed strictly before position s.
+    let mut prefix = vec![vec![inf; episodes + 2]; n + 1];
+    for s in 0..=episodes + 1 {
+        prefix[0][s] = 0.0;
+    }
+    for i in 0..n {
+        let mut best = inf;
+        for s in 0..=episodes {
+            if s >= lens[i] {
+                let here = at(i, s - lens[i]) + prefix[i][s - lens[i]];
+                if here < best {
+                    best = here;
+                }
+            }
+            prefix[i + 1][s] = best;
+        }
+    }
+
+    // Runner-up: the best arrangement that places at least one disc somewhere else.
+    let mut runner = inf;
+    for i in 0..n {
+        for s in 0..=episodes.saturating_sub(lens[i]) {
+            if s == starts[i] {
+                continue;
+            }
+            let c = prefix[i][s] + at(i, s) + suffix[i + 1][s + lens[i]];
+            if c < runner {
+                runner = c;
+            }
+        }
+    }
+
+    let scored = total_titles.max(1) as f64;
+    Some(SetPlacement {
+        starts,
+        mean_cost: suffix[0][0] / scored,
+        runner_up: runner.is_finite().then(|| runner / scored),
+    })
 }
 
 /// Find the best consistent placement of a disc set across the given seasons.
@@ -265,20 +371,10 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     }
 
     let sc = SeasonScorer::new(&flat_episodes, &flat, params);
-    let mut found = Vec::new();
-    arrangements(&ordered, &sc, 0, 0, &mut Vec::new(), &mut found);
-    if found.is_empty() {
-        return None;
-    }
-    found.sort_by(|a, b| {
-        let am = a.0 / a.1.max(1) as f64;
-        let bm = b.0 / b.1.max(1) as f64;
-        am.partial_cmp(&bm).unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mean_cost = found[0].0 / found[0].1.max(1) as f64;
-    let starts = found[0].2.clone();
-    let second_best: Option<f64> = found.get(1).map(|c| c.0 / c.1.max(1) as f64);
+    let solved = place(&ordered, &sc)?;
+    let mean_cost = solved.mean_cost;
+    let starts = solved.starts;
+    let second_best = solved.runner_up;
 
     let episodes: &[Episode] = &flat_episodes;
 
@@ -640,6 +736,85 @@ mod tests {
         assert_eq!(sol.seasons, vec![1]);
         assert_eq!(sol.season, 1);
         assert!(sol.evidence.iter().any(|e| e.contains("season 1")));
+    }
+
+    /// The solve must stay cheap as the candidate list grows.
+    ///
+    /// Regression test for an out-of-memory kill. Enumerating arrangements was fine
+    /// against one 30-episode season — twelve discs of 30 titles admit exactly one
+    /// placement — but once the search widened to every episode of a series it became
+    /// C(82, 12), around 10^14 placements. The process allocated 128 GB and the kernel
+    /// killed it, taking the machine down with it. The DP that replaced it is
+    /// O(discs x episodes); this test would not finish under the old code.
+    #[test]
+    fn a_large_candidate_list_solves_without_exploding() {
+        let episodes: Vec<Episode> = (1..=400)
+            .map(|n| Episode {
+                season: 1 + (n / 50) as u32,
+                number: n as u32,
+                name: format!("Ep {n}"),
+                // Distinctive runtimes so there is a single right answer to find.
+                runtime_mins: Some(30 + (n % 7) as u32 * 10),
+                air_date: None,
+                overview: None,
+            })
+            .collect();
+        let season = Season {
+            number: 1,
+            episodes,
+        };
+
+        // Twelve discs, thirty titles — the shape that killed the process.
+        let sizes = [3, 3, 2, 2, 3, 2, 2, 3, 3, 2, 3, 2];
+        let discs: Vec<SetDisc> = sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| SetDisc {
+                disc_number: i as u32 + 1,
+                job_id: format!("j{i}"),
+                titles: (0..k).map(|j| t(&format!("d{i}t{j}.mkv"), 45.0)).collect(),
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        let sol = solve(&discs, &[season]).expect("solved");
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "took {:?}; the solve must not be super-linear",
+            started.elapsed()
+        );
+        assert_eq!(sol.placements.len(), 12);
+        // Placements must remain consecutive and non-overlapping in disc order.
+        let mut last = None;
+        for p in &sol.placements {
+            let first = p.matches.first().unwrap().episode.number;
+            if let Some(prev) = last {
+                assert!(first > prev, "disc placements must not overlap or reorder");
+            }
+            last = Some(p.matches.last().unwrap().episode.number);
+        }
+    }
+
+    /// A candidate list beyond the ceiling is refused, not attempted.
+    #[test]
+    fn an_absurd_candidate_list_is_refused() {
+        let episodes: Vec<Episode> = (1..=(MAX_CANDIDATE_EPISODES as u32 + 1))
+            .map(|n| Episode {
+                season: 1,
+                number: n,
+                name: String::new(),
+                runtime_mins: Some(45),
+                air_date: None,
+                overview: None,
+            })
+            .collect();
+        let season = Season { number: 1, episodes };
+        let discs = vec![SetDisc {
+            disc_number: 1,
+            job_id: "j".into(),
+            titles: vec![t("a.mkv", 45.0)],
+        }];
+        assert!(solve(&discs, &[season]).is_none());
     }
 
     fn ep_with(n: u32, rt: u32, name: &str, overview: &str) -> Episode {
