@@ -53,6 +53,13 @@ pub enum Tier {
     Audit,
 }
 
+/// Above this size, an Audit-tier file is content rather than a sidecar.
+///
+/// The tier is "things that are never removed", which is right for both, but they are
+/// not the same thing and reporting them together is misleading: 5.9 GB of disc extras
+/// described as "logs and TOCs" tells the operator nothing about where their space went.
+const UNFILED_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Classify a job artifact by its extension.
 pub fn tier_of(relative_path: &str) -> Tier {
     let ext = relative_path
@@ -96,6 +103,7 @@ pub fn run(args: CleanArgs) -> Result<()> {
     let mut redundant: Vec<RawFile> = Vec::new();
     let mut provenance: Vec<RawFile> = Vec::new();
     let mut audit_bytes = 0u64;
+    let mut unfiled_bytes = 0u64;
     let mut not_migrated = 0usize;
 
     for dir in &dirs {
@@ -126,7 +134,16 @@ pub fn run(args: CleanArgs) -> Result<()> {
                     sha256: a.sha256.clone(),
                     bytes: a.bytes,
                 }),
-                Tier::Audit => audit_bytes += a.bytes,
+                Tier::Audit => {
+                    // Sidecars are kilobytes; anything substantial in this tier is
+                    // content that was never filed — disc extras, most often — and it
+                    // exists nowhere but here.
+                    if a.bytes > UNFILED_CONTENT_BYTES {
+                        unfiled_bytes += a.bytes;
+                    } else {
+                        audit_bytes += a.bytes;
+                    }
+                }
             }
         }
 
@@ -168,7 +185,7 @@ pub fn run(args: CleanArgs) -> Result<()> {
                  only copy and is left alone."
             );
         }
-        report_retained(&provenance, audit_bytes, args.provenance);
+        report_retained(&provenance, audit_bytes, unfiled_bytes, args.provenance);
         return Ok(());
     }
 
@@ -208,7 +225,7 @@ pub fn run(args: CleanArgs) -> Result<()> {
         println!("Each destination copy is re-hashed first; any that does not match means the");
         println!("staged file is the last good copy and it will be kept.");
     }
-    report_retained(&provenance, audit_bytes, args.provenance);
+    report_retained(&provenance, audit_bytes, unfiled_bytes, args.provenance);
 
     if args.dry_run {
         println!();
@@ -329,7 +346,12 @@ fn record_reclaimed(job_dir: &std::path::Path, relative: &str) {
 }
 
 /// Say what is being kept and why, so the remaining space is explained.
-fn report_retained(provenance: &[RawFile], audit_bytes: u64, dropping_provenance: bool) {
+fn report_retained(
+    provenance: &[RawFile],
+    audit_bytes: u64,
+    unfiled_bytes: u64,
+    dropping_provenance: bool,
+) {
     if !dropping_provenance {
         let p: u64 = provenance.iter().map(|f| f.bytes).sum();
         if p > 0 {
@@ -344,6 +366,13 @@ fn report_retained(provenance: &[RawFile], audit_bytes: u64, dropping_provenance
         println!(
             "Audit trail retained ({}): logs and TOCs. Never removed.",
             crate::migrate::human_size(audit_bytes)
+        );
+    }
+    if unfiled_bytes > 0 {
+        println!(
+            "Unfiled content retained ({}): titles that were never migrated — disc extras \
+             and the like. This is their only copy.",
+            crate::migrate::human_size(unfiled_bytes)
         );
     }
 }
