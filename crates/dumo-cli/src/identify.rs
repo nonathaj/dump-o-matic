@@ -1369,6 +1369,7 @@ fn apply_video_set(
         let mut job = Job::load(&job_dir)
             .with_context(|| format!("loading job {}", p.job_id))?;
         let mut filed: Vec<dumo_core::ReadyFile> = Vec::new();
+        let mut moved_sources: Vec<String> = Vec::new();
 
         for m in &p.matches {
             // The solver reports the title by its staging-relative name.
@@ -1423,6 +1424,7 @@ fn apply_video_set(
                         bytes: outcome.bytes,
                         sha256,
                     });
+                    moved_sources.push(m.title_name.clone());
                 }
                 Err(e) => {
                     println!("FAILED");
@@ -1436,12 +1438,12 @@ fn apply_video_set(
         if filed.is_empty() {
             continue;
         }
-        let moved: Vec<String> = filed
-            .iter()
-            .filter_map(|f| f.path.rsplit('/').next().map(str::to_string))
-            .collect();
+        // Drop the artifacts that moved, matched on the name they had *here*. Matching on
+        // the destination name instead is the bug this replaces: an artifact called
+        // "B1_t01.mkv" never ends with "Show S01E01 - Title.mkv", so nothing was removed
+        // and verify then reported every filed episode as missing from raw/.
         job.artifacts
-            .retain(|a| !moved.iter().any(|m| a.relative_path.ends_with(m)));
+            .retain(|a| !moved_sources.iter().any(|src| a.relative_path.ends_with(src)));
 
         job.identification = Some(dumo_core::Identification {
             title: show.clone(),
