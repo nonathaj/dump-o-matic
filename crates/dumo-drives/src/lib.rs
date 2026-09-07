@@ -29,6 +29,13 @@ pub enum DriveError {
     #[error("no disc present in {path}")]
     NoDisc { path: String },
 
+    #[error(
+        "a disc is loaded in {path} but cannot be read: the drive reports media present, \
+         yet its table of contents does not come back. Common causes: the disc is upside \
+         down, its inner ring near the hub is dirty or scratched, or it is blank/unfinalised"
+    )]
+    DiscUnreadable { path: String },
+
     #[error("drive {path} is not ready (still spinning up?)")]
     NotReady { path: String },
 

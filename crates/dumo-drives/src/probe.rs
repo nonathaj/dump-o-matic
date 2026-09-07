@@ -38,7 +38,17 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
                 path: device_path.to_string(),
             })
         }
+        TrayState::DiscUnreadable => {
+            return Err(DriveError::DiscUnreadable {
+                path: device_path.to_string(),
+            })
+        }
     }
+
+    // `DiscOk` is only the drive's belief that media is loaded. Everything below assumes
+    // the disc can be read, so settle that here rather than surfacing a bare ENOMEDIUM
+    // from whichever read happens to run first.
+    device::medium_is_readable(device_path)?;
 
     // The medium type comes from the drive itself and is the most trustworthy signal.
     let profile = mmc::current_profile(fd, device_path).ok();
@@ -69,9 +79,17 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
     }
 
     // Re-open blocking for data reads; O_NONBLOCK is only needed to avoid hanging on open.
-    let mut reader = std::fs::File::open(device_path).map_err(|e| DriveError::Io {
-        path: device_path.to_string(),
-        source: e,
+    let mut reader = std::fs::File::open(device_path).map_err(|e| {
+        if e.raw_os_error() == Some(libc::ENOMEDIUM) {
+            DriveError::DiscUnreadable {
+                path: device_path.to_string(),
+            }
+        } else {
+            DriveError::Io {
+                path: device_path.to_string(),
+                source: e,
+            }
+        }
     })?;
 
     let volume = iso9660::read_volume(&mut reader).ok().flatten();

@@ -158,10 +158,41 @@ pub fn enumerate_drives() -> Result<Vec<Drive>> {
     Ok(drives)
 }
 
+/// Confirm the loaded medium can actually be opened for reading.
+///
+/// `CDROM_DRIVE_STATUS` returning `CDS_DISC_OK` only means the drive believes a disc is
+/// loaded — it does not mean the table of contents came back. A blocking open is what
+/// settles the question: the kernel answers `ENOMEDIUM` when it could not read the disc
+/// at all, which is indistinguishable from an empty drive unless the tray state is also
+/// consulted. Callers pair the two to tell "no disc" apart from "disc we cannot read".
+pub(crate) fn medium_is_readable(path: &str) -> Result<()> {
+    match File::open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::ENOMEDIUM) => {
+            Err(DriveError::DiscUnreadable {
+                path: path.to_string(),
+            })
+        }
+        Err(e) => Err(DriveError::Io {
+            path: path.to_string(),
+            source: e,
+        }),
+    }
+}
+
 /// Current tray/media state for a drive.
 pub fn open_drive_status(drive: &Drive) -> Result<DriveStatus> {
     let f = open_device(&drive.path)?;
     let tray = ioctl::drive_status(f.as_raw_fd(), &drive.path)?;
+    // A drive claiming DiscOk has not been asked to read anything yet; verify.
+    let tray = match tray {
+        dumo_core::TrayState::DiscOk => match medium_is_readable(&drive.path) {
+            Ok(()) => dumo_core::TrayState::DiscOk,
+            Err(DriveError::DiscUnreadable { .. }) => dumo_core::TrayState::DiscUnreadable,
+            Err(e) => return Err(e),
+        },
+        other => other,
+    };
     Ok(DriveStatus {
         drive: drive.clone(),
         tray,

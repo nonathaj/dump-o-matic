@@ -12,8 +12,14 @@ pub enum TrayState {
     TrayOpen,
     /// Drive is spinning up / not yet ready to answer.
     NotReady,
-    /// Media present and readable.
+    /// Media present, and confirmed readable by actually opening it.
     DiscOk,
+    /// The drive reports media loaded, but it cannot be read.
+    ///
+    /// Distinct from [`TrayState::NoDisc`]: a disc is physically in the drive and
+    /// spinning, but its table of contents does not come back, so nothing can be
+    /// opened. Usually an upside-down, blank/unfinalised, or dirty disc.
+    DiscUnreadable,
 }
 
 impl std::fmt::Display for TrayState {
@@ -23,6 +29,7 @@ impl std::fmt::Display for TrayState {
             TrayState::TrayOpen => "tray open",
             TrayState::NotReady => "not ready",
             TrayState::DiscOk => "disc present",
+            TrayState::DiscUnreadable => "disc present, unreadable",
         };
         f.write_str(s)
     }
@@ -75,4 +82,30 @@ impl Drive {
 pub struct DriveStatus {
     pub drive: Drive,
     pub tray: TrayState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_disc_reads_differently_from_an_empty_drive() {
+        // The whole point of the state: "we know a disc is there, we just cannot read
+        // it" must never be reported as an empty drive.
+        assert_eq!(TrayState::DiscUnreadable.to_string(), "disc present, unreadable");
+        assert_ne!(
+            TrayState::DiscUnreadable.to_string(),
+            TrayState::NoDisc.to_string()
+        );
+        assert_ne!(
+            TrayState::DiscUnreadable.to_string(),
+            TrayState::DiscOk.to_string()
+        );
+    }
+
+    #[test]
+    fn tray_states_serialise_in_snake_case() {
+        let j = serde_json::to_string(&TrayState::DiscUnreadable).unwrap();
+        assert_eq!(j, "\"disc_unreadable\"");
+    }
 }
