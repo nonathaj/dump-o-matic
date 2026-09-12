@@ -97,6 +97,11 @@ Both commands accept `--json` for scripting.
 | UDF presence | Volume recognition sequence |
 | DVD-Video / Blu-ray detection | `VIDEO_TS` / `BDMV` in the root directory |
 | PS1 / PS2 game serial | `SYSTEM.CNF` boot entry, normalised to Redump form (`SLUS_203.12` → `SLUS-20312`) |
+| Original Xbox disc | ISO 9660 application identifier (`VTC Sector Offset`), which marks the video partition of a disc whose game is not addressable |
+| Disc present but unreadable | `CDS_DISC_OK` from the tray state contradicted by `ENOMEDIUM` on open, reported with the medium profile so a damaged disc is distinguishable from an unsupported format |
+
+Which media this actually works on is recorded per disc type, with the evidence and
+the limits of each result, in [docs/media-compatibility.md](docs/media-compatibility.md).
 
 Every conclusion carries its **evidence** and a **confidence level**. Only `exact`
 (cryptographic or structural certainty) is ever eligible for unattended handling;
