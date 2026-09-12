@@ -425,7 +425,7 @@ pub fn pull(args: PullArgs) -> Result<Option<String>> {
     jobrec.stage = JobStage::Ripped;
     jobrec.device_source = Some(DeviceSource {
         device: source.describe(),
-        layout: format!("{:?}", catalogue.layout).to_lowercase(),
+        layout: catalogue.layout.slug().to_string(),
         title_id: item.title_id.clone(),
         name: item.name.clone(),
         media_id: item.media_id.clone(),

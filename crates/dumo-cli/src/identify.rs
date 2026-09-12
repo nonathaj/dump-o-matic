@@ -812,10 +812,8 @@ fn identify_device_content(
         Confidence::Weak
     };
     println!("  confidence: {confidence}");
-    println!(
-        "    no Redump match is possible: their Xbox 360 hashes cover a whole disc, and a \n\
-         package holds only the game partition. This is identified, not verified."
-    );
+    println!("    no Redump match is possible: their Xbox 360 hashes cover a whole disc,");
+    println!("    while a package holds only the game partition — identified, not verified.");
 
     let images: Vec<(String, u64, String)> = job
         .artifacts
@@ -845,10 +843,8 @@ fn identify_device_content(
             continue;
         }
         if !accept_inferred {
-            println!(
-                "  NOT APPLYING: this is an identification, not a verified dump. Re-run with \n\
-                 --apply --accept-inferred once you are satisfied it is right."
-            );
+            println!("  NOT APPLYING: this is an identification, not a verified dump.");
+            println!("  Re-run with --apply --accept-inferred once you are satisfied it is right.");
             continue;
         }
 
