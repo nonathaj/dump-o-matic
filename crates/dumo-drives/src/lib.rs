@@ -30,11 +30,24 @@ pub enum DriveError {
     NoDisc { path: String },
 
     #[error(
-        "a disc is loaded in {path} but cannot be read: the drive reports media present, \
-         yet its table of contents does not come back. Common causes: the disc is upside \
-         down, its inner ring near the hub is dirty or scratched, or it is blank/unfinalised"
+        "a disc is loaded in {path} but cannot be read ({}): the drive reports media \
+         present, yet its table of contents does not come back. Common causes: the disc is \
+         upside down, its inner ring near the hub is dirty or scratched, it is \
+         blank/unfinalised, or it is a format this drive cannot address",
+        match medium {
+            Some(m) => format!("medium reported as {m}"),
+            None => "the drive reports no medium profile for it".to_string(),
+        }
     )]
-    DiscUnreadable { path: String },
+    DiscUnreadable {
+        path: String,
+        /// What the drive says the medium is, when it says anything.
+        ///
+        /// Worth reporting even though the disc is unreadable: a recognised profile
+        /// points at a dirty or damaged disc, whereas no profile at all means the drive
+        /// does not understand the format, which no amount of cleaning will fix.
+        medium: Option<String>,
+    },
 
     #[error("drive {path} is not ready (still spinning up?)")]
     NotReady { path: String },

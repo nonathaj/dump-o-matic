@@ -56,17 +56,26 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
         TrayState::DiscUnreadable => {
             return Err(DriveError::DiscUnreadable {
                 path: device_path.to_string(),
+                medium: mmc::current_profile(fd, device_path)
+                    .ok()
+                    .map(|p| p.to_string()),
             })
         }
     }
 
+    // The medium type comes from the drive itself and is the most trustworthy signal.
+    // Read before checking readability: GET CONFIGURATION answers from the drive, not
+    // the disc, so it still works on a disc nothing can read — and it is the most useful
+    // thing to report in that case. A recognised profile means the format is understood
+    // and the disc is damaged or dirty; no profile at all means the drive does not
+    // understand the format, which cleaning will never fix.
+    let profile = mmc::current_profile(fd, device_path).ok();
+
     // `DiscOk` is only the drive's belief that media is loaded. Everything below assumes
     // the disc can be read, so settle that here rather than surfacing a bare ENOMEDIUM
     // from whichever read happens to run first.
-    device::medium_is_readable(device_path)?;
+    device::medium_is_readable(device_path, profile.map(|p| p.to_string()))?;
 
-    // The medium type comes from the drive itself and is the most trustworthy signal.
-    let profile = mmc::current_profile(fd, device_path).ok();
     let capacity_bytes = mmc::read_capacity(fd, device_path).ok();
     let kernel_class = ioctl::disc_class(fd);
 
@@ -98,6 +107,7 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
         if e.raw_os_error() == Some(libc::ENOMEDIUM) {
             DriveError::DiscUnreadable {
                 path: device_path.to_string(),
+                medium: profile.map(|p| p.to_string()),
             }
         } else {
             DriveError::Io {

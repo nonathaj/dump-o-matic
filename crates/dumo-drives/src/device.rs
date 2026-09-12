@@ -165,12 +165,13 @@ pub fn enumerate_drives() -> Result<Vec<Drive>> {
 /// settles the question: the kernel answers `ENOMEDIUM` when it could not read the disc
 /// at all, which is indistinguishable from an empty drive unless the tray state is also
 /// consulted. Callers pair the two to tell "no disc" apart from "disc we cannot read".
-pub(crate) fn medium_is_readable(path: &str) -> Result<()> {
+pub(crate) fn medium_is_readable(path: &str, medium: Option<String>) -> Result<()> {
     match File::open(path) {
         Ok(_) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::ENOMEDIUM) => {
             Err(DriveError::DiscUnreadable {
                 path: path.to_string(),
+                medium,
             })
         }
         Err(e) => Err(DriveError::Io {
@@ -186,7 +187,7 @@ pub fn open_drive_status(drive: &Drive) -> Result<DriveStatus> {
     let tray = ioctl::drive_status(f.as_raw_fd(), &drive.path)?;
     // A drive claiming DiscOk has not been asked to read anything yet; verify.
     let tray = match tray {
-        dumo_core::TrayState::DiscOk => match medium_is_readable(&drive.path) {
+        dumo_core::TrayState::DiscOk => match medium_is_readable(&drive.path, None) {
             Ok(()) => dumo_core::TrayState::DiscOk,
             Err(DriveError::DiscUnreadable { .. }) => dumo_core::TrayState::DiscUnreadable,
             Err(e) => return Err(e),
