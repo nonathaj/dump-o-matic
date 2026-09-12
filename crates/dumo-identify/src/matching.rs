@@ -11,6 +11,7 @@
 //! is than the runner-up, because that margin is what actually distinguishes the two
 //! situations. Nothing here is ever auto-accepted.
 
+use crate::signals;
 use crate::tmdb::{Episode, Season};
 use dumo_core::Confidence;
 
@@ -44,6 +45,8 @@ pub struct SeasonMatch {
     pub tied_alternatives: Vec<u32>,
     /// Whether the disc number was needed to break a tie.
     pub disc_hint_used: bool,
+    /// Whether dialogue chose between alignments that runtime could not separate.
+    pub dialogue_decided: bool,
     /// Every scored window: (mean, max, counted, start index).
     pub all_windows: Vec<(f64, f64, usize, usize)>,
     /// How many titles in the chosen window actually had a runtime to compare against.
@@ -191,10 +194,92 @@ pub fn season_number_from_label(label: &str) -> Option<u32> {
     None
 }
 
+/// Smallest dialogue-score margin that counts as a decision.
+///
+/// Dialogue overlap on a 15-minute window is noisy; a hair's-breadth lead is not a
+/// finding. Below this the alignments are treated as unresolved by dialogue and the
+/// weaker disc-number signal still gets its turn.
+const DIALOGUE_MARGIN: f64 = 0.02;
+
+/// Pick the tied alignment whose episodes the dialogue actually matches.
+///
+/// Runtime ties constantly between alignments — episodes of one series run to the same
+/// minute — and a disc number only says where a disc sits in a box, which is an
+/// assumption about packing rather than evidence about content. The words spoken are
+/// evidence about content, so they get to decide first.
+///
+/// Returns the winning window start and its margin over the runner-up, or `None` when
+/// no title has usable dialogue or the scores are too close to separate.
+fn best_window_by_dialogue(
+    titles: &[DiscTitle],
+    season: &Season,
+    starts: &[usize],
+) -> Option<(usize, f64)> {
+    if titles.iter().all(|t| t.dialogue.is_none()) {
+        return None;
+    }
+    let references: Vec<std::collections::HashSet<String>> = season
+        .episodes
+        .iter()
+        .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
+        .collect();
+    let corpus = signals::Corpus::from_references(references.iter());
+    let dialogue: Vec<Option<std::collections::HashSet<String>>> = titles
+        .iter()
+        .map(|t| t.dialogue.as_ref().map(signals::stem_all))
+        .collect();
+
+    let mut scored: Vec<(usize, f64)> = Vec::new();
+    for &start in starts {
+        if start + titles.len() > season.episodes.len() {
+            continue;
+        }
+        let mut total = 0.0;
+        let mut counted = 0usize;
+        for (i, d) in dialogue.iter().enumerate() {
+            if let Some(d) = d {
+                total += signals::subtitle_score_stemmed(d, &references[start + i], &corpus);
+                counted += 1;
+            }
+        }
+        if counted > 0 {
+            scored.push((start, total / counted as f64));
+        }
+    }
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (best, best_score) = scored[0];
+    let margin = match scored.get(1) {
+        Some((_, second)) => best_score - second,
+        // Only one alignment could be scored, so nothing competed with it.
+        None => f64::INFINITY,
+    };
+    (margin >= DIALOGUE_MARGIN).then_some((best, margin))
+}
+
 /// Find the best contiguous run of episodes matching these titles.
 ///
 /// `titles` must already be in disc order. `disc_hint` is the disc's number within its
 /// set, used only to break ties that runtime cannot.
+///
+/// Any tie-break that relocates the window must call [`SeasonMatch::restate_window`],
+/// since the summary evidence is built from the runtime-best window and would otherwise
+/// keep naming episodes that are no longer being proposed.
+impl SeasonMatch {
+    /// Rewrite the summary line after a tie-break moved the window.
+    fn restate_window(&mut self, season_number: u32, k: usize) {
+        if let Some(first) = self.evidence.first_mut() {
+            *first = format!(
+                "matched {k} title(s) against season {season_number} episodes {}–{}",
+                self.first_episode,
+                self.first_episode + k as u32 - 1
+            );
+        }
+    }
+}
+
 pub fn match_season_with_hint(
     titles: &[DiscTitle],
     season: &Season,
@@ -204,10 +289,13 @@ pub fn match_season_with_hint(
 
     // Only intervene where runtime genuinely cannot decide.
     let k = titles.len();
-    let tied: Vec<&(f64, f64, usize, usize)> = m
+    // Owned rather than borrowed: the tie-breaks below mutate `m`, and holding
+    // references into m.all_windows across that is not expressible.
+    let tied: Vec<(f64, f64, usize, usize)> = m
         .all_windows
         .iter()
         .filter(|w| (w.0 - m.mean_delta).abs() <= TIE_EPSILON_MINS)
+        .copied()
         .collect();
 
     if tied.len() > 1 {
@@ -217,7 +305,46 @@ pub fn match_season_with_hint(
             .filter(|n| *n != m.first_episode)
             .collect();
 
-        if let Some(disc) = disc_hint {
+        // Dialogue first: it is evidence about what is on the disc, where a disc number
+        // is only an assumption about how the box was packed. A double-sided disc breaks
+        // that assumption outright — both sides are "disc 1" — so the packing signal can
+        // be confidently wrong in a way dialogue is not.
+        let tied_starts: Vec<usize> = tied.iter().map(|w| w.3).collect();
+        if let Some((start, margin)) = best_window_by_dialogue(titles, season, &tied_starts) {
+            let window = &season.episodes[start..start + k];
+            m.first_episode = window.first().map(|e| e.number).unwrap_or(0);
+            if let Some(w) = tied.iter().find(|w| w.3 == start) {
+                m.mean_delta = w.0;
+                m.max_delta = w.1;
+            }
+            m.matches = titles
+                .iter()
+                .zip(window.iter())
+                .map(|(t, e)| TitleMatch {
+                    title_name: t.name.clone(),
+                    title_mins: t.mins(),
+                    episode: e.clone(),
+                    delta_mins: e
+                        .runtime_mins
+                        .map(|rt| (t.mins() - f64::from(rt)).abs())
+                        .unwrap_or(f64::NAN),
+                })
+                .collect();
+            m.tied_alternatives = tied
+                .iter()
+                .map(|w| season.episodes[w.3].number)
+                .filter(|n| *n != m.first_episode)
+                .collect();
+            m.dialogue_decided = true;
+            m.restate_window(season.number, k);
+            m.evidence.push(format!(
+                "runtimes tie between {} alignments; the dialogue matches episodes {}-{} \
+                 best, by {margin:.2} over the next alignment",
+                tied.len(),
+                m.first_episode,
+                m.first_episode + k as u32 - 1,
+            ));
+        } else if let Some(disc) = disc_hint {
             // A disc holding k episodes, numbered from 1, would start here if the set is
             // packed evenly. Used only to choose between alignments already tied on
             // runtime, never to override a better-scoring one.
@@ -250,6 +377,7 @@ pub fn match_season_with_hint(
                     .filter(|n| *n != m.first_episode)
                     .collect();
                 m.disc_hint_used = true;
+                m.restate_window(season.number, k);
                 m.evidence.push(format!(
                     "runtimes tie between alignments starting at episode {}; the label says \
                      disc {disc}, and {k} episodes per disc puts this one at episode \
@@ -384,6 +512,7 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
         evidence,
         tied_alternatives,
         disc_hint_used: false,
+        dialogue_decided: false,
         all_windows: scored.clone(),
     })
 }
@@ -619,6 +748,95 @@ mod tests {
         assert_eq!(disc_number_from_label("THE_WIRE_S01_D3"), Some(3));
         assert_eq!(disc_number_from_label("SHOW_DISK_11"), Some(11));
         assert_eq!(disc_number_from_label("MOVIE_TITLE"), None);
+    }
+
+    #[test]
+    fn dialogue_breaks_a_runtime_tie_and_outranks_the_disc_number() {
+        // Every episode runs 47 min, so runtime ties across the whole season and the
+        // disc-number signal would put a "disc 1" at episodes 1-3. The dialogue points
+        // at episodes 4-6 instead — the real case of a double-sided disc, where both
+        // sides are labelled disc 1 and the packing assumption is simply wrong.
+        let episodes: Vec<Episode> = (1..=9)
+            .map(|n| Episode {
+                season: 3,
+                number: n,
+                name: format!("Episode {n}"),
+                runtime_mins: Some(47),
+                air_date: None,
+                overview: Some(match n {
+                    4 => "A forger steals a priceless painting from the gallery".into(),
+                    5 => "A disco owner hypnotises dancers with a strange record".into(),
+                    6 => "An entomologist controls ants to attack the chemical plant".into(),
+                    _ => format!("Unrelated filler plot number {n}"),
+                }),
+            })
+            .collect();
+        let season = Season { number: 3, episodes };
+
+        let titles = vec![
+            DiscTitle {
+                name: "a.mkv".into(),
+                duration_secs: 47.0 * 60.0,
+                dialogue: Some(dumo_core::text::tokenize(
+                    "the forger stole a priceless painting from the gallery",
+                )),
+            },
+            DiscTitle {
+                name: "b.mkv".into(),
+                duration_secs: 47.0 * 60.0,
+                dialogue: Some(dumo_core::text::tokenize(
+                    "the disco owner hypnotises dancers with that record",
+                )),
+            },
+            DiscTitle {
+                name: "c.mkv".into(),
+                duration_secs: 47.0 * 60.0,
+                dialogue: Some(dumo_core::text::tokenize(
+                    "an entomologist controls ants attacking the chemical plant",
+                )),
+            },
+        ];
+
+        let m = match_season_with_hint(&titles, &season, Some(1)).expect("matched");
+        assert_eq!(m.first_episode, 4, "{:?}", m.evidence);
+        assert!(m.dialogue_decided);
+        // The disc number must not have been consulted once dialogue decided.
+        assert!(!m.disc_hint_used);
+        // The summary line must name the episodes actually proposed.
+        assert!(
+            m.evidence[0].contains("episodes 4"),
+            "stale summary: {:?}",
+            m.evidence[0]
+        );
+    }
+
+    #[test]
+    fn the_disc_number_still_decides_when_there_is_no_dialogue() {
+        let episodes: Vec<Episode> = (1..=9)
+            .map(|n| Episode {
+                season: 3,
+                number: n,
+                name: format!("Episode {n}"),
+                runtime_mins: Some(47),
+                air_date: None,
+                overview: None,
+            })
+            .collect();
+        let season = Season { number: 3, episodes };
+        let titles: Vec<DiscTitle> = ["a.mkv", "b.mkv", "c.mkv"]
+            .iter()
+            .map(|n| DiscTitle {
+                name: (*n).into(),
+                duration_secs: 47.0 * 60.0,
+                dialogue: None,
+            })
+            .collect();
+
+        let m = match_season_with_hint(&titles, &season, Some(2)).expect("matched");
+        assert!(m.disc_hint_used);
+        assert!(!m.dialogue_decided);
+        assert_eq!(m.first_episode, 4);
+        assert!(m.evidence[0].contains("episodes 4"), "{:?}", m.evidence[0]);
     }
 
     #[test]

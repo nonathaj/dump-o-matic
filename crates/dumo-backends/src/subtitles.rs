@@ -12,17 +12,55 @@ use std::path::Path;
 use std::process::Command;
 
 const TOOL: &str = "ffmpeg";
+const PROBE_TOOL: &str = "ffprobe";
+
+/// Subtitle codecs that hold actual text.
+///
+/// The rest are bitmap formats — `dvd_subtitle` (VOBSUB), Blu-ray PGS, DVB — which
+/// carry pictures of words and cannot become SRT without OCR.
+const TEXT_SUBTITLE_CODECS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"];
+
+/// Index, among the subtitle streams, of the first one holding text.
+///
+/// Selecting `0:s:0` is wrong on a ripped DVD: MakeMKV emits the original VOBSUB track
+/// first and the closed-caption-derived text track second, so mapping the first
+/// subtitle stream hands ffmpeg a bitmap format, the conversion fails, and the title
+/// silently reports no dialogue at all. Ask what the streams actually are instead.
+fn first_text_subtitle_index(path: &Path) -> Option<usize> {
+    let out = Command::new(PROBE_TOOL)
+        .args([
+            "-v", "error",
+            "-select_streams", "s",
+            "-show_entries", "stream=codec_name",
+            "-of", "csv=p=0",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().trim_end_matches(',').to_ascii_lowercase())
+        .filter(|l| !l.is_empty())
+        .position(|c| TEXT_SUBTITLE_CODECS.contains(&c.as_str()))
+}
 
 /// Extract the first text subtitle track as SRT.
 ///
 /// `limit_secs` bounds how much is read: the opening minutes are plenty to identify an
 /// episode, and stopping early keeps this fast over a whole library.
 pub fn extract_text(path: &Path, limit_secs: u32) -> Result<String> {
+    // No text track at all is ordinary — an extra, or a disc with only bitmap subs.
+    let Some(stream) = first_text_subtitle_index(path) else {
+        return Ok(String::new());
+    };
     let out = Command::new(TOOL)
         .args(["-v", "error", "-to", &limit_secs.to_string()])
         .arg("-i")
         .arg(path)
-        .args(["-map", "0:s:0", "-f", "srt", "-"])
+        .args(["-map", &format!("0:s:{stream}"), "-f", "srt", "-"])
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -58,9 +96,12 @@ pub fn dialogue_text(srt: &str) -> String {
         let mut depth = 0i32;
         for c in l.chars() {
             match c {
-                '[' | '(' => depth += 1,
-                ']' | ')' => depth = (depth - 1).max(0),
-                '♪' | '>' => {}
+                // Angle brackets are markup (`<i>`); the others are sound descriptions.
+                // Closing a pair that was never opened is harmless, which keeps the
+                // speaker marker `>>` being dropped rather than kept as a token.
+                '[' | '(' | '<' => depth += 1,
+                ']' | ')' | '>' => depth = (depth - 1).max(0),
+                '♪' => {}
                 _ if depth == 0 => cleaned.push(c),
                 _ => {}
             }
@@ -132,6 +173,16 @@ YOU KNOW EVERYTHING.
     fn empty_input_is_handled() {
         assert_eq!(dialogue_text(""), "");
         assert!(tokenize("").is_empty());
+    }
+
+    #[test]
+    fn italic_markup_does_not_become_dialogue() {
+        // Real SRT from a ripped DVD wraps narration in <i> tags.
+        let d = dialogue_text("<i> Good afternoon,</i>\n>> AND WELCOME.");
+        assert!(d.contains("Good afternoon"));
+        assert!(d.contains("AND WELCOME"));
+        // The tag must not survive as a stray "i" token.
+        assert!(!tokenize(&d).contains("i"), "{:?}", tokenize(&d));
     }
 
     #[test]

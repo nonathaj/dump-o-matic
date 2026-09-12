@@ -901,14 +901,26 @@ fn analyse_video(
         println!("  Season {n}, per the volume label");
     }
 
-    let mut titles: Vec<dumo_identify::matching::DiscTitle> = analysis
-        .main_titles()
-        .map(|t| dumo_identify::matching::DiscTitle {
+    // Dialogue, not just runtime. Episodes of one series run to the same minute, so
+    // runtime alone routinely cannot separate one alignment from twenty others; the
+    // words spoken can. This path used to pass None and score on runtime only, which
+    // left the strongest available signal unread on a single disc.
+    let mut titles: Vec<dumo_identify::matching::DiscTitle> = Vec::new();
+    for t in analysis.main_titles() {
+        let path = job_dir.join(&t.name);
+        print!("  reading dialogue from {} ... ", t.name);
+        std::io::stdout().flush().ok();
+        let dialogue = read_dialogue(&path);
+        match &dialogue {
+            Some(w) => println!("{} words", w.len()),
+            None => println!("no usable text subtitle track"),
+        }
+        titles.push(dumo_identify::matching::DiscTitle {
             name: t.name.trim_start_matches("raw/").to_string(),
             duration_secs: t.duration_secs,
-            dialogue: None,
-        })
-        .collect();
+            dialogue,
+        });
+    }
     if titles.is_empty() {
         println!("  No main titles to match.");
         return Ok(());
