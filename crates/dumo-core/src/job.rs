@@ -289,6 +289,20 @@ impl Job {
         self.artifacts.iter().map(|a| a.bytes).sum()
     }
 
+    /// Record that an artifact has been filed out of the job directory into `ready/`.
+    ///
+    /// The bytes are not gone — they are the file in `ready/`, recorded in
+    /// [`Identification::files`] with the same hash — but they are no longer at the path
+    /// the artifact list gives. Moving the entry to `reclaimed` keeps the manifest
+    /// describing what is actually on disk, without forgetting that the file was produced.
+    /// Skipping this makes `verify` report a file the tool filed itself as missing.
+    pub fn mark_filed(&mut self, relative_path: &str) {
+        self.artifacts.retain(|a| a.relative_path != relative_path);
+        if !self.reclaimed.iter().any(|r| r == relative_path) {
+            self.reclaimed.push(relative_path.to_string());
+        }
+    }
+
     /// Write the manifest into `job_dir`, atomically.
     pub fn save(&self, job_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(job_dir).map_err(|e| JobError::Io {
@@ -428,6 +442,48 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+
+    fn artifact(path: &str) -> Artifact {
+        Artifact {
+            relative_path: path.to_string(),
+            bytes: 10,
+            sha256: "abc".to_string(),
+            hashed_at: 0,
+        }
+    }
+
+    /// Filing moves the entry rather than dropping it: `verify` must not call a file it
+    /// filed itself missing, and the manifest must still record that it existed.
+    #[test]
+    fn filing_an_artifact_moves_it_to_reclaimed() {
+        let mut job = Job::new("j".to_string(), "/dev/sdd".to_string());
+        job.artifacts = vec![artifact("raw/Prey.iso"), artifact("raw/other.iso")];
+
+        job.mark_filed("raw/Prey.iso");
+
+        assert_eq!(job.artifacts.len(), 1);
+        assert_eq!(job.artifacts[0].relative_path, "raw/other.iso");
+        assert_eq!(job.reclaimed, vec!["raw/Prey.iso".to_string()]);
+    }
+
+    #[test]
+    fn filing_the_same_artifact_twice_records_it_once() {
+        let mut job = Job::new("j".to_string(), "/dev/sdd".to_string());
+        job.artifacts = vec![artifact("raw/Prey.iso")];
+        job.mark_filed("raw/Prey.iso");
+        job.mark_filed("raw/Prey.iso");
+        assert_eq!(job.reclaimed.len(), 1);
+        assert!(job.artifacts.is_empty());
+    }
+
+    #[test]
+    fn filing_an_unknown_path_leaves_the_artifacts_alone() {
+        let mut job = Job::new("j".to_string(), "/dev/sdd".to_string());
+        job.artifacts = vec![artifact("raw/Prey.iso")];
+        job.mark_filed("raw/nothing.iso");
+        assert_eq!(job.artifacts.len(), 1);
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

@@ -199,9 +199,12 @@ fn verify_one(
     if let Some(src) = &job.device_source {
         if src.image_blocks > 0 {
             let expected = dumo_devices::iso::RESERVED + src.image_blocks * dumo_devices::god::BLOCK;
+            // Only while the image is still in the job: once identify has filed it into
+            // ready/ there is nothing here to measure, and the hash check above has
+            // already covered the filed copy.
             match files
                 .iter()
-                .find(|p| p.extension().map(|e| e == "iso").unwrap_or(false))
+                .find(|p| p.extension().map(|e| e == "iso").unwrap_or(false) && p.is_file())
             {
                 Some(iso) => {
                     let actual = std::fs::metadata(iso).map(|m| m.len()).unwrap_or(0);

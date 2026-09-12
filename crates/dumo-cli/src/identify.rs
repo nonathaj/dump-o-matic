@@ -879,6 +879,12 @@ fn identify_device_content(
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
                 });
+                // The artifact is no longer in the job directory: it has become the file in
+                // ready/, recorded above with the same hash. Move its entry to `reclaimed`
+                // so the manifest keeps describing what is actually on disk — otherwise
+                // `verify` reports a file it filed itself as missing. Disc jobs never hit
+                // this, because packaging leaves their archival files in place.
+                job.mark_filed(relative);
                 job.stage = dumo_core::JobStage::Identified;
                 job.save(job_dir)?;
                 println!("  job stage: identified");
