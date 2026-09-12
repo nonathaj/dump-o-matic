@@ -44,7 +44,7 @@ registering at all across a ten-minute watch. E01-E03 remain unobtained and need
 another copy of the disc. Note the asymmetry is not evidence about the disc as a whole
 — half of it is fine.
 
-A second side from the same set then failed the same way: disc 2 side A reported
+A second side of the same physical copy then failed the same way: disc 2 side A reported
 `disc present, unreadable` with **`unknown profile 0x0000`** for 40 s, and after a light
 cleaning stopped registering at all (`no disc`) across two re-seats. The drive was still
 answering INQUIRY normally throughout, so it had not dropped off the bus. A control disc
@@ -52,8 +52,11 @@ known to read was not tried before moving on, so a stuck media-detection state i
 drive cannot be fully ruled out for the `no disc` phase — though the earlier
 `0x0000` phase, before any cleaning, already showed this side unreadable.
 
-Two unreadable sides from one set, with other sides of the same set reading perfectly,
-fits the handling-damage explanation for flipper discs better than a drive fault.
+These are observations about **one physical copy**, not about the title. Two damaged
+sides on one worn set, with another side of it reading perfectly, fits handling damage
+on flipper discs better than a drive fault — and says nothing about whether another copy
+of Wonder Woman season 3 would read. Nothing about the format or authoring was
+implicated: the side that read was an ordinary DVD-Video.
 
 ## Results
 
