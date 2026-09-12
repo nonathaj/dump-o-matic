@@ -872,9 +872,33 @@ fn analyse_video(
     }
     // The disc number in the volume label is an independent ordering signal, and
     // runtimes tie often enough that it earns its keep.
-    let disc_hint = dumo_identify::matching::disc_number_from_label(&label);
-    if let Some(d) = disc_hint {
-        println!("  Disc {d} of a set, per the volume label");
+    let disc_hint = match dumo_identify::matching::disc_number_from_label(&label) {
+        Some(d) => {
+            println!("  Disc {d} of a set, per the volume label");
+            Some(d)
+        }
+        None => {
+            // The backend names each title from the disc's own metadata, which often
+            // carries the disc number where the volume label does not: a disc labelled
+            // only "WONDER_WOMAN_SEASON_3" produced titles named "WONDER WOMAN SEASON 3
+            // DISC 1-C1_t01.mkv". Without this the episode offset falls back to a
+            // default, which looks like an answer but is not evidence.
+            let from_titles = analysis
+                .main_titles()
+                .filter_map(|t| dumo_identify::matching::disc_number_from_label(&t.name))
+                .next();
+            if let Some(d) = from_titles {
+                println!("  Disc {d} of a set, per the ripped title names");
+            }
+            from_titles
+        }
+    };
+    // The label usually names the season outright, and the publisher's own statement
+    // outranks a runtime fit: episode runtimes across seasons of one show differ by
+    // seconds, so they tie routinely, while the label does not.
+    let season_hint = dumo_identify::matching::season_number_from_label(&label);
+    if let Some(n) = season_hint {
+        println!("  Season {n}, per the volume label");
     }
 
     let mut titles: Vec<dumo_identify::matching::DiscTitle> = analysis
@@ -947,7 +971,22 @@ fn analyse_video(
         println!("  No candidate series could be matched.");
         return Ok(());
     };
-    let best = &results[0];
+    // Runtime ranking picks the series; the label, where it names one, picks the season.
+    let runtime_best = &results[0];
+    let best = match season_hint {
+        Some(n) => match results.iter().find(|r| r.season == n) {
+            Some(r) => r,
+            None => {
+                println!(
+                    "  Volume label names season {n}, but this series has no season {n} \
+                     holding {} or more episodes — using the runtime fit instead",
+                    titles.len()
+                );
+                runtime_best
+            }
+        },
+        None => runtime_best,
+    };
 
     println!();
     println!(
@@ -962,6 +1001,16 @@ fn analyse_video(
             "    chosen over {} by {:.1} min/episode",
             truncate(&runner.name, 40),
             gap
+        );
+    }
+
+    if best.season != runtime_best.season {
+        println!(
+            "    season {} taken from the label over season {}, which fit runtimes better \
+             by {:.1} min/episode — too small a margin to outweigh the printed label",
+            best.season,
+            runtime_best.season,
+            best.mean_delta - runtime_best.mean_delta
         );
     }
 

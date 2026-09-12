@@ -159,6 +159,38 @@ pub fn disc_number_from_label(label: &str) -> Option<u32> {
     None
 }
 
+/// The season number named in a disc's volume label, if it names one.
+///
+/// The publisher printed this on the disc, which makes it far better evidence than a
+/// runtime fit: episode runtimes across seasons of the same show differ by seconds,
+/// while the label is an explicit statement of what the disc holds. A Wonder Woman
+/// season 3 disc was matched to season 2 because season 2's runtimes fitted by
+/// 0.3 min/episode more — 18 seconds of noise overriding the printed answer.
+///
+/// Deliberately conservative about what counts as a season number. `SEASON_3` and `S02`
+/// are unambiguous; a bare number is not, and neither is the `3` in `WONDER_WOMAN_3`,
+/// which could be a sequel or a disc index.
+pub fn season_number_from_label(label: &str) -> Option<u32> {
+    let spaced = label.replace(['_', '.', '-'], " ").to_ascii_uppercase();
+    let words: Vec<&str> = spaced.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        if matches!(*w, "SEASON" | "SERIES") {
+            if let Some(n) = words.get(i + 1).and_then(|n| n.parse::<u32>().ok()) {
+                return Some(n);
+            }
+        }
+        // "S02" / "S2", but not "S" alone and not the "S" of a word like "SEASON".
+        if let Some(rest) = w.strip_prefix('S') {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(n) = rest.parse() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Find the best contiguous run of episodes matching these titles.
 ///
 /// `titles` must already be in disc order. `disc_hint` is the disc's number within its
@@ -587,6 +619,24 @@ mod tests {
         assert_eq!(disc_number_from_label("THE_WIRE_S01_D3"), Some(3));
         assert_eq!(disc_number_from_label("SHOW_DISK_11"), Some(11));
         assert_eq!(disc_number_from_label("MOVIE_TITLE"), None);
+    }
+
+    #[test]
+    fn reads_a_season_number_from_a_label() {
+        assert_eq!(season_number_from_label("WONDER_WOMAN_SEASON_3"), Some(3));
+        assert_eq!(season_number_from_label("THE_WIRE_S01_D3"), Some(1));
+        assert_eq!(season_number_from_label("SHOW_SERIES_2_DISC_1"), Some(2));
+        assert_eq!(season_number_from_label("BLACKADDER_S02"), Some(2));
+    }
+
+    #[test]
+    fn does_not_invent_a_season_from_an_ambiguous_number() {
+        // A sequel or a disc index, not a season.
+        assert_eq!(season_number_from_label("WONDER_WOMAN_3"), None);
+        assert_eq!(season_number_from_label("ROCKY_II"), None);
+        assert_eq!(season_number_from_label("MOVIE_TITLE"), None);
+        // "DISC 2" must not be read as a season.
+        assert_eq!(season_number_from_label("ESPN_30_FOR_30_DISC_2"), None);
     }
 
     #[test]
