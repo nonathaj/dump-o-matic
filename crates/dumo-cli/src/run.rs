@@ -25,6 +25,7 @@ pub struct RunArgs {
     pub min_length: u32,
     pub dry_run: bool,
     pub assume_yes: bool,
+    pub keep_play_all: bool,
     pub config_file: Option<PathBuf>,
 }
 
@@ -36,6 +37,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         min_length: args.min_length,
         dry_run: args.dry_run,
         assume_yes: args.assume_yes,
+        keep_play_all: args.keep_play_all,
         config_file: args.config_file.clone(),
     })?;
 

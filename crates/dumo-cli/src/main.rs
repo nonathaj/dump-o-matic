@@ -81,6 +81,13 @@ enum Command {
         /// Do not prompt for confirmation.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Rip a "play all" title too, instead of skipping it as redundant.
+        ///
+        /// TV discs often offer one title that plays the episodes back to back. It holds
+        /// no unique content but costs as much disk as the rest of the disc, so it is
+        /// skipped by default when detected.
+        #[arg(long)]
+        keep_play_all: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -105,6 +112,13 @@ enum Command {
         /// Do not prompt for confirmation.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Rip a "play all" title too, instead of skipping it as redundant.
+        ///
+        /// TV discs often offer one title that plays the episodes back to back. It holds
+        /// no unique content but costs as much disk as the rest of the disc, so it is
+        /// skipped by default when detected.
+        #[arg(long)]
+        keep_play_all: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -299,12 +313,13 @@ fn main() -> Result<()> {
         Command::Drives { json } => cmd_drives(json),
         Command::Probe { device, json } => cmd_probe(device, json),
         Command::Config { action } => cmd_config(action),
-        Command::Run { device, min_length, dry_run, yes, config } => {
+        Command::Run { device, min_length, dry_run, yes, keep_play_all, config } => {
             run::run(run::RunArgs {
                 device,
                 min_length,
                 dry_run,
                 assume_yes: yes,
+                keep_play_all,
                 config_file: config,
             })
         }
@@ -314,6 +329,7 @@ fn main() -> Result<()> {
             min_length,
             dry_run,
             yes,
+            keep_play_all,
             config,
         } => rip::run(rip::RipArgs {
             device,
@@ -321,6 +337,7 @@ fn main() -> Result<()> {
             min_length,
             dry_run,
             assume_yes: yes,
+            keep_play_all,
             config_file: config,
         })
         .map(|_| ()),

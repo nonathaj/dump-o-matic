@@ -26,6 +26,7 @@ pub struct RipArgs {
     pub min_length: u32,
     pub dry_run: bool,
     pub assume_yes: bool,
+    pub keep_play_all: bool,
     pub config_file: Option<PathBuf>,
 }
 
@@ -37,6 +38,7 @@ impl Default for RipArgs {
             min_length: DEFAULT_MIN_LENGTH_SECS,
             dry_run: false,
             assume_yes: false,
+            keep_play_all: false,
             config_file: None,
         }
     }
@@ -130,7 +132,34 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
             }
             vec![t]
         }
-        None => scan.titles.iter().map(|t| t.index).collect(),
+        None => {
+            // A play-all title duplicates the episodes it concatenates, so ripping it
+            // doubles the disk cost of the disc for no unique content — and hands
+            // identification a title that matches no episode.
+            let play_all = dumo_identify::playall::detect(&scan.titles);
+            match (&play_all, args.keep_play_all) {
+                (Some(p), false) => {
+                    println!("Skipping title {}: {}", p.index, p.evidence());
+                    println!(
+                        "  saves {:.2} GB; pass --keep-play-all to rip it anyway",
+                        p.estimated_bytes as f64 / 1e9
+                    );
+                    scan.titles
+                        .iter()
+                        .filter(|t| t.index != p.index)
+                        .map(|t| t.index)
+                        .collect()
+                }
+                (Some(p), true) => {
+                    println!(
+                        "Keeping title {} despite looking like a play-all (--keep-play-all)",
+                        p.index
+                    );
+                    scan.titles.iter().map(|t| t.index).collect()
+                }
+                (None, _) => scan.titles.iter().map(|t| t.index).collect(),
+            }
+        }
     };
 
     println!();
