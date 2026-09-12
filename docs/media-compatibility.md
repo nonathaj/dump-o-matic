@@ -36,28 +36,31 @@ not a read error. This cost real time twice before it was understood.
 | **PS3** | ❌ Unreadable | `not ready` ×3 while spinning up, then `disc present, unreadable`. GET CONFIGURATION returns **`unknown profile 0x0000`** — no medium type determined. `dvd+rw-mediainfo` agrees: empty current configuration. | Does **not** prove PS3 discs are unreadable in PC drives generally. Three causes remain open — see below. |
 | **Blu-ray (any)** | ❓ Never tested | — | **The BD read path has never been validated on this drive.** "reads: BD" is an advertised capability from udev, not an observation. |
 | **Wii** | ❌ Unreadable | `disc present, unreadable` on the first poll. GET CONFIGURATION returns **`unknown profile 0x0000`**; nothing addressable (`blockdev` and `dd` both `No medium found`). | Reasonably well supported, unlike the PS3 row — see below. Wii discs are DVD-form, and this drive's DVD classification is proven on 15 discs, so the failure to classify is a property of the format, not of an untested code path. |
-| **GameCube** | ❓ Not yet tested | — | — |
+| **GameCube** | ❌ Unreadable | Identical to Wii: `disc present, unreadable` on the first poll, **`unknown profile 0x0000`**, nothing addressable. | Same reasoning as Wii, and it is a second independent disc agreeing. Also shows the 8 cm form factor is detected as media — the failure is the format, not the disc size. |
 | **Xbox 360** | ❓ Not yet tested | — | Expected to resemble Xbox, but it is unknown whether it carries the same `VTC Sector Offset` marker our detection keys on. |
 | **Audio CD** | ❓ Not tested | — | No backend implemented. |
 
-### Why the Wii result is stronger evidence than the PS3 one
+### Why the Nintendo results are stronger evidence than the PS3 one
 
 Both discs produce the identical symptom, but they are not equally well controlled.
 
-A Wii disc is physically DVD-form, and this drive's DVD handling is proven: 15 discs
-classified correctly as `dvd_rom` or `cd_rom` and dumped to verified images. So
-`0x0000` here is not an untested path failing — it is a working classifier declining to
-recognise the disc, which matches Nintendo's format not being DVD-compliant. There is
-no hidden partition to unlock as there is on Xbox; the disc is opaque from the start.
+Wii and GameCube discs are both physically DVD-form, and this drive's DVD handling is
+proven: 15 discs classified correctly as `dvd_rom` or `cd_rom` and dumped to verified
+images. So `0x0000` here is not an untested path failing — it is a working classifier
+declining to recognise the disc, which matches Nintendo's format not being
+DVD-compliant. There is no hidden partition to unlock as there is on Xbox; the disc is
+opaque from the start. Two different discs give the identical result, and the GameCube
+disc additionally shows the 8 cm form factor is detected as media, so neither disc size
+nor mechanical detection is implicated.
 
 The PS3 disc is BD-form, and this drive's BD handling is proven on **nothing**. Its
 `0x0000` is consistent with both "PS3 discs are unreadable here" and "this drive cannot
 read Blu-ray at all", and the evidence cannot separate them.
 
-The residual doubt on the Wii row is the disc itself — dirty, damaged, or unseated.
-Against that: the drive reported media immediately rather than `no disc`, which is what
-the seating failure earlier that day looked like. Not proof, but it points away from
-mechanical causes.
+The residual doubt on these rows is the discs themselves — dirty, damaged, or unseated.
+Against that: both reported media immediately rather than `no disc`, which is what the
+seating failure earlier that day looked like, and two unrelated discs failing the same
+way is unlikely to be coincidence. Not proof, but it points away from mechanical causes.
 
 One observation deliberately **not** drawn on: the PS3 disc spent ~15 s in `not ready`
 while the Wii disc was unreadable on the first poll. That looks like a difference in how
