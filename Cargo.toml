@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dumo-core",
     "crates/dumo-drives",
+    "crates/dumo-devices",
     "crates/dumo-backends",
     "crates/dumo-identify",
     "crates/dumo-cli",
@@ -19,6 +20,7 @@ rust-version = "1.75"
 [workspace.dependencies]
 dumo-core = { path = "crates/dumo-core" }
 dumo-drives = { path = "crates/dumo-drives" }
+dumo-devices = { path = "crates/dumo-devices" }
 dumo-backends = { path = "crates/dumo-backends" }
 dumo-identify = { path = "crates/dumo-identify" }
 

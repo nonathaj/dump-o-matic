@@ -38,6 +38,12 @@ observed on a Wonder Woman season 3 disc whose side 2 dumped cleanly while side 
 not read. Both sides also identify themselves as "disc 1", which breaks any inference
 that maps disc number to episode number.
 
+That disc was written off after retrying: side 2 yielded S03E04-E06, verified and
+staged, while side 1 first reported `disc present, unreadable` and then stopped
+registering at all across a ten-minute watch. E01-E03 remain unobtained and need
+another copy of the disc. Note the asymmetry is not evidence about the disc as a whole
+— half of it is fine.
+
 ## Results
 
 | Media | Result | Evidence | Proves / does not prove |
