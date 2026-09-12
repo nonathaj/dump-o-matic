@@ -666,8 +666,9 @@ fn apply_matches(
             kinds.dedup();
             println!("  job stage: identified");
             println!(
-                "  the archival {} stay in the job directory as provenance",
-                kinds.join("/")
+                "  the archival {} {} in the job directory as provenance",
+                kinds.join("/"),
+                if kinds.len() == 1 { "image stays" } else { "files stay" }
             );
             return Ok(());
         }
