@@ -21,9 +21,22 @@ result usually constrains less than it appears to.
 | MakeMKV | v1.18.3 linux(x64-release) |
 | chdman | MAME 0.264 |
 
-The drive is a **slim USB tray** model, which matters: the disc must click onto the
-centre spindle clips. A disc resting in the tray without engaging reports `no disc`,
-not a read error. This cost real time twice before it was understood.
+The drive is a **slim USB tray** model, which matters in two ways:
+
+- The disc must click onto the centre spindle clips. A disc resting in the tray without
+  engaging reports `no disc`, not a read error. This cost real time three times before
+  it was understood, and `no disc` versus `disc present, unreadable` is the tell: the
+  first is seating, the second is the disc or the format.
+- The tray is **manual close only**. `eject -t` fails with "CD-ROM tray close command
+  failed", so the tray has to be pushed shut by hand. Software can open it but not
+  close it.
+
+Double-sided ("flipper") DVDs are worth calling out separately: both surfaces carry
+data, so neither can be set down safely and handling damage is common. One side reading
+perfectly while the other is unreadable is an expected outcome, not a contradiction —
+observed on a Wonder Woman season 3 disc whose side 2 dumped cleanly while side 1 would
+not read. Both sides also identify themselves as "disc 1", which breaks any inference
+that maps disc number to episode number.
 
 ## Results
 
