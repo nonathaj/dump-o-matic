@@ -100,6 +100,12 @@ pub enum MediaKind {
     BluRayVideo,
     /// A game disc for a recognised console.
     GameDisc,
+    /// An original Xbox game disc, of which only the video partition is visible.
+    ///
+    /// Kept distinct from [`MediaKind::GameDisc`] because it is not dumpable by an
+    /// ordinary drive: the game sits in an XDVDFS partition outside the addressable
+    /// area, so treating it as a game disc would rip the warning clip instead.
+    XboxGameDisc,
     /// Readable data disc of no recognised special kind.
     Data,
     /// Nothing readable.
@@ -115,6 +121,7 @@ impl std::fmt::Display for MediaKind {
             MediaKind::DvdVideo => "DVD-Video",
             MediaKind::BluRayVideo => "Blu-ray Video",
             MediaKind::GameDisc => "Game disc",
+            MediaKind::XboxGameDisc => "Xbox game disc (video partition only)",
             MediaKind::Data => "Data disc",
             MediaKind::Blank => "Blank",
             MediaKind::Unknown => "Unknown",

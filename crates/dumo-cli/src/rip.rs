@@ -84,6 +84,16 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
         MediaKind::GameDisc | MediaKind::Data => {
             return rip_game(&cfg, &device, &probe, &args);
         }
+        // Refused rather than attempted: redumper supports Xbox discs, but only through
+        // a drive whose firmware exposes the security sector. Ripping what this drive
+        // can see would yield the warning clip under a game's name.
+        MediaKind::XboxGameDisc => bail!(
+            "this is an original Xbox disc and only its video partition is readable here. \
+             The game is in an XDVDFS partition outside the addressable area, so any dump \
+             from this drive would contain the warning clip, not the game. Dumping it needs \
+             a Kreon-firmware drive (TSSTcorp SH-D162C/D163A/D163B) or a dump taken from a \
+             softmodded console."
+        ),
         other => bail!(
             "no backend for {other} yet; audio CD support is not implemented. \
              Video discs use MakeMKV and game/data discs use redumper."

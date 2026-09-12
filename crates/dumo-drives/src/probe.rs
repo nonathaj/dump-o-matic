@@ -15,6 +15,21 @@ use std::os::unix::io::AsRawFd;
 /// `SYSTEM.CNF` is a few hundred bytes; anything larger is not the file we want.
 const MAX_CONFIG_FILE: u32 = 8 * 1024;
 
+/// Marker in the ISO 9660 application identifier of an original Xbox disc.
+///
+/// Xbox discs carry two partitions: a small DVD-Video partition holding the "for Xbox
+/// only" warning clip, and an XDVDFS partition with the game, deliberately placed
+/// outside the range a standard drive will address. Only the first is visible to us, and
+/// it is a structurally valid DVD-Video — `VIDEO_TS` in the root and all — so without
+/// this marker it classifies as a feature film whose title is the pressing date code.
+const XBOX_VIDEO_PARTITION_MARKER: &str = "VTC Sector Offset";
+
+/// A DVD-Video feature runs to gigabytes; an Xbox warning clip is tens of megabytes.
+///
+/// Used only to lower confidence in a `VIDEO_TS` disc too small to be a real feature,
+/// never on its own to call something an Xbox disc — a short promo DVD is also small.
+const MIN_PLAUSIBLE_DVD_VIDEO_SECTORS: u32 = 512 * 1024;
+
 /// Probe whichever disc is currently in `device_path`.
 pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
     let started = std::time::Instant::now();
@@ -224,8 +239,58 @@ fn classify(
     }
 
     if has("VIDEO_TS") {
-        let mut hint = ContentHint::new(MediaKind::DvdVideo, Confidence::Strong)
+        let app = volume
+            .and_then(|v| v.application_id.as_deref())
+            .unwrap_or_default();
+        let sectors = volume.and_then(|v| v.volume_space_size);
+        let too_small_for_a_feature = sectors
+            .map(|s| s < MIN_PLAUSIBLE_DVD_VIDEO_SECTORS)
+            .unwrap_or(false);
+
+        // The application identifier is the decisive signal. Size alone is not: a short
+        // promo DVD is also small, so it only ever lowers confidence below.
+        if app.contains(XBOX_VIDEO_PARTITION_MARKER) {
+            let mut hint = ContentHint::new(MediaKind::XboxGameDisc, Confidence::Strong)
+                .with_evidence(format!(
+                    "ISO 9660 application identifier {app:?} marks the Xbox video partition"
+                ));
+            if let Some(s) = sectors {
+                hint = hint.with_evidence(format!(
+                    "visible volume is {s} sectors ({:.1} MB) — the warning clip, not the game",
+                    (u64::from(s) * 2048) as f64 / 1_000_000.0
+                ));
+            }
+            // Deliberately no title guess: the volume label is a pressing date code
+            // (e.g. "SEP13011042"), and offering it as a title invites filing the disc
+            // under a meaningless name.
+            if let Some(label) = volume.and_then(|v| v.volume_id.as_ref()) {
+                hint = hint.with_evidence(format!(
+                    "volume label {label:?} is a pressing date code, not a title"
+                ));
+            }
+            return hint.with_evidence(
+                "the game is in an XDVDFS partition a standard drive cannot address; \
+                 dumping needs a Kreon-firmware drive (TSSTcorp SH-D162/D163) or a \
+                 softmodded console",
+            );
+        }
+
+        let confidence = if too_small_for_a_feature {
+            Confidence::Weak
+        } else {
+            Confidence::Strong
+        };
+        let mut hint = ContentHint::new(MediaKind::DvdVideo, confidence)
             .with_evidence("VIDEO_TS directory present in root");
+        if too_small_for_a_feature {
+            if let Some(s) = sectors {
+                hint = hint.with_evidence(format!(
+                    "volume is only {s} sectors ({:.1} MB), too small for a feature — \
+                     this may be the video partition of a console game disc",
+                    (u64::from(s) * 2048) as f64 / 1_000_000.0
+                ));
+            }
+        }
         if let Some(label) = volume.and_then(|v| v.volume_id.as_ref()) {
             hint = hint
                 .with_title(label.clone())
@@ -337,6 +402,90 @@ mod tests {
         );
         assert_eq!(hint.kind, MediaKind::GameDisc);
         assert_eq!(hint.title_guess.as_deref(), Some("SLUS-20488"));
+    }
+
+    /// Values taken from a real original Xbox disc, pressed 2001-09-13. The title is
+    /// unknown and unknowable from this partition, which is the point of the test.
+    fn xbox_volume() -> dumo_core::VolumeInfo {
+        dumo_core::VolumeInfo {
+            volume_id: Some("SEP13011042".into()),
+            volume_set_id: None,
+            publisher_id: None,
+            application_id: Some("Session Offset : 0 VTC Sector Offset: 0".into()),
+            created: None,
+            volume_space_size: Some(6992),
+            logical_block_size: Some(2048),
+        }
+    }
+
+    #[test]
+    fn xbox_video_partition_is_not_a_dvd_video() {
+        let v = xbox_volume();
+        let hint = classify(
+            Some(DiscProfile::DvdRom),
+            ioctl::KernelDiscClass::Data,
+            &None,
+            Some(&v),
+            &["VIDEO_TS/".to_string()],
+            None,
+            false,
+        );
+        assert_eq!(hint.kind, MediaKind::XboxGameDisc);
+        // The pressing date code must never be offered as a title.
+        assert_eq!(hint.title_guess, None);
+        let ev = hint.evidence.join(" | ");
+        assert!(ev.contains("VTC Sector Offset"), "{ev}");
+        assert!(ev.contains("Kreon"), "{ev}");
+    }
+
+    #[test]
+    fn a_real_dvd_video_is_still_strong_and_keeps_its_title() {
+        let v = dumo_core::VolumeInfo {
+            volume_id: Some("THE_THIN_RED_LINE".into()),
+            volume_set_id: None,
+            publisher_id: None,
+            application_id: None,
+            created: None,
+            // ~7.9 GB, a dual-layer feature.
+            volume_space_size: Some(3_800_000),
+            logical_block_size: Some(2048),
+        };
+        let hint = classify(
+            Some(DiscProfile::DvdRom),
+            ioctl::KernelDiscClass::Data,
+            &None,
+            Some(&v),
+            &["VIDEO_TS/".to_string(), "AUDIO_TS/".to_string()],
+            None,
+            true,
+        );
+        assert_eq!(hint.kind, MediaKind::DvdVideo);
+        assert_eq!(hint.confidence, Confidence::Strong);
+        assert_eq!(hint.title_guess.as_deref(), Some("THE_THIN_RED_LINE"));
+    }
+
+    #[test]
+    fn a_tiny_video_ts_disc_is_not_claimed_with_strong_confidence() {
+        // Same size as the Xbox partition but without the marker: we do not know what
+        // this is, so it stays DVD-Video with the doubt recorded rather than guessing.
+        let mut v = xbox_volume();
+        v.application_id = None;
+        let hint = classify(
+            Some(DiscProfile::DvdRom),
+            ioctl::KernelDiscClass::Data,
+            &None,
+            Some(&v),
+            &["VIDEO_TS/".to_string()],
+            None,
+            false,
+        );
+        assert_eq!(hint.kind, MediaKind::DvdVideo);
+        assert_eq!(hint.confidence, Confidence::Weak);
+        assert!(
+            hint.evidence.join(" | ").contains("too small for a feature"),
+            "{:?}",
+            hint.evidence
+        );
     }
 
     #[test]
