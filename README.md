@@ -4,8 +4,9 @@ A staged, conservative media backup pipeline: probe a disc, rip it to staging, i
 what it actually is with a confidence level, organize it to your naming conventions, and
 migrate it to permanent storage — without ever risking data loss.
 
-Supports movies/TV, audio CDs, and game discs (PS1/PS2 and friends). See [PLAN.md](PLAN.md)
-for the full design, the survey of existing tools, and the roadmap.
+Supports movies/TV, audio CDs, game discs (PS1/PS2 and friends), and games stored on a
+console's own USB drive. See [PLAN.md](PLAN.md) for the full design, the survey of existing
+tools, and the roadmap.
 
 > **Status: early, but working.** The full pipeline runs end to end for **game discs**:
 > probe → rip → identify → repack → migrate, including verified transfer to a network
@@ -29,6 +30,44 @@ Games are the complete path. Video stops one step short: `identify --set` scores
 set against TMDB and proposes episode filenames, but there is no `--apply` for video yet,
 so filing them is still manual.
 
+### Storage devices
+
+A console's USB drive is a filesystem rather than a disc, so it has its own front half of
+the pipeline. The back half is shared: `pull` produces an ordinary job, and `identify`,
+`migrate`, `verify` and `clean` then treat it like any other.
+
+| Stage | Command | Counterpart |
+|---|---|---|
+| List attached devices | `devices` | `drives` |
+| See what is on one | `catalog` | `probe` |
+| Extract one title to staging | `pull` | `rip` |
+
+```console
+$ dump-o-matic catalog /dev/sdd
+/dev/sdd — Xbox 360 content storage
+  medium: FAT32, OEM name "XBOX360"
+
+  title id  name                       kind              on device     as iso  discs
+  534507D4  Chromehounds               Games on Demand     3.79 GB    3.77 GB  -
+  545407E0  Prey                       Games on Demand     4.58 GB    4.56 GB  -
+  ...
+  8 of 9 item(s) can be pulled off as game images.
+
+$ dump-o-matic pull /dev/sdd --title 545407E0
+```
+
+`pull --format iso` (the default) writes a single image that ordinary tools and emulators
+read; `--format package` copies the package exactly as the console wrote it, so its hash
+tree travels with it and it stays verifiable indefinitely; `--format both` writes each.
+
+The device is opened read-only and its FAT32 volume is parsed in-process rather than
+mounted, so the kernel never gets the chance to update a dirty bit on media being
+preserved. Reading a block device needs `disk` group membership — or mount it read-only and
+pass the mount directory, which works anywhere a device node does.
+
+The format, how it was decoded, and exactly what the resulting files are and are not is in
+[docs/xbox360-storage.md](docs/xbox360-storage.md).
+
 ### How identification decides
 
 Game discs are matched by hash against Redump datfiles, and **only an exact match is ever
@@ -42,6 +81,14 @@ dialogue compared against episode synopses, weighted by how informative each wor
 across that season rather than against any hardcoded stopword list. Discs of a box set are
 solved jointly, since the discs of a season hold consecutive non-overlapping runs of
 episodes, which frequently decides cases that runtimes alone cannot.
+
+Content pulled off a storage device sits between the two. There is no hash to match — a
+Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
+a whole disc, so the two can never be compared — but every block copied is checked against
+a SHA-1 hash tree the console itself wrote, and the game's executable independently repeats
+the title and media IDs the package claims. That is reported as `strong`: enough to name
+the file, not enough to file unattended, so it needs `--accept-inferred` like video does. A
+package extraction is a verified *copy*, which is not a verified *dump*.
 
 Confidence comes from corroboration, not from one score being small. Measured on a real
 four-disc set: dialogue, choosing freely across all 30 episodes, independently reached the
@@ -98,6 +145,7 @@ Both commands accept `--json` for scripting.
 | DVD-Video / Blu-ray detection | `VIDEO_TS` / `BDMV` in the root directory |
 | PS1 / PS2 game serial | `SYSTEM.CNF` boot entry, normalised to Redump form (`SLUS_203.12` → `SLUS-20312`) |
 | Original Xbox disc | ISO 9660 application identifier (`VTC Sector Offset`), which marks the video partition of a disc whose game is not addressable |
+| Xbox 360 content on a USB drive | FAT32 `Content/<profile>/<title id>/<type>/` tree, package headers read for title and media IDs, cross-checked against the game's own `default.xex` |
 | Disc present but unreadable | `CDS_DISC_OK` from the tray state contradicted by `ENOMEDIUM` on open, reported with the medium profile so a damaged disc is distinguishable from an unsupported format |
 
 Which media this actually works on is recorded per disc type, with the evidence and
@@ -134,6 +182,15 @@ means membership in the `cdrom` group:
 ```sh
 sudo usermod -aG cdrom "$USER"   # log out and back in
 ```
+
+Reading a storage device (`devices`, `catalog`, `pull`) needs the `disk` group instead:
+
+```sh
+sudo usermod -aG disk "$USER"    # log out and back in
+```
+
+Or avoid it entirely: mount the device read-only and pass the mount directory, which every
+device command accepts in place of a device node.
 
 ## License
 

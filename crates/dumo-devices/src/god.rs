@@ -200,6 +200,119 @@ impl<'a> GodImage<'a> {
         }
         Ok(())
     }
+
+    /// Copy one data file out verbatim, verifying its whole hash tree as it passes.
+    ///
+    /// This is the faithful-copy path: the bytes written are exactly the bytes on the
+    /// device, hash blocks and all, so the copy remains verifiable forever rather than only
+    /// at the moment it was made. Both levels of the tree are checked — each group's hash
+    /// block against the file's master hash block, and each data block against its group —
+    /// so a copy that completes has had every byte of image data confirmed twice over.
+    pub fn copy_data_file_verified(
+        &self,
+        file_index: usize,
+        out: &mut dyn std::io::Write,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<CopyReport> {
+        let file = self.files.get(file_index).ok_or_else(|| DeviceError::Corrupt {
+            path: self.label.clone(),
+            detail: format!("no data file {file_index}"),
+        })?;
+
+        let total_blocks = file.size() / BLOCK;
+        if total_blocks == 0 || file.size() % BLOCK != 0 {
+            return Err(DeviceError::Corrupt {
+                path: format!("{}.data/Data{file_index:04}", self.label),
+                detail: format!("{} bytes is not a whole number of blocks", file.size()),
+            });
+        }
+
+        let mut hasher = sha2::Sha256::new();
+        let mut block = [0u8; BLOCK as usize];
+        let mut blocks_verified = 0u64;
+        let mut written = 0u64;
+
+        let read_block = |index: u64, buf: &mut [u8; BLOCK as usize]| -> Result<()> {
+            file.read_at(buf, index * BLOCK)
+        };
+
+        // Block zero is the master hash table: the SHA-1 of every group hash block below.
+        let mut master = [0u8; BLOCK as usize];
+        read_block(0, &mut master)?;
+        out.write_all(&master).map_err(write_err)?;
+        sha2::Digest::update(&mut hasher, master);
+        written += BLOCK;
+        progress(written);
+
+        let mut index = 1u64;
+        let mut group = 0u64;
+        while index < total_blocks {
+            let mut table = [0u8; BLOCK as usize];
+            read_block(index, &mut table)?;
+            // The group's hash block must itself match the master table.
+            let expected = &master[(group * DIGEST as u64) as usize
+                ..(group * DIGEST as u64) as usize + DIGEST];
+            let computed = Sha1::digest(table);
+            if computed.as_slice() != expected {
+                return Err(DeviceError::HashMismatch {
+                    item: format!("{}.data/Data{file_index:04} group {group}", self.label),
+                    block: index,
+                    expected: hex(expected),
+                    computed: hex(computed.as_slice()),
+                });
+            }
+            out.write_all(&table).map_err(write_err)?;
+            sha2::Digest::update(&mut hasher, table);
+            written += BLOCK;
+            index += 1;
+
+            for slot in 0..GROUP_DATA {
+                if index >= total_blocks {
+                    break;
+                }
+                read_block(index, &mut block)?;
+                let expected = &table[(slot * DIGEST as u64) as usize
+                    ..(slot * DIGEST as u64) as usize + DIGEST];
+                let computed = Sha1::digest(block);
+                if computed.as_slice() != expected {
+                    return Err(DeviceError::HashMismatch {
+                        item: format!("{}.data/Data{file_index:04}", self.label),
+                        block: index,
+                        expected: hex(expected),
+                        computed: hex(computed.as_slice()),
+                    });
+                }
+                out.write_all(&block).map_err(write_err)?;
+                sha2::Digest::update(&mut hasher, block);
+                written += BLOCK;
+                blocks_verified += 1;
+                index += 1;
+            }
+            progress(written);
+            group += 1;
+        }
+
+        out.flush().map_err(write_err)?;
+        Ok(CopyReport {
+            bytes: written,
+            blocks_verified,
+            sha256: hex(&sha2::Digest::finalize(hasher)),
+        })
+    }
+}
+
+/// Outcome of copying one data file.
+pub struct CopyReport {
+    pub bytes: u64,
+    pub blocks_verified: u64,
+    pub sha256: String,
+}
+
+fn write_err(source: std::io::Error) -> DeviceError {
+    DeviceError::Io {
+        path: "writing package copy".to_string(),
+        source,
+    }
 }
 
 impl RandomRead for GodImage<'_> {

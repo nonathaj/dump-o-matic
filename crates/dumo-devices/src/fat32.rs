@@ -49,14 +49,13 @@ impl DirEntry {
 }
 
 /// A mounted-by-us FAT32 volume, opened read-only.
+#[derive(Debug)]
 pub struct Fat32 {
     file: File,
     source: String,
     bytes_per_sector: u32,
     sectors_per_cluster: u32,
     reserved_sectors: u32,
-    fat_count: u32,
-    sectors_per_fat: u32,
     root_cluster: u32,
     total_sectors: u64,
     /// OEM name from the BPB. The Xbox 360 writes `XBOX360` here when it formats a drive,
@@ -142,8 +141,6 @@ impl Fat32 {
             bytes_per_sector,
             sectors_per_cluster,
             reserved_sectors,
-            fat_count,
-            sectors_per_fat,
             root_cluster,
             total_sectors,
             oem_name,

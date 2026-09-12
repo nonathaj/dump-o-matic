@@ -13,7 +13,7 @@ pub mod job;
 pub mod text;
 
 pub use config::{Config, ConfigError};
-pub use job::{Artifact, Identification, Job, JobStage, ReadyFile, TitleInfo};
+pub use job::{Artifact, DeviceSource, Identification, Job, JobStage, ReadyFile, TitleInfo};
 
 pub use disc::{
     AudioTrack, ContentHint, DiscProbe, DiscProfile, GameSerial, MediaKind, TocInfo, VolumeInfo,

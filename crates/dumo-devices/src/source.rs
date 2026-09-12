@@ -57,6 +57,20 @@ pub trait ContentSource {
         Ok(buf)
     }
 
+    /// Read the first `len` bytes of a file, or all of it if it is shorter.
+    ///
+    /// Distinct from [`ContentSource::read_small`], which refuses a file larger than the
+    /// limit. A package header is a fixed-size structure at the *start* of a file that may
+    /// be much longer — a cache file or a downloadable-content package, say — so requiring
+    /// the whole file to fit would make those invisible rather than merely unextractable.
+    fn read_prefix(&self, path: &str, len: u64) -> Result<Vec<u8>> {
+        let f = self.open(path)?;
+        let want = f.size().min(len);
+        let mut buf = vec![0u8; want as usize];
+        f.read_at(&mut buf, 0)?;
+        Ok(buf)
+    }
+
     /// Whether a path exists, used by layout detection.
     fn exists(&self, path: &str) -> bool {
         let (parent, name) = match path.rsplit_once('/') {

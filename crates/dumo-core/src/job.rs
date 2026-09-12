@@ -145,6 +145,66 @@ pub struct Identification {
     pub identified_at: u64,
 }
 
+/// Provenance for content taken off a storage device rather than ripped from a disc.
+///
+/// A disc rip is evidenced by the drive, the probe, redumper's per-sector state and its
+/// logs. Content pulled off a USB drive has none of that, but it is not evidence-free
+/// either: an Xbox 360 package carries a SHA-1 hash tree over its own data, so every block
+/// can be checked as it is read, and the game's executable independently repeats the title
+/// and media IDs the package claims. Recording all of it keeps the distinction visible —
+/// this is a faithful, verified copy of a package, which is not the same thing as a
+/// verified dump of a disc, and the manifest should never let the two blur.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceSource {
+    /// Device or directory the content was read from.
+    pub device: String,
+    /// Layout that was detected, e.g. `xbox360_content`.
+    pub layout: String,
+    /// Console's identifier for the title, e.g. `545407E0`.
+    pub title_id: String,
+    /// Name as the package gives it.
+    pub name: String,
+    pub media_id: String,
+    /// Content type, e.g. `Games on Demand`.
+    pub content_kind: String,
+    /// How the package was signed. A console-signed package was licensed to one console.
+    pub signature: String,
+    /// Path of the package within the device.
+    pub package_path: String,
+    pub package_bytes: u64,
+    /// Blocks read and checked against the package's own hash tree during extraction.
+    ///
+    /// The core of the integrity claim: a nonzero count here means every byte written was
+    /// confirmed against a hash the console recorded when it wrote the package.
+    pub blocks_verified: u64,
+    /// Root of the package's hash tree, as declared in its header.
+    pub root_hash: String,
+    /// Title ID read from the game's own executable, when it could be read.
+    pub xex_title_id: Option<String>,
+    /// Media ID read from the game's own executable, when it could be read.
+    pub xex_media_id: Option<String>,
+    /// SHA-256 of the image data alone, excluding the leading reserved region.
+    ///
+    /// Kept separately from the artifact's own hash because the reserved region names the
+    /// tool that produced the file. Two tools converting the same package will differ
+    /// there and agree here, so this is the field that can be compared against a
+    /// conversion made by something else.
+    pub image_sha256: Option<String>,
+    /// Block base the package's filesystem addresses were relative to.
+    pub base_blocks: u64,
+    /// Constant subtracted from every sector reference to produce a standard image.
+    pub shift_sectors: u32,
+    /// Blocks of 0x1000 bytes in the converted image, zero if no image was written.
+    ///
+    /// An independent statement of how long the image should be. A disc rip checks its
+    /// image against the sector count the drive reported; there is no drive here, so this
+    /// plays the same role — it comes from the package's own geometry rather than from the
+    /// file, so it still catches a truncated image long after the device is unplugged.
+    #[serde(default)]
+    pub image_blocks: u64,
+    pub extracted_at: u64,
+}
+
 /// A single unit of work through the pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -180,6 +240,13 @@ pub struct Job {
     /// must stay distinguishable.
     #[serde(default)]
     pub adopted_from: Option<String>,
+    /// Set when this job's content came off a storage device rather than a disc.
+    ///
+    /// Mutually exclusive with a meaningful `probe` in practice: one describes a disc in a
+    /// drive, the other a package in a filesystem.
+    #[serde(default)]
+    pub device_source: Option<DeviceSource>,
+
     /// Artifacts deliberately released by `clean`, kept as a record of what was here.
     ///
     /// They are removed from `artifacts` so the manifest keeps describing what is
@@ -204,6 +271,7 @@ impl Job {
             error: None,
             identification: None,
             adopted_from: None,
+            device_source: None,
             reclaimed: Vec::new(),
         }
     }

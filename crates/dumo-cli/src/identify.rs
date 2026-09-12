@@ -100,7 +100,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
     }
 
     for dir in dirs {
-        identify_job(&dir, &set, &cfg, args.apply, args.show.as_deref())?;
+        identify_job(&dir, &set, &cfg, args.apply, args.show.as_deref(), args.accept_inferred)?;
         println!();
     }
     Ok(())
@@ -130,9 +130,16 @@ fn identify_job(
     cfg: &Config,
     apply: bool,
     show: Option<&str>,
+    accept_inferred: bool,
 ) -> Result<()> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
+
+    // Content pulled off a storage device is identified from what the package says about
+    // itself, not by matching a datfile, so it takes an entirely separate path.
+    if job.device_source.is_some() {
+        return identify_device_content(&mut job, job_dir, cfg, apply, accept_inferred);
+    }
 
     let kind = job
         .probe
@@ -748,6 +755,142 @@ fn record_identification(
             .unwrap_or(0),
     });
     job.stage = dumo_core::JobStage::Identified;
+}
+
+/// Identify content that was pulled off a storage device.
+///
+/// No datfile can settle this. Redump's Xbox 360 hashes describe a whole disc — video
+/// partition, security sectors and all — while a Games-on-Demand package holds only the
+/// game partition, so the two can never be compared however faithfully the package was
+/// copied. That is a permanent property of the source, not a gap to be closed later.
+///
+/// What is available instead is genuinely strong, and is reported as what it is: the
+/// package names its title and media ID, the game's own executable repeats both
+/// independently, and every block copied was checked against the hash tree the console
+/// wrote. Two independent signals agreeing is [`Confidence::Strong`] — enough to name the
+/// file with confidence, and deliberately not enough to file unattended. Filing it needs
+/// `--accept-inferred`, exactly as an inferred video identification does.
+fn identify_device_content(
+    job: &mut Job,
+    job_dir: &std::path::Path,
+    cfg: &Config,
+    apply: bool,
+    accept_inferred: bool,
+) -> Result<()> {
+    let source = match job.device_source.clone() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    println!("  from {} ({})", source.device, source.layout);
+    println!("  package: {} ({})", source.name, source.title_id);
+    println!("    {}, {}, media {}", source.content_kind, source.signature, source.media_id);
+    println!(
+        "    {} block(s) verified against the package's own hash tree",
+        source.blocks_verified
+    );
+
+    // The cross-check is what lifts this above taking the package's word for it.
+    let agrees = match (&source.xex_title_id, &source.xex_media_id) {
+        (Some(t), Some(m)) => {
+            let ok = *t == source.title_id && *m == source.media_id;
+            println!(
+                "    executable declares title {t} media {m} — {}",
+                if ok { "agrees" } else { "DISAGREES" }
+            );
+            ok
+        }
+        _ => {
+            println!("    executable could not be read, so the package's claim stands alone");
+            false
+        }
+    };
+
+    let confidence = if agrees {
+        Confidence::Strong
+    } else {
+        Confidence::Weak
+    };
+    println!("  confidence: {confidence}");
+    println!(
+        "    no Redump match is possible: their Xbox 360 hashes cover a whole disc, and a \n\
+         package holds only the game partition. This is identified, not verified."
+    );
+
+    let images: Vec<(String, u64, String)> = job
+        .artifacts
+        .iter()
+        .filter(|a| a.relative_path.to_ascii_lowercase().ends_with(".iso"))
+        .map(|a| (a.relative_path.clone(), a.bytes, a.sha256.clone()))
+        .collect();
+
+    if images.is_empty() {
+        println!("  no single image to file — this job holds the package in its archival form.");
+        println!("  The package stays in the job directory, where `verify` re-checks it.");
+        return Ok(());
+    }
+
+    let platform = "Microsoft - Xbox 360";
+    let Some(slug) = es_de_slug(platform) else {
+        bail!("no directory mapping for {platform}");
+    };
+    let ready_root = cfg.staging.ready_category_dir("games");
+
+    for (relative, _, sha256) in &images {
+        let name = format!("{}.iso", sanitise(&source.name));
+        let dest = ready_root.join(slug).join(&name);
+        println!("  proposes {slug}/{name}");
+
+        if !apply {
+            continue;
+        }
+        if !accept_inferred {
+            println!(
+                "  NOT APPLYING: this is an identification, not a verified dump. Re-run with \n\
+                 --apply --accept-inferred once you are satisfied it is right."
+            );
+            continue;
+        }
+
+        let path = job_dir.join(relative);
+        if !path.is_file() {
+            println!("  {relative} — MISSING");
+            continue;
+        }
+        print!("  -> {slug}/{name} ... ");
+        std::io::stdout().flush().ok();
+        match dumo_core::fsops::move_verified(&path, &dest, Some(sha256)) {
+            Ok(outcome) => {
+                println!("ok ({} bytes)", outcome.bytes);
+                job.identification = Some(dumo_core::Identification {
+                    title: sanitise(&source.name),
+                    platform: platform.to_string(),
+                    platform_slug: slug.to_string(),
+                    matched_on: format!(
+                        "package metadata (title {}) cross-checked against the executable",
+                        source.title_id
+                    ),
+                    confidence,
+                    source: format!("{} on {}", source.package_path, source.device),
+                    files: vec![dumo_core::ReadyFile {
+                        path: relative_to_staging(&dest, &cfg.staging.root),
+                        bytes: outcome.bytes,
+                        sha256: sha256.clone(),
+                    }],
+                    superseded: Vec::new(),
+                    identified_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                });
+                job.stage = dumo_core::JobStage::Identified;
+                job.save(job_dir)?;
+                println!("  job stage: identified");
+            }
+            Err(e) => println!("FAILED: {e}"),
+        }
+    }
+    Ok(())
 }
 
 /// Express a path relative to the staging root, for storage in the manifest.

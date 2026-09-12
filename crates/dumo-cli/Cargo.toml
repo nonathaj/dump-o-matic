@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 dumo-core = { workspace = true }
 dumo-drives = { workspace = true }
+dumo-devices = { workspace = true }
 dumo-backends = { workspace = true }
 dumo-identify = { workspace = true }
 clap = { workspace = true }

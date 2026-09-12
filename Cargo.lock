@@ -171,6 +171,7 @@ dependencies = [
  "clap",
  "dumo-backends",
  "dumo-core",
+ "dumo-devices",
  "dumo-drives",
  "dumo-identify",
  "libc",
@@ -190,6 +191,17 @@ dependencies = [
  "sha2",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "dumo-devices"
+version = "0.1.0"
+dependencies = [
+ "dumo-core",
+ "serde",
+ "sha1",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

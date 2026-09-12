@@ -11,6 +11,7 @@
 
 mod adopt;
 mod clean;
+mod devices;
 mod identify;
 mod migrate;
 mod repack;
@@ -61,6 +62,66 @@ enum Command {
         /// Emit JSON instead of a report.
         #[arg(long)]
         json: bool,
+    },
+    /// List attached storage devices that may hold console content.
+    ///
+    /// The counterpart of `drives` for media that is a filesystem rather than a disc: USB
+    /// drives and memory cards a console has written to. Read-only; devices are opened
+    /// read-only and never mounted.
+    Devices {
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the content on a storage device.
+    ///
+    /// The counterpart of `probe`: says what a device holds and what of it can be pulled
+    /// off. Strictly read-only — it reads package headers and directory tables, never the
+    /// whole of anything.
+    Catalog {
+        /// Device node (e.g. /dev/sdd) or a directory holding an already-mounted device.
+        /// Omit to use whichever attached device holds recognisable content.
+        device: Option<String>,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pull content off a storage device into staging (stage 2).
+    ///
+    /// The counterpart of `rip`, producing an ordinary job that `identify`, `migrate` and
+    /// `verify` then handle unchanged. Writes only inside the staging root and never
+    /// modifies the device.
+    ///
+    /// Every block read is checked against the hash tree the console recorded in the
+    /// package, and the written image is read back and re-hashed before the job is
+    /// recorded. What this cannot do is match a dump against Redump: a package holds only
+    /// the game partition, so its content is identified from the package's own metadata and
+    /// filed as inference, never as a verified dump.
+    Pull {
+        /// Device node (e.g. /dev/sdd) or a directory holding an already-mounted device.
+        /// Omit to use whichever attached device holds recognisable content.
+        device: Option<String>,
+        /// Title ID, or a unique fragment of a title's name. Omit when the device holds
+        /// exactly one game.
+        #[arg(long)]
+        title: Option<String>,
+        /// What to write: a converted single-file image, the package exactly as the console
+        /// wrote it, or both.
+        ///
+        /// The `.iso` is what ordinary tools and emulators read. The package is the
+        /// faithful archival form: its hash tree travels with it, so it stays verifiable
+        /// long after extraction, which a converted image does not.
+        #[arg(long, value_enum, default_value_t = devices::PullFormat::Iso)]
+        format: devices::PullFormat,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Do not prompt for confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     /// Rip a disc into the staging area (stage 2).
     ///
@@ -250,6 +311,13 @@ enum Command {
         /// image, which discards exactly this information. Off by default.
         #[arg(long)]
         provenance: bool,
+        /// Also discard unfiled content — disc extras that were never identified.
+        ///
+        /// Nothing filed these, so no destination copy exists to verify them against and
+        /// nothing can bring them back. This is a decision about not wanting the content,
+        /// not a reclamation of something already backed up. Off by default.
+        #[arg(long)]
+        discard_unfiled: bool,
         /// Show what would happen without deleting anything.
         #[arg(long)]
         dry_run: bool,
@@ -312,6 +380,24 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Drives { json } => cmd_drives(json),
         Command::Probe { device, json } => cmd_probe(device, json),
+        Command::Devices { json } => devices::list(json),
+        Command::Catalog { device, json } => devices::catalog(devices::CatalogArgs { device, json }),
+        Command::Pull {
+            device,
+            title,
+            format,
+            dry_run,
+            yes,
+            config,
+        } => devices::pull(devices::PullArgs {
+            device,
+            title,
+            format,
+            dry_run,
+            assume_yes: yes,
+            config_file: config,
+        })
+        .map(|_| ()),
         Command::Config { action } => cmd_config(action),
         Command::Run { device, min_length, dry_run, yes, keep_play_all, config } => {
             run::run(run::RunArgs {
@@ -376,10 +462,11 @@ fn main() -> Result<()> {
                 config_file: config,
             })
         }
-        Command::Clean { job, provenance, dry_run, yes, config } => {
+        Command::Clean { job, provenance, discard_unfiled, dry_run, yes, config } => {
             clean::run(clean::CleanArgs {
                 job,
                 provenance,
+                discard_unfiled,
                 dry_run,
                 assume_yes: yes,
                 config_file: config,

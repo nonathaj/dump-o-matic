@@ -32,6 +32,13 @@ pub struct CleanArgs {
     pub job: Option<String>,
     /// Also drop the bulk provenance sidecars, which nothing can regenerate.
     pub provenance: bool,
+    /// Also discard unfiled content — disc extras that were never identified.
+    ///
+    /// These exist nowhere but staging: nothing filed them, so there is no destination
+    /// copy to verify against and nothing can bring them back. Discarding them is a
+    /// decision about wanting the content, not a reclamation of something backed up,
+    /// which is why it needs its own flag rather than riding along with the rest.
+    pub discard_unfiled: bool,
     pub dry_run: bool,
     pub assume_yes: bool,
     pub config_file: Option<PathBuf>,
@@ -104,6 +111,7 @@ pub fn run(args: CleanArgs) -> Result<()> {
     let mut provenance: Vec<RawFile> = Vec::new();
     let mut audit_bytes = 0u64;
     let mut unfiled_bytes = 0u64;
+    let mut unfiled: Vec<RawFile> = Vec::new();
     let mut not_migrated = 0usize;
 
     for dir in &dirs {
@@ -140,6 +148,13 @@ pub fn run(args: CleanArgs) -> Result<()> {
                     // exists nowhere but here.
                     if a.bytes > UNFILED_CONTENT_BYTES {
                         unfiled_bytes += a.bytes;
+                        unfiled.push(RawFile {
+                            job_dir: dir.clone(),
+                            job_id: job.id.clone(),
+                            relative: a.relative_path.clone(),
+                            sha256: a.sha256.clone(),
+                            bytes: a.bytes,
+                        });
                     } else {
                         audit_bytes += a.bytes;
                     }
@@ -171,11 +186,13 @@ pub fn run(args: CleanArgs) -> Result<()> {
         }
     }
 
-    let to_drop: Vec<&RawFile> = if args.provenance {
-        redundant.iter().chain(provenance.iter()).collect()
-    } else {
-        redundant.iter().collect()
-    };
+    let mut to_drop: Vec<&RawFile> = redundant.iter().collect();
+    if args.provenance {
+        to_drop.extend(provenance.iter());
+    }
+    if args.discard_unfiled {
+        to_drop.extend(unfiled.iter());
+    }
 
     if candidates.is_empty() && to_drop.is_empty() {
         println!("Nothing to reclaim.");
@@ -185,7 +202,13 @@ pub fn run(args: CleanArgs) -> Result<()> {
                  only copy and is left alone."
             );
         }
-        report_retained(&provenance, audit_bytes, unfiled_bytes, args.provenance);
+        report_retained(
+            &provenance,
+            audit_bytes,
+            unfiled_bytes,
+            args.provenance,
+            args.discard_unfiled,
+        );
         return Ok(());
     }
 
@@ -217,6 +240,20 @@ pub fn run(args: CleanArgs) -> Result<()> {
         println!();
     }
 
+    if args.discard_unfiled && !unfiled.is_empty() {
+        println!("Unfiled content, at your explicit request (NOT backed up anywhere — this");
+        println!("is a discard, not a reclamation, and it cannot be undone):");
+        for f in &unfiled {
+            println!(
+                "  {}/{} ({})",
+                f.job_id,
+                f.relative,
+                crate::migrate::human_size(f.bytes)
+            );
+        }
+        println!();
+    }
+
     println!(
         "Would reclaim {}.",
         crate::migrate::human_size(staged_total + raw_total)
@@ -225,7 +262,13 @@ pub fn run(args: CleanArgs) -> Result<()> {
         println!("Each destination copy is re-hashed first; any that does not match means the");
         println!("staged file is the last good copy and it will be kept.");
     }
-    report_retained(&provenance, audit_bytes, unfiled_bytes, args.provenance);
+    report_retained(
+        &provenance,
+        audit_bytes,
+        unfiled_bytes,
+        args.provenance,
+        args.discard_unfiled,
+    );
 
     if args.dry_run {
         println!();
@@ -300,6 +343,28 @@ pub fn run(args: CleanArgs) -> Result<()> {
         }
     }
 
+    // --- Unfiled content, only when explicitly asked for ------------------------------
+    //
+    // No proof step exists here and none is possible: nothing filed these, so there is
+    // no destination copy to check them against. The flag is the whole safeguard.
+    if args.discard_unfiled {
+        for f in &unfiled {
+            print!("  {}/{} ... ", f.job_id, f.relative);
+            std::io::stdout().flush().ok();
+            match std::fs::remove_file(f.job_dir.join(&f.relative)) {
+                Ok(()) => {
+                    freed += f.bytes;
+                    record_reclaimed(&f.job_dir, &f.relative);
+                    println!("discarded (unfiled; you asked)");
+                }
+                Err(e) => {
+                    println!("KEPT — could not remove: {e}");
+                    kept += 1;
+                }
+            }
+        }
+    }
+
     // --- Provenance, only when explicitly asked for -----------------------------------
     if args.provenance {
         for f in &provenance {
@@ -351,6 +416,7 @@ fn report_retained(
     audit_bytes: u64,
     unfiled_bytes: u64,
     dropping_provenance: bool,
+    dropping_unfiled: bool,
 ) {
     if !dropping_provenance {
         let p: u64 = provenance.iter().map(|f| f.bytes).sum();
@@ -368,10 +434,10 @@ fn report_retained(
             crate::migrate::human_size(audit_bytes)
         );
     }
-    if unfiled_bytes > 0 {
+    if unfiled_bytes > 0 && !dropping_unfiled {
         println!(
             "Unfiled content retained ({}): titles that were never migrated — disc extras \
-             and the like. This is their only copy.",
+             and the like. This is their only copy. Pass --discard-unfiled to drop them.",
             crate::migrate::human_size(unfiled_bytes)
         );
     }

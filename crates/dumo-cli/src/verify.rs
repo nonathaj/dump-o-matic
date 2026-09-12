@@ -194,7 +194,39 @@ fn verify_one(
             .iter()
             .any(|p| p.extension().map(|e| e == ext).unwrap_or(false))
     };
-    if has("cue") && has("bin") {
+    // A device job has no drive and no capacity to compare against, so the disc gates
+    // below do not apply to it. Its independent measure is the package's own geometry.
+    if let Some(src) = &job.device_source {
+        if src.image_blocks > 0 {
+            let expected = dumo_devices::iso::RESERVED + src.image_blocks * dumo_devices::god::BLOCK;
+            match files
+                .iter()
+                .find(|p| p.extension().map(|e| e == "iso").unwrap_or(false))
+            {
+                Some(iso) => {
+                    let actual = std::fs::metadata(iso).map(|m| m.len()).unwrap_or(0);
+                    if actual == expected {
+                        println!(
+                            "  image length: matches the package's {} block(s)",
+                            src.image_blocks
+                        );
+                    } else {
+                        problems.push(format!(
+                            "{} is {actual} bytes but the package's {} blocks give {expected}",
+                            iso.display(),
+                            src.image_blocks
+                        ));
+                    }
+                }
+                // Filed into ready/ already, so there is nothing here to measure.
+                None => {}
+            }
+        }
+        println!(
+            "  provenance: {} block(s) were verified against the package's hash tree when pulled",
+            src.blocks_verified
+        );
+    } else if has("cue") && has("bin") {
         let leadout = job
             .probe
             .as_ref()

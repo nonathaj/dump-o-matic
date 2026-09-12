@@ -656,7 +656,7 @@ fn rip_game(
 }
 
 /// Shared pre-flight space check.
-fn preflight_space(cfg: &Config, required_content: u64, assume_yes: bool) -> Result<()> {
+pub fn preflight_space(cfg: &Config, required_content: u64, assume_yes: bool) -> Result<()> {
     match config::filesystem_free_bytes(&cfg.staging.root) {
         Some((free, _)) => {
             let headroom = cfg.staging.min_free_headroom_gb * 1_000_000_000;
@@ -733,7 +733,7 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-fn confirm(prompt: &str) -> Result<bool> {
+pub fn confirm(prompt: &str) -> Result<bool> {
     print!("{prompt} [y/N] ");
     std::io::stdout().flush()?;
     let mut input = String::new();
