@@ -25,6 +25,15 @@ pub enum Layout {
     Xbox360Content,
 }
 
+impl Layout {
+    /// Stable machine-readable name, for manifests and JSON.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Layout::Xbox360Content => "xbox360_content",
+        }
+    }
+}
+
 impl std::fmt::Display for Layout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -376,6 +385,11 @@ mod tests {
     fn an_unknown_needle_is_an_error() {
         assert!(catalogue().find("Halo").is_err());
         assert!(catalogue().find("").is_err());
+    }
+
+    #[test]
+    fn layout_slug_is_readable() {
+        assert_eq!(Layout::Xbox360Content.slug(), "xbox360_content");
     }
 
     #[test]
