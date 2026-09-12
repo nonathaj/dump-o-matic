@@ -147,10 +147,17 @@ fn identify_job(
         .map(|p| p.content.kind)
         .unwrap_or(MediaKind::Unknown);
 
-    // Datfile matching only applies to disc images. Video rips need an entirely
-    // different (and fuzzy) identification path, which is not built yet.
+    // Datfile matching only applies to disc images. Video rips take an entirely
+    // different (and fuzzy) identification path.
     if matches!(kind, MediaKind::DvdVideo | MediaKind::BluRayVideo) {
-        return analyse_video(&job, job_dir, cfg, show.as_deref());
+        return analyse_video(
+            &job,
+            job_dir,
+            cfg,
+            show,
+            apply,
+            accept_inferred,
+        );
     }
     if !matches!(kind, MediaKind::GameDisc | MediaKind::Data) {
         println!("  {kind} — no identification path for this media type yet.");
@@ -644,8 +651,24 @@ fn apply_matches(
                 }],
             );
             job.save(job_dir)?;
+            // Name what was actually dumped. This used to say ".cue/.bin" for every
+            // disc, which is wrong for a DVD, whose archival image is a single .iso.
+            let mut kinds: Vec<String> = matches
+                .iter()
+                .filter_map(|i| {
+                    i.m.rom
+                        .name
+                        .rsplit_once('.')
+                        .map(|(_, ext)| format!(".{}", ext.to_ascii_lowercase()))
+                })
+                .collect();
+            kinds.sort();
+            kinds.dedup();
             println!("  job stage: identified");
-            println!("  the archival .cue/.bin stay in the job directory as provenance");
+            println!(
+                "  the archival {} stay in the job directory as provenance",
+                kinds.join("/")
+            );
             return Ok(());
         }
     }
@@ -920,6 +943,8 @@ fn analyse_video(
     job_dir: &std::path::Path,
     cfg: &Config,
     show_override: Option<&str>,
+    apply: bool,
+    accept_inferred: bool,
 ) -> Result<()> {
     use dumo_identify::video::{self, AnalysisParams, TitleInput};
 
@@ -1229,7 +1254,38 @@ fn analyse_video(
         );
     }
     println!();
-    println!("  Applying video names is not wired up yet — review the above first.");
+    if !apply {
+        println!("  Nothing was filed. Re-run with --apply --accept-inferred to file these.");
+        return Ok(());
+    }
+    if !accept_inferred {
+        // The same gate the set path uses: a video match is a judgement, so filing it
+        // takes an explicit statement that the proposal above has been reviewed.
+        println!("  --apply given without --accept-inferred, so nothing was filed.");
+        println!("  This match is inference, not a hash identity; --accept-inferred is how");
+        println!("  you say you have read the proposal and accept it.");
+        return Ok(());
+    }
+
+    let show = format!("{}{}", sanitise(&candidate.name), year);
+    println!("Filing {} title(s) as an inferred match.", best.matches.len());
+    let failures = file_episodes(
+        &job.id,
+        &best.matches,
+        &show,
+        &candidate.name,
+        "inference (runtime + dialogue, single disc)",
+        best.confidence,
+        cfg,
+    )?;
+    println!();
+    if failures > 0 {
+        println!("{failures} title(s) were not filed; everything else is in ready/tv.");
+    }
+    println!(
+        "Filed as {}. Run `dump-o-matic migrate` to place them.",
+        best.confidence
+    );
     Ok(())
 }
 
@@ -1558,6 +1614,122 @@ fn solve_one_set(
 ///
 /// Nothing is deleted and nothing is overwritten: `move_verified` refuses an occupied
 /// destination, and a title that fails to move leaves the rest of the set alone.
+/// File one disc's titles under their episode names, and record it on the job.
+///
+/// Shared by the single-disc and box-set paths. They differ only in how the episode
+/// numbers were reached — which `matched_on` records — not in what filing means, and
+/// keeping one implementation is what stops the two drifting: the artifact-retention
+/// rule below was fixed once here and would otherwise have to be fixed twice.
+fn file_episodes(
+    job_id: &str,
+    matches: &[dumo_identify::matching::TitleMatch],
+    show: &str,
+    series: &str,
+    matched_on: &str,
+    confidence: dumo_core::Confidence,
+    cfg: &Config,
+) -> Result<usize> {
+    let job_dir = cfg.staging.job_dir(job_id);
+    let mut job = Job::load(&job_dir).with_context(|| format!("loading job {job_id}"))?;
+    let mut filed: Vec<dumo_core::ReadyFile> = Vec::new();
+    let mut moved_sources: Vec<String> = Vec::new();
+    let mut failures = 0usize;
+
+    for m in matches {
+        // The solver reports the title by its staging-relative name.
+        let src = job_dir.join("raw").join(&m.title_name);
+        let src = if src.is_file() {
+            src
+        } else {
+            job_dir.join(&m.title_name)
+        };
+        let ext = src
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_else(|| "mkv".into());
+        let name = format!(
+            "{show} S{:02}E{:02} - {}.{ext}",
+            m.episode.season,
+            m.episode.number,
+            sanitise(&m.episode.name)
+        );
+        let rel = format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season);
+        let dest = cfg.staging.root.join(&rel);
+
+        print!("  {} -> {} ... ", m.title_name, rel);
+        std::io::stdout().flush().ok();
+
+        if !src.is_file() {
+            println!("SKIPPED — source is missing");
+            failures += 1;
+            continue;
+        }
+        let recorded = job
+            .artifacts
+            .iter()
+            .find(|a| src.ends_with(&a.relative_path))
+            .map(|a| a.sha256.clone());
+
+        match dumo_core::fsops::move_verified(&src, &dest, recorded.as_deref()) {
+            Ok(outcome) => {
+                println!(
+                    "{}",
+                    match outcome.method {
+                        dumo_core::fsops::MoveMethod::Rename => "moved",
+                        dumo_core::fsops::MoveMethod::CopyVerified => "copied and verified",
+                    }
+                );
+                let sha256 = match recorded {
+                    Some(h) => h,
+                    None => hash::sha256_file(&dest)?.0,
+                };
+                filed.push(dumo_core::ReadyFile {
+                    path: rel,
+                    bytes: outcome.bytes,
+                    sha256,
+                });
+                moved_sources.push(m.title_name.clone());
+            }
+            Err(e) => {
+                println!("FAILED");
+                println!("     {e}");
+                println!("     Nothing was moved or deleted for this title.");
+                failures += 1;
+            }
+        }
+    }
+
+    if filed.is_empty() {
+        return Ok(failures);
+    }
+    // Drop the artifacts that moved, matched on the name they had *here*. Matching on
+    // the destination name instead is the bug this replaces: an artifact called
+    // "B1_t01.mkv" never ends with "Show S01E01 - Title.mkv", so nothing was removed
+    // and verify then reported every filed episode as missing from raw/.
+    job.artifacts
+        .retain(|a| !moved_sources.iter().any(|src| a.relative_path.ends_with(src)));
+
+    job.identification = Some(dumo_core::Identification {
+        title: show.to_string(),
+        platform: "TMDB".into(),
+        platform_slug: "tv".into(),
+        matched_on: matched_on.to_string(),
+        // Recorded as reached, never promoted. A filed file does not become proven
+        // by having been filed.
+        confidence,
+        source: format!("tmdb series {series}"),
+        files: filed,
+        superseded: Vec::new(),
+        identified_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    job.stage = dumo_core::JobStage::Identified;
+    job.save(&job_dir)?;
+    Ok(failures)
+}
+
 fn apply_video_set(
     solution: &dumo_identify::discset::SetSolution,
     series: &str,
@@ -1571,106 +1743,16 @@ fn apply_video_set(
 
     let mut failures = 0usize;
     for p in &solution.placements {
-        let job_dir = cfg.staging.job_dir(&p.job_id);
-        let mut job = Job::load(&job_dir)
-            .with_context(|| format!("loading job {}", p.job_id))?;
-        let mut filed: Vec<dumo_core::ReadyFile> = Vec::new();
-        let mut moved_sources: Vec<String> = Vec::new();
-
-        for m in &p.matches {
-            // The solver reports the title by its staging-relative name.
-            let src = job_dir.join("raw").join(&m.title_name);
-            let src = if src.is_file() {
-                src
-            } else {
-                job_dir.join(&m.title_name)
-            };
-            let ext = src
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_else(|| "mkv".into());
-            let name = format!(
-                "{show} S{:02}E{:02} - {}.{ext}",
-                m.episode.season,
-                m.episode.number,
-                sanitise(&m.episode.name)
-            );
-            let rel = format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season);
-            let dest = cfg.staging.root.join(&rel);
-
-            print!("  {} -> {} ... ", m.title_name, rel);
-            std::io::stdout().flush().ok();
-
-            if !src.is_file() {
-                println!("SKIPPED — source is missing");
-                failures += 1;
-                continue;
-            }
-            let recorded = job
-                .artifacts
-                .iter()
-                .find(|a| src.ends_with(&a.relative_path))
-                .map(|a| a.sha256.clone());
-
-            match dumo_core::fsops::move_verified(&src, &dest, recorded.as_deref()) {
-                Ok(outcome) => {
-                    println!(
-                        "{}",
-                        match outcome.method {
-                            dumo_core::fsops::MoveMethod::Rename => "moved",
-                            dumo_core::fsops::MoveMethod::CopyVerified => "copied and verified",
-                        }
-                    );
-                    let sha256 = match recorded {
-                        Some(h) => h,
-                        None => hash::sha256_file(&dest)?.0,
-                    };
-                    filed.push(dumo_core::ReadyFile {
-                        path: rel,
-                        bytes: outcome.bytes,
-                        sha256,
-                    });
-                    moved_sources.push(m.title_name.clone());
-                }
-                Err(e) => {
-                    println!("FAILED");
-                    println!("     {e}");
-                    println!("     Nothing was moved or deleted for this title.");
-                    failures += 1;
-                }
-            }
-        }
-
-        if filed.is_empty() {
-            continue;
-        }
-        // Drop the artifacts that moved, matched on the name they had *here*. Matching on
-        // the destination name instead is the bug this replaces: an artifact called
-        // "B1_t01.mkv" never ends with "Show S01E01 - Title.mkv", so nothing was removed
-        // and verify then reported every filed episode as missing from raw/.
-        job.artifacts
-            .retain(|a| !moved_sources.iter().any(|src| a.relative_path.ends_with(src)));
-
-        job.identification = Some(dumo_core::Identification {
-            title: show.clone(),
-            platform: "TMDB".into(),
-            platform_slug: "tv".into(),
-            matched_on: "inference (runtime + dialogue, joint set solve)".into(),
-            // Recorded as reached, never promoted. A filed file does not become proven
-            // by having been filed.
-            confidence: solution.confidence,
-            source: format!("tmdb series {series}"),
-            files: filed,
-            superseded: Vec::new(),
-            identified_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        });
-        job.stage = dumo_core::JobStage::Identified;
-        job.save(&job_dir)?;
+        failures += file_episodes(
+            &p.job_id,
+            &p.matches,
+            &show,
+            series,
+            "inference (runtime + dialogue, joint set solve)",
+            solution.confidence,
+            cfg,
+        )?;
     }
-
     println!();
     if failures > 0 {
         println!("{failures} title(s) were not filed; everything else is in ready/tv.");
