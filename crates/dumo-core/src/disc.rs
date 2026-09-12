@@ -106,6 +106,12 @@ pub enum MediaKind {
     /// ordinary drive: the game sits in an XDVDFS partition outside the addressable
     /// area, so treating it as a game disc would rip the warning clip instead.
     XboxGameDisc,
+    /// An Xbox 360 game disc, of which only the video partition is visible.
+    ///
+    /// Same situation as [`MediaKind::XboxGameDisc`] — the game sits in an area a
+    /// standard drive will not address — but kept separate because the disc identifies
+    /// its own generation (XGD2, XGD3) and that governs how it can be dumped.
+    Xbox360GameDisc,
     /// Readable data disc of no recognised special kind.
     Data,
     /// Nothing readable.
@@ -122,6 +128,7 @@ impl std::fmt::Display for MediaKind {
             MediaKind::BluRayVideo => "Blu-ray Video",
             MediaKind::GameDisc => "Game disc",
             MediaKind::XboxGameDisc => "Xbox game disc (video partition only)",
+            MediaKind::Xbox360GameDisc => "Xbox 360 game disc (video partition only)",
             MediaKind::Data => "Data disc",
             MediaKind::Blank => "Blank",
             MediaKind::Unknown => "Unknown",

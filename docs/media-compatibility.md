@@ -37,8 +37,31 @@ not a read error. This cost real time twice before it was understood.
 | **Blu-ray (any)** | ❓ Never tested | — | **The BD read path has never been validated on this drive.** "reads: BD" is an advertised capability from udev, not an observation. |
 | **Wii** | ❌ Unreadable | `disc present, unreadable` on the first poll. GET CONFIGURATION returns **`unknown profile 0x0000`**; nothing addressable (`blockdev` and `dd` both `No medium found`). | Reasonably well supported, unlike the PS3 row — see below. Wii discs are DVD-form, and this drive's DVD classification is proven on 15 discs, so the failure to classify is a property of the format, not of an untested code path. |
 | **GameCube** | ❌ Unreadable | Identical to Wii: `disc present, unreadable` on the first poll, **`unknown profile 0x0000`**, nothing addressable. | Same reasoning as Wii, and it is a second independent disc agreeing. Also shows the 8 cm form factor is detected as media — the failure is the format, not the disc size. |
-| **Xbox 360** | ❓ Not yet tested | — | Expected to resemble Xbox, but it is unknown whether it carries the same `VTC Sector Offset` marker our detection keys on. |
+| **Xbox 360** | ⚠️ Video partition only | Probe reads a 5.6 MB `VIDEO_TS`/`AUDIO_TS` volume, label `XGD2DVD_NTSC`, pressed 2006-03-06. **No application identifier at all**, so the original-Xbox marker does not fire; recognised from the label instead. | Same situation as Xbox: game outside the addressable area, needs Kreon firmware. The disc names its own generation (XGD2 here), which governs the dumping method. |
 | **Audio CD** | ❓ Not tested | — | No backend implemented. |
+
+### The Xbox 360 disc justified the size heuristic
+
+Worth recording as a design outcome. Xbox 360 discs carry **no ISO 9660 application
+identifier**, so the `VTC Sector Offset` marker that identifies an original Xbox disc
+does not fire on them. Detection by marker alone would have missed this disc entirely.
+
+What caught it was the deliberately weaker rule — a `VIDEO_TS` volume too small to be a
+feature is reported as `DvdVideo` with **Weak** confidence and the doubt stated, rather
+than as a confident film. On first contact that produced:
+
+```
+Detected:    DVD-Video
+Title guess: XGD2DVD_NTSC
+Confidence:  weak  (needs confirmation)
+  - volume is only 2724 sectors (5.6 MB), too small for a feature —
+    this may be the video partition of a console game disc
+```
+
+Wrong, but wrong in a way that was visibly untrustworthy and pointed at the real
+explanation. The label was then added as a proper signal. The lesson is that the
+fallback mattered more than the precise rule: a signal keyed to one console's quirk
+missed the next console, and only the generic implausibility check spanned both.
 
 ### Why the Nintendo results are stronger evidence than the PS3 one
 
@@ -88,7 +111,7 @@ the PS3 row says nothing about PS3 discs. Until then, treat that row as inconclu
 | Media | Route |
 |---|---|
 | Original Xbox | Kreon-firmware drive. redumper's database lists exactly four, all TSSTcorp: `SH-D163B`, `SH-D163A`, `SH-D162D`, `SH-D162C`, matched on a `KREON V1.00` vendor string. Neither the BDR-XD07U nor the one Pioneer entry in that database qualifies. |
-| Xbox 360 | Different firmware from the above; not yet investigated for this setup. |
+| Xbox 360 | Kreon-firmware drive, as above. The disc's label states the generation: XGD2 is the routine case, XGD3 is harder and the method should be confirmed before trusting a dump. |
 | Wii / GameCube | Normally dumped on the console itself (CleanRip on a homebrew-enabled Wii, which handles GameCube discs too), not on a PC drive. |
 | PS3 | Normally a console on custom firmware, or a 3k3y-style ODE. |
 

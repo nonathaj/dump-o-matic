@@ -87,6 +87,12 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
         // Refused rather than attempted: redumper supports Xbox discs, but only through
         // a drive whose firmware exposes the security sector. Ripping what this drive
         // can see would yield the warning clip under a game's name.
+        MediaKind::Xbox360GameDisc => bail!(
+            "this is an Xbox 360 disc and only its video partition is readable here. The \
+             game is outside the addressable area, so any dump from this drive would \
+             contain the warning clip, not the game. Dumping it needs a Kreon-firmware \
+             drive (TSSTcorp SH-D162C/D163A/D163B)."
+        ),
         MediaKind::XboxGameDisc => bail!(
             "this is an original Xbox disc and only its video partition is readable here. \
              The game is in an XDVDFS partition outside the addressable area, so any dump \

@@ -24,6 +24,14 @@ const MAX_CONFIG_FILE: u32 = 8 * 1024;
 /// this marker it classifies as a feature film whose title is the pressing date code.
 const XBOX_VIDEO_PARTITION_MARKER: &str = "VTC Sector Offset";
 
+/// Volume label prefix on an Xbox 360 game disc's video partition.
+///
+/// "XGD" is Xbox Game Disc, and the label names the generation: `XGD2DVD_NTSC`,
+/// `XGD3DVD_NTSC`. Unlike original Xbox discs these carry no application identifier at
+/// all, so the label is the only structural signal — which is why size alone must also
+/// be enough to withhold confidence.
+const XBOX_360_LABEL_PREFIX: &str = "XGD";
+
 /// A DVD-Video feature runs to gigabytes; an Xbox warning clip is tens of megabytes.
 ///
 /// Used only to lower confidence in a `VIDEO_TS` disc too small to be a real feature,
@@ -285,6 +293,42 @@ fn classify(
             );
         }
 
+        // Xbox 360 discs announce their own generation in the volume label and carry no
+        // application identifier, so they need their own signal.
+        if let Some(label) = volume.and_then(|v| v.volume_id.as_deref()) {
+            if label.to_ascii_uppercase().starts_with(XBOX_360_LABEL_PREFIX) {
+                let generation = label
+                    .chars()
+                    .skip(XBOX_360_LABEL_PREFIX.len())
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>();
+                let mut hint = ContentHint::new(MediaKind::Xbox360GameDisc, Confidence::Strong)
+                    .with_evidence(format!(
+                        "volume label {label:?} identifies an Xbox Game Disc, not a title"
+                    ));
+                if let Some(s) = sectors {
+                    hint = hint.with_evidence(format!(
+                        "visible volume is {s} sectors ({:.1} MB) — the warning clip, not the game",
+                        (u64::from(s) * 2048) as f64 / 1_000_000.0
+                    ));
+                }
+                hint = hint.with_evidence(match generation.as_str() {
+                    "2" => "XGD2: the game partition needs a Kreon-firmware drive \
+                            (TSSTcorp SH-D162/D163)"
+                        .to_string(),
+                    "3" => "XGD3: the game partition needs a Kreon-firmware drive, and XGD3 \
+                            is the harder case — confirm the drive and method before relying \
+                            on a dump"
+                        .to_string(),
+                    other => format!(
+                        "XGD generation {other:?} not recognised; dumping needs a \
+                         Kreon-firmware drive"
+                    ),
+                });
+                return hint;
+            }
+        }
+
         let confidence = if too_small_for_a_feature {
             Confidence::Weak
         } else {
@@ -472,6 +516,64 @@ mod tests {
         assert_eq!(hint.kind, MediaKind::DvdVideo);
         assert_eq!(hint.confidence, Confidence::Strong);
         assert_eq!(hint.title_guess.as_deref(), Some("THE_THIN_RED_LINE"));
+    }
+
+    #[test]
+    fn xbox_360_is_recognised_from_its_volume_label() {
+        // Values from a real XGD2 disc. Note the absent application_id: the original
+        // Xbox marker is no help here, so the label has to carry it.
+        let v = dumo_core::VolumeInfo {
+            volume_id: Some("XGD2DVD_NTSC".into()),
+            volume_set_id: None,
+            publisher_id: None,
+            application_id: None,
+            created: None,
+            volume_space_size: Some(2724),
+            logical_block_size: Some(2048),
+        };
+        let hint = classify(
+            Some(DiscProfile::DvdRom),
+            ioctl::KernelDiscClass::Data,
+            &None,
+            Some(&v),
+            &["AUDIO_TS/".to_string(), "VIDEO_TS/".to_string()],
+            None,
+            false,
+        );
+        assert_eq!(hint.kind, MediaKind::Xbox360GameDisc);
+        assert_eq!(hint.title_guess, None);
+        let ev = hint.evidence.join(" | ");
+        assert!(ev.contains("XGD2"), "{ev}");
+        assert!(ev.contains("Kreon"), "{ev}");
+    }
+
+    #[test]
+    fn an_unrecognised_xgd_generation_still_refuses_to_guess_a_title() {
+        let v = dumo_core::VolumeInfo {
+            volume_id: Some("XGD9DVD_PAL".into()),
+            volume_set_id: None,
+            publisher_id: None,
+            application_id: None,
+            created: None,
+            volume_space_size: Some(3000),
+            logical_block_size: Some(2048),
+        };
+        let hint = classify(
+            Some(DiscProfile::DvdRom),
+            ioctl::KernelDiscClass::Data,
+            &None,
+            Some(&v),
+            &["VIDEO_TS/".to_string()],
+            None,
+            false,
+        );
+        assert_eq!(hint.kind, MediaKind::Xbox360GameDisc);
+        assert_eq!(hint.title_guess, None);
+        assert!(
+            hint.evidence.join(" | ").contains("not recognised"),
+            "{:?}",
+            hint.evidence
+        );
     }
 
     #[test]
