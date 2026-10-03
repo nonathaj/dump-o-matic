@@ -30,6 +30,8 @@ pub struct IdentifyArgs {
     /// be asked for by name. `run` never sets it, which is what keeps "only exact
     /// matches are filed unattended" true by construction rather than by vigilance.
     pub accept_inferred: bool,
+    /// For an audio CD whose disc ID several MusicBrainz releases share: which one.
+    pub release: Option<String>,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -100,7 +102,15 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
     }
 
     for dir in dirs {
-        identify_job(&dir, &set, &cfg, args.apply, args.show.as_deref(), args.accept_inferred)?;
+        identify_job(
+            &dir,
+            &set,
+            &cfg,
+            args.apply,
+            args.show.as_deref(),
+            args.accept_inferred,
+            args.release.as_deref(),
+        )?;
         println!();
     }
     Ok(())
@@ -131,6 +141,7 @@ fn identify_job(
     apply: bool,
     show: Option<&str>,
     accept_inferred: bool,
+    release: Option<&str>,
 ) -> Result<()> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
@@ -158,6 +169,9 @@ fn identify_job(
             apply,
             accept_inferred,
         );
+    }
+    if kind == MediaKind::AudioCd {
+        return crate::music::identify_audio(&mut job, job_dir, cfg, apply, release);
     }
     if !matches!(kind, MediaKind::GameDisc | MediaKind::Data) {
         println!("  {kind} — no identification path for this media type yet.");

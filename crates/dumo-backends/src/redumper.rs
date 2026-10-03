@@ -258,6 +258,9 @@ pub struct DumpOutcome {
     pub warnings: Vec<String>,
     /// Drive parameters used, recorded as provenance.
     pub drive: DriveConfig,
+    /// Samples at the very end of the last track filled with silence because the drive
+    /// cannot overread into the lead-out (see [`is_leadout_overread_only`]).
+    pub leadout_fill_samples: Option<u64>,
 }
 
 impl DumpOutcome {
@@ -334,6 +337,61 @@ pub fn parse_rom_hash(line: &str) -> Option<RomHash> {
         md5: attr("md5").unwrap_or_default(),
         sha1: attr("sha1").unwrap_or_default(),
     })
+}
+
+/// Unreadable audio in one track, from a line like
+/// `errors detected, track: 20, sectors: {SKIP: 2, C2: 0}, samples: {SKIP: 667, C2: 0}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackErrors {
+    pub track: u32,
+    pub skip_samples: u64,
+    pub c2_samples: u64,
+}
+
+fn parse_track_errors(line: &str) -> Option<TrackErrors> {
+    let rest = line.trim().strip_prefix("errors detected, track:")?;
+    let track = rest.split(',').next()?.trim().parse().ok()?;
+    let samples = &rest[rest.find("samples:")?..];
+    let num = |key: &str| -> Option<u64> {
+        let tail = &samples[samples.find(key)? + key.len()..];
+        tail.trim()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()
+    };
+    Some(TrackErrors {
+        track,
+        skip_samples: num("SKIP:")?,
+        c2_samples: num("C2:")?,
+    })
+}
+
+/// A track number from redumper's TOC listing (`  track 20 { audio }`).
+fn parse_toc_track(line: &str) -> Option<u32> {
+    let rest = line.trim().strip_prefix("track ")?;
+    rest.split_whitespace().next()?.parse().ok()
+}
+
+/// Whether redumper's refusal is only the lead-out overread a positive read offset
+/// needs and this drive cannot do.
+///
+/// Correcting a +N offset means the final N samples of the last track must be read from
+/// beyond the end of the audio, in the lead-out. Many drives cannot read there, so those
+/// samples come back unreadable — always exactly at the very end, never more than N, and
+/// with no C2 errors because nothing was misread. EAC and whipper fill them with silence;
+/// AccurateRip excludes the last five sectors of a disc from its checksums for exactly
+/// this reason. Anything else — errors on another track, any C2 error, more missing
+/// samples than the offset accounts for — is real damage and is not excused.
+pub fn is_leadout_overread_only(errors: &[TrackErrors], last_track: u32, read_offset: i32) -> bool {
+    read_offset > 0
+        && !errors.is_empty()
+        && errors.iter().all(|e| {
+            e.track == last_track
+                && e.c2_samples == 0
+                && e.skip_samples <= u64::from(read_offset.unsigned_abs())
+        })
 }
 
 /// Extract the drive-reported sector count from a log line.
@@ -469,6 +527,7 @@ pub fn dump(
     image_path: &Path,
     image_name: &str,
     sector_order: Option<&str>,
+    read_offset: Option<i32>,
     mut on_progress: impl FnMut(&DumpProgress),
     mut on_log: impl FnMut(&str),
     mut on_warning: impl FnMut(&str),
@@ -490,6 +549,9 @@ pub fn dump(
         // guess that silently fails every sector when wrong. Detection costs ~0s.
         None => args.push("--auto-detect".to_string()),
     }
+    if let Some(o) = read_offset {
+        args.push(format!("--drive-read-offset={o}"));
+    }
 
     let mut child = spawn(&args)?;
     let stdout = child.stdout.take().expect("piped");
@@ -497,9 +559,17 @@ pub fn dump(
 
     let mut outcome = DumpOutcome::default();
     let mut last = DumpProgress::default();
+    let mut track_errors: Vec<TrackErrors> = Vec::new();
+    let mut last_track: u32 = 0;
 
     read_cr_lines(stdout, |line| {
         on_log(line);
+        if let Some(e) = parse_track_errors(line) {
+            track_errors.push(e);
+        }
+        if let Some(t) = parse_toc_track(line) {
+            last_track = last_track.max(t);
+        }
         if let Some(p) = parse_progress(line) {
             last = p.clone();
             on_progress(&p);
@@ -538,7 +608,49 @@ pub fn dump(
         source: e,
     })?;
 
-    if !status.success() {
+    let overread_only = read_offset
+        .map(|o| is_leadout_overread_only(&track_errors, last_track, o))
+        .unwrap_or(false);
+    if !status.success() && overread_only {
+        // The read itself is complete; only the split refused. Redo just the split,
+        // letting redumper fill the unreachable lead-out samples with silence.
+        let filled: u64 = track_errors.iter().map(|e| e.skip_samples).sum();
+        let mut split_args = vec![
+            "split".to_string(),
+            format!("--image-path={}", image_path.display()),
+            format!("--image-name={image_name}"),
+            "--force-split".to_string(),
+        ];
+        if let Some(o) = read_offset {
+            split_args.push(format!("--drive-read-offset={o}"));
+        }
+        let split = spawn(&split_args)?
+            .wait_with_output()
+            .map_err(|e| BackendError::Io { tool: TOOL, source: e })?;
+        for l in String::from_utf8_lossy(&split.stdout).lines() {
+            on_log(l);
+        }
+        if !split.status.success() {
+            return Err(BackendError::Failed {
+                tool: TOOL,
+                detail: format!("split after a lead-out overread failed: {}", split.status),
+            });
+        }
+        let note = format!(
+            "filled the last {filled} sample(s) of track {last_track} with silence: \
+             the drive cannot read the lead-out that its +{} read offset reaches into \
+             (AccurateRip excludes these samples from its checksums)",
+            read_offset.unwrap_or(0)
+        );
+        on_warning(&note);
+        // redumper's refusal has been dealt with; repeating it in the summary would read
+        // as damage that is not there.
+        outcome
+            .warnings
+            .retain(|w| !w.contains("data errors detected"));
+        outcome.warnings.push(note);
+        outcome.leadout_fill_samples = Some(filled);
+    } else if !status.success() {
         return Err(BackendError::Failed {
             tool: TOOL,
             detail: format!(
@@ -707,6 +819,32 @@ fn verify_cd_tracks(files: &[PathBuf], leadout_lba: u64) -> std::result::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_redumpers_per_track_error_line() {
+        let e = parse_track_errors(
+            "errors detected, track: 20, sectors: {SKIP: 2, C2: 0}, samples: {SKIP: 667, C2: 0}",
+        )
+        .unwrap();
+        assert_eq!(e, TrackErrors { track: 20, skip_samples: 667, c2_samples: 0 });
+        assert_eq!(parse_toc_track("  track 20 { audio }"), Some(20));
+        assert_eq!(parse_toc_track("  track AA { audio }"), None);
+    }
+
+    /// The real case: a +667 drive that cannot overread, on a 20-track disc.
+    #[test]
+    fn only_a_lead_out_overread_is_excused() {
+        let e = |track, skip, c2| TrackErrors { track, skip_samples: skip, c2_samples: c2 };
+        assert!(is_leadout_overread_only(&[e(20, 667, 0)], 20, 667));
+        // Damage elsewhere, misreads, or more missing than the offset explains: refused.
+        assert!(!is_leadout_overread_only(&[e(19, 667, 0)], 20, 667));
+        assert!(!is_leadout_overread_only(&[e(20, 667, 1)], 20, 667));
+        assert!(!is_leadout_overread_only(&[e(20, 668, 0)], 20, 667));
+        assert!(!is_leadout_overread_only(&[e(20, 667, 0), e(3, 1, 0)], 20, 667));
+        // A negative offset reads into the lead-in, not the lead-out; no errors, no excuse.
+        assert!(!is_leadout_overread_only(&[e(20, 600, 0)], 20, -600));
+        assert!(!is_leadout_overread_only(&[], 20, 667));
+    }
 
     /// Captured verbatim from a real redumper run on a PS2 disc.
     #[test]

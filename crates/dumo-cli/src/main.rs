@@ -14,6 +14,7 @@ mod clean;
 mod devices;
 mod identify;
 mod migrate;
+mod music;
 mod repack;
 mod rip;
 mod run;
@@ -219,6 +220,10 @@ enum Command {
         /// will file an inferred match, and `run` never passes it.
         #[arg(long, requires = "apply")]
         accept_inferred: bool,
+        /// For an audio CD whose disc ID several MusicBrainz releases share, the
+        /// release to file it as (its MusicBrainz ID, as listed by identify).
+        #[arg(long)]
+        release: Option<String>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -427,7 +432,7 @@ fn main() -> Result<()> {
             config_file: config,
         })
         .map(|_| ()),
-        Command::Identify { job, apply, show, set, accept_inferred, config } => {
+        Command::Identify { job, apply, show, set, accept_inferred, release, config } => {
             identify::run(identify::IdentifyArgs {
                 job,
                 config_file: config,
@@ -435,6 +440,7 @@ fn main() -> Result<()> {
                 show,
                 set,
                 accept_inferred,
+                release,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {

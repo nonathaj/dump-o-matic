@@ -67,6 +67,9 @@ pub fn run(args: RunArgs) -> Result<()> {
         set: false,
         // Never. An inferred match is a judgement call and this is the unattended path.
         accept_inferred: false,
+        // Likewise never chosen for you: an audio disc ID shared by several releases
+        // stops here until a person picks one.
+        release: None,
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {

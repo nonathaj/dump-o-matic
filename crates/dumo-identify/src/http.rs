@@ -38,11 +38,16 @@ fn quote(v: &str) -> String {
     format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Perform a GET and return the response body.
+/// Perform a GET and return the response body as text.
 ///
 /// `headers` are sent as-is. The whole request description goes to curl over stdin, so
 /// nothing sensitive is visible in the process table.
 pub fn get(url: &str, headers: &[(&str, String)], timeout_secs: u32) -> Result<String> {
+    get_bytes(url, headers, timeout_secs).map(|b| String::from_utf8_lossy(&b).to_string())
+}
+
+/// Perform a GET and return the raw response body, for binary formats.
+pub fn get_bytes(url: &str, headers: &[(&str, String)], timeout_secs: u32) -> Result<Vec<u8>> {
     let mut child = Command::new(TOOL)
         // Read every other option from stdin. Only this flag is visible in `ps`.
         .arg("--config")
@@ -84,10 +89,17 @@ pub fn get(url: &str, headers: &[(&str, String)], timeout_secs: u32) -> Result<S
         });
     }
 
-    let body = String::from_utf8_lossy(&out.stdout).to_string();
-    // The status code was appended on its own final line by write-out.
-    let (payload, status) = match body.rsplit_once('\n') {
-        Some((p, s)) => (p.to_string(), s.trim().parse::<u16>().unwrap_or(0)),
+    let body = out.stdout;
+    // The status code was appended on its own final line by write-out. Split on the last
+    // newline in bytes, so a binary body is never decoded.
+    let (payload, status) = match body.iter().rposition(|&b| b == b'\n') {
+        Some(i) => (
+            body[..i].to_vec(),
+            String::from_utf8_lossy(&body[i + 1..])
+                .trim()
+                .parse::<u16>()
+                .unwrap_or(0),
+        ),
         None => (body.clone(), 0),
     };
 

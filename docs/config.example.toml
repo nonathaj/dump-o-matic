@@ -43,6 +43,12 @@ reclaim_after_migrate = false
 # Explicit device list. Leave empty (or omit) to autodetect all optical drives.
 devices = []
 
+# Audio read offset in samples, from AccurateRip's drive offset list
+# (http://www.accuraterip.com/driveoffsets.htm). Only needed when redumper does not know
+# the drive: a disc with a data track is measured, but a pure audio CD is not, and is
+# otherwise read at offset 0 — every track shifted by this many samples.
+# read_offset = 667
+
 
 [datfiles]
 # Identification databases, supplied by you. These are never downloaded automatically;

@@ -83,7 +83,10 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
     // Route to the backend that suits the medium.
     match probe.content.kind {
         MediaKind::DvdVideo | MediaKind::BluRayVideo => {}
-        MediaKind::GameDisc | MediaKind::Data => {
+        // An audio CD goes through redumper too: it corrects the drive's read offset and
+        // checks C2 errors, which cdparanoia does not, and its per-track .bin/.cue output
+        // is the lossless archival record the MP3s are later encoded from.
+        MediaKind::GameDisc | MediaKind::Data | MediaKind::AudioCd => {
             return rip_game(&cfg, &device, &probe, &args);
         }
         // Refused rather than attempted: redumper supports Xbox discs, but only through
@@ -103,8 +106,8 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
              softmodded console."
         ),
         other => bail!(
-            "no backend for {other} yet; audio CD support is not implemented. \
-             Video discs use MakeMKV and game/data discs use redumper."
+            "no backend for {other} yet. Video discs use MakeMKV; game, data and audio \
+             discs use redumper."
         ),
     }
 
@@ -368,8 +371,12 @@ fn rip_game(
         .context("checking redumper (install it from https://github.com/superg/redumper)")?;
     println!("Backend: {backend_version}");
 
+    let is_audio = probe.content.kind == MediaKind::AudioCd;
     if let Some(g) = &probe.game_serial {
         println!("Serial:  {} ({})", g.serial, g.platform);
+    } else if is_audio {
+        let id = probe.toc.as_ref().and_then(|t| t.musicbrainz_discid.as_deref());
+        println!("Disc ID: {} (MusicBrainz)", id.unwrap_or("not computed"));
     } else {
         println!("Serial:  none found — this will be dumped as a generic data disc");
     }
@@ -382,7 +389,8 @@ fn rip_game(
         .game_serial
         .as_ref()
         .map(|g| format!("{}-{}", g.platform, g.serial))
-        .or_else(|| probe.content.title_guess.clone());
+        .or_else(|| probe.content.title_guess.clone())
+        .or_else(|| is_audio.then(|| "audio-cd".to_string()));
     let job_id = job::new_job_id(label.as_deref());
     let job_dir = cfg.staging.job_dir(&job_id);
     let raw_dir = cfg.staging.job_raw_dir(&job_id);
@@ -431,7 +439,7 @@ fn rip_game(
         .game_serial
         .as_ref()
         .map(|g| g.serial.clone())
-        .unwrap_or_else(|| "disc".to_string());
+        .unwrap_or_else(|| if is_audio { "audio" } else { "disc" }.to_string());
 
     let started = std::time::Instant::now();
     let mut last_render = std::time::Instant::now();
@@ -446,6 +454,7 @@ fn rip_game(
         // No override configured: let redumper measure the sector order rather than
         // assume it. Assuming is what made every sector of a CD fail.
         None,
+        cfg.drives.read_offset,
         |p: &dumo_backends::redumper::DumpProgress| {
             if last_render.elapsed().as_millis() < 250 {
                 return;

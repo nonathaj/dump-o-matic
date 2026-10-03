@@ -1,11 +1,14 @@
 //! Adapters for external ripping tools.
 //!
 //! dump-o-matic does not implement disc I/O itself. It drives proven backends
-//! (MakeMKV for video, redumper for game discs, cdparanoia for audio) as subprocesses
+//! (MakeMKV for video discs; redumper for game, data and audio CDs; LAME to encode
+//! audio) as subprocesses
 //! and parses their output into structured progress and results.
 
+pub mod audio;
 pub mod chdman;
 pub mod ffprobe;
+pub mod id3;
 pub mod makemkv;
 pub mod redumper;
 pub mod subtitles;

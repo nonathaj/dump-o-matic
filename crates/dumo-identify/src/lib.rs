@@ -5,11 +5,13 @@
 //! [`dumo_core::Confidence::Exact`] — the sole confidence level eligible for unattended
 //! acceptance.
 
+pub mod accuraterip;
 pub mod cue;
 pub mod datfile;
 pub mod discset;
 pub mod http;
 pub mod matching;
+pub mod musicbrainz;
 pub mod platform;
 pub mod playall;
 pub mod signals;

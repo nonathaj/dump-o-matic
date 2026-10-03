@@ -8,11 +8,10 @@ Supports movies/TV, audio CDs, game discs (PS1/PS2 and friends), and games store
 console's own USB drive. See [PLAN.md](PLAN.md) for the full design, the survey of existing
 tools, and the roadmap.
 
-> **Status: early, but working.** The full pipeline runs end to end for **game discs**:
-> probe → rip → identify → repack → migrate, including verified transfer to a network
-> share. Video discs rip, hash and identify — including solving a whole box set at once —
-> but the proposed names cannot yet be applied automatically. Audio CD support is not
-> built. Nothing in this repository ever writes to a disc.
+> **Status: early, but working.** The full pipeline runs end to end for **game discs**,
+> **video discs** and **audio CDs**: probe → rip → identify → (repack) → migrate,
+> including verified transfer to a network share. Nothing in this repository ever writes
+> to a disc.
 
 ## Pipeline
 
@@ -20,15 +19,37 @@ tools, and the roadmap.
 |---|---|---|---|---|
 | 0. Adopt existing files | `adopt` | ✅ | — | ✗ |
 | 1. Probe | `probe` | ✅ | ✅ | ✅ |
-| 2. Rip to staging | `rip` | ✅ redumper | ✅ MakeMKV | ✗ |
-| 3. Identify | `identify` | ✅ Redump datfiles | ✅ TMDB, proposes only | ✗ |
-| 3b. Re-package | `repack` | ✅ CHD | — | ✗ |
-| 4. Migrate | `migrate` | ✅ | ✗ needs `--apply` | ✗ |
+| 2. Rip to staging | `rip` | ✅ redumper | ✅ MakeMKV | ✅ redumper |
+| 3. Identify | `identify` | ✅ Redump datfiles | ✅ TMDB, runtimes + dialogue | ✅ MusicBrainz + AccurateRip |
+| 3b. Re-package | `repack` | ✅ CHD | — | — (MP3s are encoded at identify) |
+| 4. Migrate | `migrate` | ✅ | ✅ | ✅ |
 | Re-verify | `verify` | ✅ | ✅ | ✅ |
 
-Games are the complete path. Video stops one step short: `identify --set` scores a box
-set against TMDB and proposes episode filenames, but there is no `--apply` for video yet,
-so filing them is still manual.
+Games and audio CDs are identified exactly — a Redump hash, or a MusicBrainz disc ID
+(a hash of the disc's table of contents) carried by exactly one release — so `--apply`
+files them, and `run` does so unattended. Video identification is always inference from
+runtimes and dialogue: `identify --apply --accept-inferred` files it once you have read
+the proposal, and `run` never will.
+
+### Audio CDs
+
+Ripped by redumper, which corrects the drive's read offset and checks C2 errors, to a
+lossless per-track `.bin`/`.cue` that stays in the job directory as the archival record.
+Set `drives.read_offset` to your drive's value from
+[AccurateRip's list](http://www.accuraterip.com/driveoffsets.htm) if redumper does not
+know the drive — a pure audio CD has no data track to measure it from.
+
+`identify` looks the disc ID up in MusicBrainz and checks every track against
+AccurateRip; a track that matches no other submitter's rip stops filing. If several
+releases share the disc ID, it lists them and files nothing until you pick one with
+`--release <id>`. With `--apply`, each track is encoded with LAME `-V 2` and tagged as
+MusicBrainz Picard would (ID3v2.4, MusicBrainz IDs, artist names translated to English,
+titles in their own script):
+
+```
+music/Hiroyuki Sawano - 2014 - アルドノア・ゼロ オリジナル・サウンドトラック/
+  1-01 - Hiroyuki Sawano - No differences.mp3
+```
 
 ### Storage devices
 

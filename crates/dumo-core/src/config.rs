@@ -286,6 +286,16 @@ pub struct DrivesConfig {
     /// Explicit device list. Empty means autodetect.
     #[serde(default)]
     pub devices: Vec<String>,
+
+    /// The drive's audio read offset in samples, as published in AccurateRip's drive
+    /// offset list (e.g. +667 for a Pioneer BDR-XD07U).
+    ///
+    /// Only needed for drives missing from redumper's database, which otherwise reads
+    /// them at offset 0. A disc with a data track never depends on it — redumper
+    /// measures the offset from the data — but a pure audio CD has nothing to measure,
+    /// so without it every track comes out shifted by this many samples.
+    #[serde(default)]
+    pub read_offset: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
