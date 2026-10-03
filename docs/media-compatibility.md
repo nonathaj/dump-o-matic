@@ -67,12 +67,12 @@ implicated: the side that read was an ordinary DVD-Video.
 | **PS2 game disc (CD)** | ✅ Works | 2 discs, `SLUS-20247` and `SLUS-21038`, probe profile `cd_rom`. Both verify against Redump, including byte-exact cue reconstruction. | Solid. |
 | **Original Xbox** | ⚠️ Video partition only | Probe reads a 14.3 MB `VIDEO_TS` volume; application id `Session Offset : 0 VTC Sector Offset: 0`; label `SEP13011042` is a pressing date code. Sectors ≥ 7000 return 0 bytes. | The game is in an XDVDFS partition outside the addressable range. Not a software limit: redumper supports these discs, but only through Kreon firmware. |
 | **PS3** | ❌ Unreadable | `not ready` ×3 while spinning up, then `disc present, unreadable`. GET CONFIGURATION returns **`unknown profile 0x0000`** — no medium type determined. `dvd+rw-mediainfo` agrees: empty current configuration. | Does **not** prove PS3 discs are unreadable in PC drives generally. Three causes remain open — see below. |
-| **Blu-ray (any)** | ❓ Never tested | — | **The BD read path has never been validated on this drive.** "reads: BD" is an advertised capability from udev, not an observation. |
+| **Blu-ray (BD-Video)** | ✅ Works | Pressed BD-ROM, 47.15 GB, `BDMV`/`CERTIFICATE`/`AACS` in root. Probe profile `bd_rom`, readable, correctly classified as Blu-ray Video. | Settles the open PS3 question below: this drive's BD read path is not the problem. AACS content protection means getting past `BDMV` into playable video is a separate, unexplored problem — this only proves the disc and drive agree on a filesystem. |
 | **Wii** | ❌ Unreadable | `disc present, unreadable` on the first poll. GET CONFIGURATION returns **`unknown profile 0x0000`**; nothing addressable (`blockdev` and `dd` both `No medium found`). | Reasonably well supported, unlike the PS3 row — see below. Wii discs are DVD-form, and this drive's DVD classification is proven on 15 discs, so the failure to classify is a property of the format, not of an untested code path. |
 | **GameCube** | ❌ Unreadable | Identical to Wii: `disc present, unreadable` on the first poll, **`unknown profile 0x0000`**, nothing addressable. | Same reasoning as Wii, and it is a second independent disc agreeing. Also shows the 8 cm form factor is detected as media — the failure is the format, not the disc size. |
 | **Xbox 360** | ⚠️ Video partition only | Probe reads a 5.6 MB `VIDEO_TS`/`AUDIO_TS` volume, label `XGD2DVD_NTSC`, pressed 2006-03-06. **No application identifier at all**, so the original-Xbox marker does not fire; recognised from the label instead. | Same situation as Xbox: game outside the addressable area, needs Kreon firmware. The disc names its own generation (XGD2 here), which governs the dumping method. |
 | **Xbox 360 USB drive** | ✅ Works | 250 GB whole-disk FAT32 (BPB OEM name `XBOX360`), 8 Games-on-Demand titles catalogued. Chromehounds extracted to a 3.77 GB `.iso`: all 920,284 blocks matched the SHA-1 hash tree inside the package, the executable's own title and media IDs agreed with the package header, and the image region came out **byte-identical** to an independent God2Iso conversion of the same title. | Solid for Games on Demand, and it sidesteps the disc problem entirely — the game partition is read from the console's own copy, so no Kreon drive is needed. Says nothing about discs, and can never match Redump: see [xbox360-storage.md](xbox360-storage.md). |
-| **Audio CD** | ❓ Not tested | — | No backend implemented. |
+| **Audio CD** | ✅ Works, with the drive's read offset set | 1 disc, *Aldnoah.Zero OST* (JP Blu-spec CD, 20 tracks, MusicBrainz disc ID `_ZoSLV2HFTtEQL1AWW4DMc2LJ2k-`). redumper, 0 C2 errors. **All 20 tracks AccurateRip-accurate** (confidence 85–90 each, 2 pressings on record). | Solid, and independently verified: an AccurateRip match is other people's rips agreeing bit for bit. Depends on `drives.read_offset = 667` — see below. The drive cannot overread into the lead-out. |
 
 ### The Xbox 360 disc justified the size heuristic
 
@@ -110,9 +110,9 @@ opaque from the start. Two different discs give the identical result, and the Ga
 disc additionally shows the 8 cm form factor is detected as media, so neither disc size
 nor mechanical detection is implicated.
 
-The PS3 disc is BD-form, and this drive's BD handling is proven on **nothing**. Its
-`0x0000` is consistent with both "PS3 discs are unreadable here" and "this drive cannot
-read Blu-ray at all", and the evidence cannot separate them.
+The PS3 disc is BD-form, and at the time this was written this drive's BD handling had
+never been proven. A later BD-Video disc closed that gap (see below), which narrows the
+PS3 row's explanation but does not resolve it on its own — see "The open PS3 question".
 
 The residual doubt on these rows is the discs themselves — dirty, damaged, or unseated.
 Against that: both reported media immediately rather than `no disc`, which is what the
@@ -128,17 +128,61 @@ either case, so the comparison is worthless.
 
 The `0x0000` profile means the drive never classified the medium — it is not the
 "readable filesystem, encrypted payload" outcome that was predicted. Three
-explanations remain, and this setup cannot currently distinguish them:
+explanations were on the table:
 
 1. PS3 discs are genuinely unreadable in standard PC BD drives.
-2. This drive's BD-ROM support is the problem — **untested**, since no ordinary
-   Blu-ray has ever been put in it.
+2. This drive's BD-ROM support is the problem — untested at the time, since no ordinary
+   Blu-ray had been put in it.
 3. That particular disc did not seat, or is dirty. A seating failure happened on this
    drive earlier the same day.
 
-**One disc settles it:** an ordinary Blu-ray movie. `0x0040` and a readable filesystem
-eliminates cause 2 and leaves 1 or 3; another `0x0000` means the drive is at fault and
-the PS3 row says nothing about PS3 discs. Until then, treat that row as inconclusive.
+A pressed BD-Video disc has since read cleanly on this drive (`bd_rom`, `BDMV` found,
+strong confidence) — **cause 2 is eliminated.** The drive's BD read path works. What
+remains open is 1 versus 3: whether PS3 pressed discs carry something this drive
+genuinely cannot classify, or that one PS3 disc was dirty/unseated. Another PS3 disc,
+ideally a clean one, would settle it.
+
+### BD-Video needed a UDF root reader, not just a bigger disc
+
+The first BD-Video disc through this drive read at the medium level immediately but
+probed as `Data, weak` — "UDF filesystem, no recognised content structure". The cause
+was in the tool, not the disc: content classification only ever looked at root
+directory entries sourced from an ISO 9660 bridge volume (`iso9660::read_dir`), and
+almost every DVD carries one, but Blu-ray video discs are UDF with **no** ISO 9660
+bridge at all. `BDMV` was sitting right there and nothing ever looked for it.
+
+Fixing it meant writing a minimal UDF (ECMA-167) reader down to the root directory, and
+that disc's root turned out to be reachable only through a second layer most UDF
+authoring for BD-ROM uses: a "Metadata Partition" (UDF 2.01+), where the File Set
+Descriptor and root directory are addressed inside a *virtual* partition backed by a
+Metadata File, not the real one. Skipping that layer — treating the Logical Volume
+Descriptor's partition map table as if every reference pointed straight at a physical
+partition — produced wrong offsets that would have read garbage rather than failing
+loudly. Both the direct and metadata-partition cases are now covered, including the
+detail that a `short_ad` extent carries no partition reference of its own and must
+inherit the one its containing file was itself reached through.
+
+### Audio CDs need the read offset, and the drive cannot overread
+
+Two measured facts about this drive and audio, both found on the first music CD.
+
+**Read offset +667.** redumper does not know the BDR-XD07U, so it reads at offset 0. A
+disc with a data track does not care — redumper measures the combined offset from the
+data — but a pure audio CD has nothing to measure, and an uncorrected rip comes out
+shifted 667 samples (15 ms): inaudible, but bit-wrong, and it matches nothing in
+AccurateRip. The value comes from AccurateRip's drive list (BDR-XD07U: +667, 303
+submissions, 100% agreement) and is set as `drives.read_offset`. It was then confirmed
+the only way that counts: with it, every track matched AccurateRip.
+
+**No lead-out overread.** Correcting +667 means the final 667 samples of the last track
+are read from beyond the end of the audio, and this drive cannot read there. redumper
+reports exactly that — `track: 20 … samples: {SKIP: 667, C2: 0}` — and refuses to split.
+The standard handling (EAC, whipper) is to fill those samples with silence, which is
+safe because AccurateRip excludes the last five sectors from its checksums for this very
+reason, and on this disc the audio was already silent ~18,400 samples before the end.
+The rip stage now does this automatically, but only when the errors are confined to the
+last track, carry no C2 errors, and number no more than the offset; anything else is
+still treated as damage.
 
 ### Hardware needed for what this drive cannot do
 
