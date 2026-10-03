@@ -5,7 +5,7 @@
 //! datfiles and metadata services. Everything reported carries its evidence so the
 //! operator can judge it.
 
-use crate::{device, discid, ioctl, iso9660, mmc, DriveError, Result};
+use crate::{device, discid, ioctl, iso9660, mmc, udf, DriveError, Result};
 use dumo_core::{
     Confidence, ContentHint, DiscProbe, DiscProfile, GameSerial, MediaKind, TrayState,
 };
@@ -143,6 +143,16 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
                 })
                 .collect();
             dir_entries = entries;
+        }
+    }
+    // Blu-ray video discs are UDF without an ISO 9660 bridge, so the above never finds
+    // anything — read the UDF root directly instead.
+    if root_entries.is_empty() && is_udf {
+        if let Ok(Some(entries)) = udf::read_root_entries(&mut reader) {
+            root_entries = entries
+                .iter()
+                .map(|e| if e.is_dir { format!("{}/", e.name) } else { e.name.clone() })
+                .collect();
         }
     }
 
