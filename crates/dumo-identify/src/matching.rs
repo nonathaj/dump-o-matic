@@ -584,7 +584,12 @@ pub fn query_from_label(label: &str) -> String {
     let words: Vec<&str> = spaced.split_whitespace().collect();
 
     let mut end = words.len();
-    // Strip a trailing "DISC 1", "D2", "SEASON 3", "VOL 2" and similar.
+    // Strip a trailing "DISC 1", "D2", "SEASON 3", "VOL 2" and similar, including a glued
+    // disc form like "D1" (longest marker first, so "DISC1" doesn't stop at "D1"). A glued
+    // season form like "S05" is deliberately left alone: unlike "SEASON", a bare "S" is too
+    // easily something else, and season_number_from_label still gets to read it later.
+    let marker = ["DISC", "DISK", "SEASON", "VOL", "VOLUME", "SET", "S"];
+    let glued_disc_marker = ["DISC", "DISK", "D"];
     while end >= 1 {
         let last = words[end - 1].to_ascii_uppercase();
         let prev = if end >= 2 {
@@ -593,10 +598,13 @@ pub fn query_from_label(label: &str) -> String {
             String::new()
         };
         let is_number = last.chars().all(|c| c.is_ascii_digit());
-        let marker = ["DISC", "DISK", "SEASON", "VOL", "VOLUME", "SET", "S"];
+        let glued = glued_disc_marker
+            .iter()
+            .filter(|m| last.len() > m.len())
+            .find(|m| last.starts_with(**m) && last[m.len()..].chars().all(|c| c.is_ascii_digit()));
         if is_number && marker.contains(&prev.as_str()) {
             end -= 2;
-        } else if marker.contains(&last.as_str()) {
+        } else if marker.contains(&last.as_str()) || glued.is_some() {
             end -= 1;
         } else {
             break;
@@ -905,6 +913,17 @@ mod tests {
         assert_eq!(query_from_label("THE_WIRE_SEASON_2"), "the wire");
         assert_eq!(query_from_label("FRIENDS_S05_DISC_3"), "friends s05");
         assert_eq!(query_from_label("MAD_MEN"), "mad men");
+    }
+
+    /// Regression test: a glued disc marker like "D1" used to survive stripping because
+    /// only separate-token "DISC 1" form was recognised, so six discs of one box set
+    /// ("MMPR_S1_D1" .. "MMPR_S1_D6") each produced a distinct series key and the set
+    /// could never be solved jointly.
+    #[test]
+    fn strips_a_glued_disc_number_so_a_box_sets_discs_share_one_key() {
+        for n in 1..=6 {
+            assert_eq!(query_from_label(&format!("MMPR_S1_D{n}")), "mmpr s1");
+        }
     }
 
     #[test]
