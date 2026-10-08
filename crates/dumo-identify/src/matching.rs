@@ -136,13 +136,34 @@ fn score(titles: &[DiscTitle], episodes: &[Episode]) -> Option<(f64, f64, usize)
 /// Two alignments this close in score are treated as indistinguishable on runtime alone.
 const TIE_EPSILON_MINS: f64 = 0.25;
 
+/// Split a token that glues season and disc together, `S3D1`, into `S3 D1`, the form
+/// the label parsers below already understand. Expects separators already turned into
+/// spaces, so each caller keeps its own idea of what separates words. Labels are written
+/// both ways:
+/// `MMPR_S1_D1` on one box set and `MMPR_S3D1` on the next season's.
+fn split_season_disc(label: &str) -> String {
+    label
+        .split_whitespace()
+        .map(|w| {
+            let up = w.to_ascii_uppercase();
+            let parts = up.strip_prefix('S').and_then(|rest| {
+                let (season, disc) = rest.split_once('D')?;
+                let digits = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit());
+                (digits(season) && digits(disc)).then(|| format!("S{season} D{disc}"))
+            });
+            parts.unwrap_or_else(|| w.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Extract the disc number from a volume label, e.g. `ESPN_30_FOR_30_DISC_2` → 2.
 ///
 /// Worth doing because runtimes frequently tie. A three-episode disc labelled DISC 2 in
 /// a set almost certainly holds the episodes after DISC 1's, and that ordering resolves
 /// ties that runtime cannot.
 pub fn disc_number_from_label(label: &str) -> Option<u32> {
-    let spaced = label.replace(['_', '.', '-'], " ").to_ascii_uppercase();
+    let spaced = split_season_disc(&label.replace(['_', '.', '-'], " ")).to_ascii_uppercase();
     let words: Vec<&str> = spaced.split_whitespace().collect();
     for (i, w) in words.iter().enumerate() {
         if matches!(*w, "DISC" | "DISK" | "D") {
@@ -174,7 +195,7 @@ pub fn disc_number_from_label(label: &str) -> Option<u32> {
 /// are unambiguous; a bare number is not, and neither is the `3` in `WONDER_WOMAN_3`,
 /// which could be a sequel or a disc index.
 pub fn season_number_from_label(label: &str) -> Option<u32> {
-    let spaced = label.replace(['_', '.', '-'], " ").to_ascii_uppercase();
+    let spaced = split_season_disc(&label.replace(['_', '.', '-'], " ")).to_ascii_uppercase();
     let words: Vec<&str> = spaced.split_whitespace().collect();
     for (i, w) in words.iter().enumerate() {
         if matches!(*w, "SEASON" | "SERIES") {
@@ -580,7 +601,7 @@ pub fn match_seasons(
 /// "30 for 30". Underscores become spaces and trailing disc/season markers are dropped,
 /// since they are about the physical disc rather than the work.
 pub fn query_from_label(label: &str) -> String {
-    let spaced = label.replace(['_', '.'], " ");
+    let spaced = split_season_disc(&label.replace(['_', '.'], " "));
     let words: Vec<&str> = spaced.split_whitespace().collect();
 
     let mut end = words.len();
@@ -919,6 +940,22 @@ mod tests {
     /// only separate-token "DISC 1" form was recognised, so six discs of one box set
     /// ("MMPR_S1_D1" .. "MMPR_S1_D6") each produced a distinct series key and the set
     /// could never be solved jointly.
+    /// Season 3 of the same box set glues season and disc into one token.
+    #[test]
+    fn reads_a_season_and_disc_glued_into_one_token() {
+        for n in 1..=6 {
+            let label = format!("MMPR_S3D{n}");
+            assert_eq!(query_from_label(&label), "mmpr s3");
+            assert_eq!(disc_number_from_label(&label), Some(n));
+            assert_eq!(season_number_from_label(&label), Some(3));
+        }
+        // Words that merely start with S and contain a D are left alone.
+        assert_eq!(query_from_label("SHADOWS_D2"), "shadows");
+        assert_eq!(season_number_from_label("SHADOWS_D2"), None);
+        // A hyphen stays part of the title in a search query, as it always has.
+        assert_eq!(query_from_label("SPIDER-MAN_D1"), "spider-man");
+    }
+
     #[test]
     fn strips_a_glued_disc_number_so_a_box_sets_discs_share_one_key() {
         for n in 1..=6 {
