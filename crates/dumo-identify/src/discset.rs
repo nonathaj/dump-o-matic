@@ -478,14 +478,23 @@ fn assign_min_cost(cost: &[Vec<f64>]) -> Vec<usize> {
     out
 }
 
-/// An episode name with a trailing part number removed: "Ninja Quest (2)" -> "Ninja Quest".
+/// The story an episode is one part of, if its name numbers the part.
+///
+/// Both conventions TMDB uses: a trailing "Ninja Quest (2)", and a "Green with Evil
+/// Part 2: Jason's Battle" whose subtitle differs per part.
 fn story_name(name: &str) -> Option<&str> {
+    let is_number = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
     let t = name.trim_end();
-    let inner = t.strip_suffix(')')?;
-    let open = inner.rfind('(')?;
-    let digits = &inner[open + 1..];
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
-        .then(|| inner[..open].trim_end())
+    if let Some(inner) = t.strip_suffix(')') {
+        if let Some(open) = inner.rfind('(') {
+            if is_number(&inner[open + 1..]) {
+                return Some(inner[..open].trim_end());
+            }
+        }
+    }
+    let at = t.find(" Part ")?;
+    let number: String = t[at + 6..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    (!number.is_empty()).then(|| &t[..at])
 }
 
 /// Let dialogue reorder titles among the episodes the consecutive solve gave them.
@@ -1598,7 +1607,12 @@ mod grouping_tests {
             story_name("Master Vile and the Metallic Armor (1)"),
             Some("Master Vile and the Metallic Armor")
         );
+        assert_eq!(
+            story_name("Green with Evil Part 2: Jason's Battle"),
+            Some("Green with Evil")
+        );
         assert_eq!(story_name("Follow that Cab!"), None);
+        assert_eq!(story_name("Part of the Team"), None);
         assert_eq!(story_name("The Return (Part Two)"), None);
     }
 
