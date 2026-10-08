@@ -47,7 +47,7 @@ impl<'a> SeasonScorer<'a> {
         // change between episodes.
         let dialogue: Vec<Option<HashSet<String>>> = titles
             .iter()
-            .map(|t| t.dialogue.as_ref().map(signals::stem_all))
+            .map(|t| t.dialogue.as_ref().map(|d| signals::stem_all(d.keys())))
             .collect();
 
         let mut scores = Vec::with_capacity(titles.len());
@@ -167,22 +167,20 @@ fn window_cost(
     Some((total, len))
 }
 
-/// Mean absolute runtime difference over a window, for reporting in minutes.
+/// Mean absolute runtime difference over a disc's matches, for reporting in minutes.
 ///
 /// Kept separate from the cost the solver minimises: a unitless score is the right thing
 /// to rank on, but "3 minutes out" is what a person can judge.
-fn window_runtime_delta(titles: &[DiscTitle], episodes: &[Episode], start: usize) -> f64 {
-    let mut total = 0.0;
-    let mut counted = 0usize;
-    for (t, e) in titles.iter().zip(episodes[start..].iter()) {
-        let Some(rt) = e.runtime_mins else { continue };
-        total += (t.duration_secs / 60.0 - f64::from(rt)).abs();
-        counted += 1;
-    }
-    if counted == 0 {
+fn mean_runtime_delta(matches: &[TitleMatch]) -> f64 {
+    let measured: Vec<f64> = matches
+        .iter()
+        .map(|m| m.delta_mins)
+        .filter(|d| !d.is_nan())
+        .collect();
+    if measured.is_empty() {
         f64::NAN
     } else {
-        total / counted as f64
+        measured.iter().sum::<f64>() / measured.len() as f64
     }
 }
 
@@ -375,6 +373,255 @@ fn place(discs: &[SetDisc], sc: &SeasonScorer, gap_penalty: f64) -> Option<SetPl
     })
 }
 
+/// Fewest titles a set must have before dialogue may reorder it.
+///
+/// Reordering compares each title against the others' episodes, normalised across the
+/// window. Over a handful of episodes that normalisation is mostly noise; across a
+/// season it is not.
+const MIN_REORDER_TITLES: usize = 6;
+
+/// How much better, on average, a moved title's dialogue must fit its new episode than
+/// its disc-order one, in standard deviations of that title's scores.
+///
+/// Measured on a 33-title season whose discs follow broadcast rather than TMDB order:
+/// the correct reordering moved 16 titles at a mean gain of 2.6, and every move was
+/// confirmed by reading the captions.
+const MIN_REORDER_GAIN: f64 = 1.0;
+
+/// Cost per position a title is moved from disc order, in the same units as the gain.
+///
+/// Enough that dialogue which cannot tell two episodes apart leaves them in disc
+/// order; far too little to hold a title in place against dialogue that names its
+/// episode outright.
+const REORDER_DISTANCE_COST: f64 = 0.1;
+
+/// A reordering of a set's titles within the episodes disc order gave them.
+struct Reorder {
+    /// For each title, the window position it moves to.
+    order: Vec<usize>,
+    /// Mean z-score gain over the moved titles.
+    mean_gain: f64,
+    /// Per moved title: (title index, gain, z-score at the new position).
+    moves: Vec<(usize, f64, f64)>,
+}
+
+/// Least-cost one-to-one assignment of rows to columns of a square matrix.
+///
+/// The Hungarian algorithm, O(n^3) — a season's 50 titles are nothing. Infinite costs
+/// are honoured as "never", provided some finite assignment exists.
+fn assign_min_cost(cost: &[Vec<f64>]) -> Vec<usize> {
+    const NEVER: f64 = 1e12;
+    let n = cost.len();
+    let c = |i: usize, j: usize| {
+        let v = cost[i][j];
+        if v.is_finite() {
+            v
+        } else {
+            NEVER
+        }
+    };
+    // 1-indexed potentials, with column 0 a sentinel, as in the textbook formulation.
+    let mut u = vec![0.0; n + 1];
+    let mut v = vec![0.0; n + 1];
+    let mut row_of = vec![0usize; n + 1];
+    let mut way = vec![0usize; n + 1];
+    for i in 1..=n {
+        row_of[0] = i;
+        let mut j0 = 0usize;
+        let mut min_v = vec![f64::INFINITY; n + 1];
+        let mut used = vec![false; n + 1];
+        loop {
+            used[j0] = true;
+            let i0 = row_of[j0];
+            let mut delta = f64::INFINITY;
+            let mut j1 = 0usize;
+            for j in 1..=n {
+                if used[j] {
+                    continue;
+                }
+                let reduced = c(i0 - 1, j - 1) - u[i0] - v[j];
+                if reduced < min_v[j] {
+                    min_v[j] = reduced;
+                    way[j] = j0;
+                }
+                if min_v[j] < delta {
+                    delta = min_v[j];
+                    j1 = j;
+                }
+            }
+            for j in 0..=n {
+                if used[j] {
+                    u[row_of[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    min_v[j] -= delta;
+                }
+            }
+            j0 = j1;
+            if row_of[j0] == 0 {
+                break;
+            }
+        }
+        loop {
+            let j1 = way[j0];
+            row_of[j0] = row_of[j1];
+            j0 = j1;
+            if j0 == 0 {
+                break;
+            }
+        }
+    }
+    let mut out = vec![0usize; n];
+    for j in 1..=n {
+        out[row_of[j] - 1] = j - 1;
+    }
+    out
+}
+
+/// An episode name with a trailing part number removed: "Ninja Quest (2)" -> "Ninja Quest".
+fn story_name(name: &str) -> Option<&str> {
+    let t = name.trim_end();
+    let inner = t.strip_suffix(')')?;
+    let open = inner.rfind('(')?;
+    let digits = &inner[open + 1..];
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .then(|| inner[..open].trim_end())
+}
+
+/// Let dialogue reorder titles among the episodes the consecutive solve gave them.
+///
+/// Disc order is an assumption about how a box was packed, and it fails in a specific
+/// way: a set authored in broadcast order puts an episode the metadata provider files
+/// elsewhere — a holiday special, typically — in the middle, and every title after it
+/// is then placed one episode early. Measured on such a season, 16 of 33 titles were
+/// misnamed, and no runtime could have said so: every episode ran 20 minutes.
+///
+/// Dialogue can, once it is scored for what distinguishes titles from *each other*. The
+/// existing score weighs a synopsis word by how rare it is among synopses; here it is
+/// also weighed by how rare it is among the set's dialogue, so a character named in
+/// every episode counts for nothing and a monster named in one counts for a great deal.
+/// Repetition counts too, logarithmically: a title that says "brick" 25 times is about
+/// a brick. Each title's scores are then normalised, and the titles are assigned to
+/// episodes jointly, one each, with a small cost for distance from disc order.
+///
+/// Parts of a multi-part story share nearly all their words, so dialogue cannot order
+/// them; disc order can. Each story's parts are therefore put back in disc order among
+/// the slots the assignment gave that story.
+///
+/// Returns `None` — leave disc order alone — unless the moves are well supported.
+fn reorder_by_dialogue(
+    titles: &[&DiscTitle],
+    window: &[&Episode],
+    implausible: impl Fn(usize, usize) -> bool,
+) -> Option<Reorder> {
+    let n = titles.len();
+    if n < MIN_REORDER_TITLES || window.len() != n {
+        return None;
+    }
+    let dialogue: Vec<std::collections::HashMap<String, u32>> = titles
+        .iter()
+        .map(|t| t.dialogue.as_ref().map(signals::stem_counts))
+        .collect::<Option<_>>()?;
+    let references: Vec<HashSet<String>> = window
+        .iter()
+        .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
+        .collect();
+
+    // Inverse document frequency on both sides: among the synopses, and among the titles.
+    let idf = |documents: usize, containing: usize| {
+        ((documents as f64 + 1.0) / (containing as f64 + 1.0)).ln().max(0.0)
+    };
+    let mut ref_df: std::collections::HashMap<&str, usize> = Default::default();
+    for r in &references {
+        for w in r {
+            *ref_df.entry(w).or_insert(0) += 1;
+        }
+    }
+    let mut dlg_df: std::collections::HashMap<&str, usize> = Default::default();
+    for d in &dialogue {
+        for w in d.keys() {
+            *dlg_df.entry(w).or_insert(0) += 1;
+        }
+    }
+
+    let mut z = Vec::with_capacity(n);
+    for d in &dialogue {
+        let raw: Vec<f64> = references
+            .iter()
+            .map(|r| {
+                let mut total = 0.0;
+                let mut hit = 0.0;
+                for w in r {
+                    let rw = idf(n, ref_df[w.as_str()]);
+                    total += rw;
+                    if let Some(&count) = d.get(w) {
+                        hit += rw * idf(n, dlg_df[w.as_str()]) * (1.0 + f64::from(count)).ln();
+                    }
+                }
+                if total > 0.0 {
+                    hit / total
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mean = raw.iter().sum::<f64>() / n as f64;
+        let sd = (raw.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+        z.push(
+            raw.iter()
+                .map(|x| if sd > 0.0 { (x - mean) / sd } else { 0.0 })
+                .collect::<Vec<f64>>(),
+        );
+    }
+
+    let cost: Vec<Vec<f64>> = (0..n)
+        .map(|t| {
+            (0..n)
+                .map(|e| {
+                    if implausible(t, e) {
+                        f64::INFINITY
+                    } else {
+                        -z[t][e] + REORDER_DISTANCE_COST * t.abs_diff(e) as f64
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut order = assign_min_cost(&cost);
+    if (0..n).any(|t| implausible(t, order[t])) {
+        return None;
+    }
+
+    // Parts of one story keep their disc order among the slots the story was given.
+    let mut stories: std::collections::HashMap<&str, Vec<usize>> = Default::default();
+    for t in 0..n {
+        if let Some(story) = story_name(&window[order[t]].name) {
+            stories.entry(story).or_default().push(t);
+        }
+    }
+    for ts in stories.values() {
+        let mut slots: Vec<usize> = ts.iter().map(|&t| order[t]).collect();
+        slots.sort_unstable();
+        for (&t, slot) in ts.iter().zip(slots) {
+            order[t] = slot;
+        }
+    }
+
+    let moves: Vec<(usize, f64, f64)> = (0..n)
+        .filter(|&t| order[t] != t)
+        .map(|t| (t, z[t][order[t]] - z[t][t], z[t][order[t]]))
+        .collect();
+    if moves.is_empty() {
+        return None;
+    }
+    let mean_gain = moves.iter().map(|m| m.1).sum::<f64>() / moves.len() as f64;
+    (mean_gain >= MIN_REORDER_GAIN).then_some(Reorder {
+        order,
+        mean_gain,
+        moves,
+    })
+}
+
 /// Find the best consistent placement of a disc set across the given seasons.
 pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     if discs.is_empty() {
@@ -424,6 +671,22 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
 
     let episodes: &[Episode] = &flat_episodes;
 
+    // Where disc order puts each title, as an index into `episodes`...
+    let disc_order: Vec<usize> = ordered
+        .iter()
+        .zip(starts.iter())
+        .flat_map(|(d, &start)| start..start + d.titles.len())
+        .collect();
+    // ...and where the dialogue says each one belongs among those same episodes.
+    let window: Vec<&Episode> = disc_order.iter().map(|&i| &episodes[i]).collect();
+    let reorder = reorder_by_dialogue(&flat, &window, |t, e| {
+        sc.cost[t][disc_order[e]].is_infinite()
+    });
+    let assigned: Vec<usize> = match &reorder {
+        Some(r) => r.order.iter().map(|&p| disc_order[p]).collect(),
+        None => disc_order.clone(),
+    };
+
     // Per-title verdicts: what each signal would have said on its own, so confidence can
     // rest on independent signals agreeing rather than on one number being small.
     let mut verdicts: Vec<signals::TitleVerdict> = Vec::new();
@@ -432,12 +695,14 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     let mut runtime_counted = 0usize;
 
     let mut title_offset = 0usize;
-    for (d, &start) in ordered.iter().zip(starts.iter()) {
-        let window = &episodes[start..start + d.titles.len()];
+    for d in &ordered {
+        let disc_episodes: Vec<&Episode> = (0..d.titles.len())
+            .map(|i| &episodes[assigned[title_offset + i]])
+            .collect();
         let matches: Vec<TitleMatch> = d
             .titles
             .iter()
-            .zip(window.iter())
+            .zip(disc_episodes.iter().copied())
             .map(|(t, e)| TitleMatch {
                 title_name: t.name.clone(),
                 title_mins: t.duration_secs / 60.0,
@@ -450,7 +715,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             .collect();
 
         for (i, t) in d.titles.iter().enumerate() {
-            let idx = start + i;
+            let idx = assigned[title_offset + i];
             let scores = sc.scores[title_offset + i][idx];
             let runtime_pick = sc.best_by(title_offset + i, |s| Some(s.runtime)).unwrap_or(0);
             let subtitle_pick = t
@@ -478,9 +743,9 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         placements.push(DiscPlacement {
             disc_number: d.disc_number,
             job_id: d.job_id.clone(),
-            first_episode: window.first().map(|e| e.number).unwrap_or(0),
+            first_episode: disc_episodes.iter().map(|e| e.number).min().unwrap_or(0),
+            mean_delta: mean_runtime_delta(&matches),
             matches,
-            mean_delta: window_runtime_delta(&d.titles, episodes, start),
         });
         title_offset += d.titles.len();
     }
@@ -497,6 +762,12 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     // equally good alternative is not something to accept unattended.
     let mut confidence = signals::confidence_from(&verdicts);
     if margin.map(|m| m < params.min_margin).unwrap_or(false) && confidence > Confidence::Weak {
+        confidence = Confidence::Weak;
+    }
+    // A reordering overrides the set constraint on the dialogue's word alone. It is the
+    // right call when the captions are this clear, but it is exactly the kind of call a
+    // person should look at.
+    if reorder.is_some() && confidence > Confidence::Weak {
         confidence = Confidence::Weak;
     }
 
@@ -557,6 +828,29 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         None => evidence.push(
             "this is the only arrangement that satisfies the set constraint".to_string(),
         ),
+    }
+    if let Some(r) = &reorder {
+        evidence.push(format!(
+            "dialogue moved {} title(s) out of disc order (mean fit {:.1} standard \
+             deviations better than in disc order) — the disc order did not match the \
+             episode numbering",
+            r.moves.len(),
+            r.mean_gain
+        ));
+        let mut strongest = r.moves.clone();
+        strongest.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let disc_of: Vec<u32> = ordered
+            .iter()
+            .flat_map(|d| std::iter::repeat(d.disc_number).take(d.titles.len()))
+            .collect();
+        for &(t, _, fit) in strongest.iter().take(3) {
+            let e = &episodes[assigned[t]];
+            evidence.push(format!(
+                "  disc {} {} is S{:02}E{:02} {}: its dialogue fits that synopsis {fit:.1} \
+                 standard deviations above its other candidates",
+                disc_of[t], flat[t].name, e.season, e.number, e.name
+            ));
+        }
     }
     evidence
         .push("solving the set jointly is still inference — confirm before filing".to_string());
@@ -952,7 +1246,7 @@ mod tests {
         DiscTitle {
             name: name.into(),
             duration_secs: mins * 60.0,
-            dialogue: Some(dumo_core::text::tokenize(dialogue)),
+            dialogue: Some(dumo_core::text::count_words(dialogue)),
         }
     }
 
@@ -1285,5 +1579,183 @@ mod grouping_tests {
     fn unlabelled_discs_stay_separate() {
         let g = group_into_sets(&[input("j1", "", 2), input("j2", "", 2)]);
         assert_eq!(g.len(), 2, "unlabelled discs must not be grouped with each other");
+    }
+
+    #[test]
+    fn min_cost_assignment_finds_the_optimum_not_the_greedy_pick() {
+        // Greedy takes (0,0)=1 and is then forced into (1,1)=10, total 11; the optimum
+        // is (0,1)+(1,0) = 2+2 = 4.
+        let cost = vec![vec![1.0, 2.0], vec![2.0, 10.0]];
+        assert_eq!(assign_min_cost(&cost), vec![1, 0]);
+        let never = vec![vec![f64::INFINITY, 5.0], vec![1.0, 1.0]];
+        assert_eq!(assign_min_cost(&never), vec![1, 0]);
+    }
+
+    #[test]
+    fn story_names_drop_only_a_numeric_part_suffix() {
+        assert_eq!(story_name("Ninja Quest (2)"), Some("Ninja Quest"));
+        assert_eq!(
+            story_name("Master Vile and the Metallic Armor (1)"),
+            Some("Master Vile and the Metallic Armor")
+        );
+        assert_eq!(story_name("Follow that Cab!"), None);
+        assert_eq!(story_name("The Return (Part Two)"), None);
+    }
+
+    /// A season of equal-length episodes, each with a monster only it names.
+    fn monster_season() -> Season {
+        let plots = [
+            ("Day of the Dumpster", "Rita escapes the dumpster and sends Squatt"),
+            ("Ninja Quest (1)", "The Rangers lose their powers to Rito"),
+            ("Ninja Quest (2)", "The Rangers search for Ninjor and Rito"),
+            ("Fourth Down and Long", "Centiback turns people into footballs"),
+            ("Another Brick in the Wall", "The Brick Bully traps the Rangers"),
+            ("A Chimp in Charge", "A chimp becomes the Sinister Simian"),
+            ("I'm Dreaming of a White Ranger", "The Rangers save Christmas for Santa"),
+            ("The Sound of Dischordia", "Dischordia puts the Rangers under a terrible tune"),
+        ];
+        Season {
+            number: 3,
+            episodes: plots
+                .iter()
+                .enumerate()
+                .map(|(i, (name, plot))| Episode {
+                    season: 3,
+                    number: i as u32 + 1,
+                    name: (*name).into(),
+                    runtime_mins: Some(20),
+                    air_date: None,
+                    overview: Some((*plot).into()),
+                })
+                .collect(),
+        }
+    }
+
+    /// A title whose captions name `words` among talk common to every episode.
+    fn spoken(name: &str, words: &str) -> DiscTitle {
+        let mut text = String::from("go go power rangers zordon alpha rangers morph ");
+        for _ in 0..10 {
+            text.push_str(words);
+            text.push(' ');
+        }
+        DiscTitle {
+            name: name.into(),
+            duration_secs: 20.0 * 60.0,
+            dialogue: Some(dumo_core::text::count_words(&text)),
+        }
+    }
+
+    #[test]
+    fn dialogue_moves_a_holiday_episode_authored_out_of_order() {
+        // Broadcast order put the Christmas episode (E7) fourth. Every runtime is the
+        // same, so disc order alone names titles 4-7 one episode early.
+        let discs = vec![
+            SetDisc {
+                disc_number: 1,
+                job_id: "a".into(),
+                titles: vec![
+                    spoken("t00", "dumpster squatt"),
+                    spoken("t01", "rito powers ninja"),
+                    spoken("t02", "ninjor rito temple"),
+                    spoken("t03", "christmas santa presents"),
+                ],
+            },
+            SetDisc {
+                disc_number: 2,
+                job_id: "b".into(),
+                titles: vec![
+                    spoken("t00", "centiback football"),
+                    spoken("t01", "brick bully wall"),
+                    spoken("t02", "chimp simian"),
+                    spoken("t03", "dischordia tune"),
+                ],
+            },
+        ];
+        let s = solve(&discs, &[monster_season()]).expect("solved");
+        let numbers: Vec<Vec<u32>> = s
+            .placements
+            .iter()
+            .map(|p| p.matches.iter().map(|m| m.episode.number).collect())
+            .collect();
+        assert_eq!(numbers, vec![vec![1, 2, 3, 7], vec![4, 5, 6, 8]]);
+        assert_eq!(s.placements[1].first_episode, 4);
+        assert!(s.evidence.iter().any(|e| e.contains("out of disc order")));
+        assert_eq!(s.confidence, Confidence::Weak, "a reordering is for a person to confirm");
+    }
+
+    #[test]
+    fn dialogue_leaves_a_set_already_in_order_alone() {
+        let discs = vec![
+            SetDisc {
+                disc_number: 1,
+                job_id: "a".into(),
+                titles: vec![
+                    spoken("t00", "dumpster squatt"),
+                    spoken("t01", "rito powers ninja"),
+                    spoken("t02", "ninjor rito temple"),
+                    spoken("t03", "centiback football"),
+                ],
+            },
+            SetDisc {
+                disc_number: 2,
+                job_id: "b".into(),
+                titles: vec![
+                    spoken("t00", "brick bully wall"),
+                    spoken("t01", "chimp simian"),
+                    spoken("t02", "christmas santa presents"),
+                    spoken("t03", "dischordia tune"),
+                ],
+            },
+        ];
+        let s = solve(&discs, &[monster_season()]).expect("solved");
+        let numbers: Vec<u32> = s
+            .placements
+            .iter()
+            .flat_map(|p| p.matches.iter().map(|m| m.episode.number))
+            .collect();
+        assert_eq!(numbers, (1..=8).collect::<Vec<_>>());
+        assert!(!s.evidence.iter().any(|e| e.contains("out of disc order")));
+    }
+
+    #[test]
+    fn parts_of_one_story_keep_disc_order_when_dialogue_cannot_separate_them() {
+        // Both Ninja Quest parts say exactly the same words, which favour neither.
+        let discs = vec![
+            SetDisc {
+                disc_number: 1,
+                job_id: "a".into(),
+                titles: vec![
+                    spoken("t00", "dumpster squatt"),
+                    spoken("t01", "christmas santa presents"),
+                    spoken("t02", "rito ninjor"),
+                    spoken("t03", "rito ninjor"),
+                ],
+            },
+            SetDisc {
+                disc_number: 2,
+                job_id: "b".into(),
+                titles: vec![
+                    spoken("t00", "centiback football"),
+                    spoken("t01", "brick bully wall"),
+                    spoken("t02", "chimp simian"),
+                    spoken("t03", "dischordia tune"),
+                ],
+            },
+        ];
+        let s = solve(&discs, &[monster_season()]).expect("solved");
+        let d1: Vec<&str> = s.placements[0]
+            .matches
+            .iter()
+            .map(|m| m.episode.name.as_str())
+            .collect();
+        assert_eq!(
+            d1,
+            vec![
+                "Day of the Dumpster",
+                "I'm Dreaming of a White Ranger",
+                "Ninja Quest (1)",
+                "Ninja Quest (2)"
+            ]
+        );
     }
 }

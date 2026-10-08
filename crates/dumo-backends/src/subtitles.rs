@@ -119,7 +119,7 @@ pub fn dialogue_text(srt: &str) -> String {
 ///
 /// Re-exported from [`dumo_core::text`] so ripped dialogue and reference synopses are
 /// tokenised by the same code; see there for why there is no stopword list.
-pub use dumo_core::text::tokenize;
+pub use dumo_core::text::{count_words, tokenize};
 
 #[cfg(test)]
 mod tests {

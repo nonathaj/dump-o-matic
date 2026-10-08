@@ -165,8 +165,19 @@ pub fn stem(word: &str) -> String {
 }
 
 /// Stem every word in a set.
-pub fn stem_all(words: &HashSet<String>) -> HashSet<String> {
-    words.iter().map(|w| stem(w)).collect()
+pub fn stem_all<'a>(words: impl IntoIterator<Item = &'a String>) -> HashSet<String> {
+    words.into_iter().map(|w| stem(w)).collect()
+}
+
+/// Stem every word of a count table, summing the counts of words that share a stem.
+pub fn stem_counts(
+    words: &std::collections::HashMap<String, u32>,
+) -> std::collections::HashMap<String, u32> {
+    let mut out = std::collections::HashMap::new();
+    for (w, n) in words {
+        *out.entry(stem(w)).or_insert(0) += n;
+    }
+    out
 }
 
 /// Word weights derived from the candidate set itself.

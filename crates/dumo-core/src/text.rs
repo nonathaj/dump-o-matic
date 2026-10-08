@@ -6,7 +6,7 @@
 //! stop matching, and the identification layer has no business depending on the
 //! ffmpeg-wrapping layer just to borrow a string split.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Shortest token kept. Below this, tokens are punctuation fragments and initials rather
 /// than words that could distinguish one episode from another.
@@ -31,9 +31,34 @@ pub fn tokenize(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Split text into lowercase word tokens, counting how often each occurs.
+///
+/// The same split as [`tokenize`], keeping repetition. A word a title says twenty-five
+/// times is about that title in a way a word said once is not, and only a count can
+/// tell the two apart.
+pub fn count_words(text: &str) -> HashMap<String, u32> {
+    let mut counts = HashMap::new();
+    for w in text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| w.chars().count() >= MIN_TOKEN_LEN)
+    {
+        *counts.entry(w.to_string()).or_insert(0) += 1;
+    }
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_repeated_words() {
+        let c = count_words("Brick by brick, the BRICK wall -- a wall!");
+        assert_eq!(c.get("brick"), Some(&3));
+        assert_eq!(c.get("wall"), Some(&2));
+        assert_eq!(c.get("by"), None, "below the minimum length");
+    }
 
     #[test]
     fn keeps_words_and_drops_fragments() {

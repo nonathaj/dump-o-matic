@@ -79,12 +79,12 @@ impl SeasonMatch {
 pub struct DiscTitle {
     pub name: String,
     pub duration_secs: f64,
-    /// Tokenised dialogue from the title's subtitle track, when it has one.
+    /// Dialogue from the title's subtitle track, as word -> occurrences, when it has one.
     ///
     /// Far more discriminating than a runtime: two episodes of a series routinely run to
     /// the same minute, but they do not say the same words. `None` means the title had
     /// no text subtitle track, and scoring falls back to runtime alone.
-    pub dialogue: Option<std::collections::HashSet<String>>,
+    pub dialogue: Option<std::collections::HashMap<String, u32>>,
 }
 
 impl DiscTitle {
@@ -247,7 +247,7 @@ fn best_window_by_dialogue(
     let corpus = signals::Corpus::from_references(references.iter());
     let dialogue: Vec<Option<std::collections::HashSet<String>>> = titles
         .iter()
-        .map(|t| t.dialogue.as_ref().map(signals::stem_all))
+        .map(|t| t.dialogue.as_ref().map(|d| signals::stem_all(d.keys())))
         .collect();
 
     let mut scored: Vec<(usize, f64)> = Vec::new();
@@ -806,21 +806,21 @@ mod tests {
             DiscTitle {
                 name: "a.mkv".into(),
                 duration_secs: 47.0 * 60.0,
-                dialogue: Some(dumo_core::text::tokenize(
+                dialogue: Some(dumo_core::text::count_words(
                     "the forger stole a priceless painting from the gallery",
                 )),
             },
             DiscTitle {
                 name: "b.mkv".into(),
                 duration_secs: 47.0 * 60.0,
-                dialogue: Some(dumo_core::text::tokenize(
+                dialogue: Some(dumo_core::text::count_words(
                     "the disco owner hypnotises dancers with that record",
                 )),
             },
             DiscTitle {
                 name: "c.mkv".into(),
                 duration_secs: 47.0 * 60.0,
-                dialogue: Some(dumo_core::text::tokenize(
+                dialogue: Some(dumo_core::text::count_words(
                     "an entomologist controls ants attacking the chemical plant",
                 )),
             },

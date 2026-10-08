@@ -103,6 +103,15 @@ across that season rather than against any hardcoded stopword list. Discs of a b
 solved jointly, since the discs of a season hold consecutive non-overlapping runs of
 episodes, which frequently decides cases that runtimes alone cannot.
 
+That disc order is an assumption, and a set authored in broadcast order breaks it: one
+season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2, so 16 of
+33 titles came out one episode early. So once the discs are placed, dialogue may reorder
+titles among the episodes they were given — scored on the words that set each title apart
+from the *others* (a monster named in one episode, not a character named in all of them),
+with parts of a multi-part story kept in disc order. It only does so when the moved titles
+fit their new episodes clearly better, says which titles moved and why, and caps the
+result at `weak` so a person reviews it.
+
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
 a whole disc, so the two can never be compared — but every block copied is checked against

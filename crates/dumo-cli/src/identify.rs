@@ -306,14 +306,17 @@ fn identify_job(
 
 /// How much of a title's subtitle track to read, in seconds.
 ///
-/// The opening quarter-hour is ample to tell episodes apart, and stopping there keeps a
-/// whole box set to seconds rather than minutes of ffmpeg time.
-const DIALOGUE_WINDOW_SECS: u32 = 900;
+/// Effectively all of it. Reading only the opening quarter-hour was measured to miss
+/// what identifies an episode: on a season of a children's series, the monster a
+/// synopsis names is introduced after the first act, and the opening minutes were
+/// theme song and banter common to every episode.
+const DIALOGUE_WINDOW_SECS: u32 = 4 * 3600;
 
-/// Tokenised dialogue for one title, or `None` if it has no usable subtitle track.
-fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashSet<String>> {
+/// Dialogue for one title as word counts, or `None` if it has no usable subtitle track.
+fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashMap<String, u32>> {
     let srt = dumo_backends::subtitles::extract_text(path, DIALOGUE_WINDOW_SECS).ok()?;
-    let words = dumo_backends::subtitles::tokenize(&dumo_backends::subtitles::dialogue_text(&srt));
+    let words =
+        dumo_backends::subtitles::count_words(&dumo_backends::subtitles::dialogue_text(&srt));
     // A handful of words is a stray forced-subtitle caption, not dialogue; scoring on it
     // would be worse than admitting we have no signal.
     (words.len() >= 20).then_some(words)
