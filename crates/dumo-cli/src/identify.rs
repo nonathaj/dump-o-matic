@@ -32,6 +32,8 @@ pub struct IdentifyArgs {
     pub accept_inferred: bool,
     /// For an audio CD whose disc ID several MusicBrainz releases share: which one.
     pub release: Option<String>,
+    /// Hand-confirmed `TITLE=S00Enn` pairings for a bonus disc.
+    pub assign: Vec<String>,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -110,6 +112,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
             args.show.as_deref(),
             args.accept_inferred,
             args.release.as_deref(),
+            &args.assign,
         )?;
         println!();
     }
@@ -142,6 +145,7 @@ fn identify_job(
     show: Option<&str>,
     accept_inferred: bool,
     release: Option<&str>,
+    assign: &[String],
 ) -> Result<()> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
@@ -168,6 +172,7 @@ fn identify_job(
             show,
             apply,
             accept_inferred,
+            assign,
         );
     }
     if kind == MediaKind::AudioCd {
@@ -963,6 +968,7 @@ fn analyse_video(
     show_override: Option<&str>,
     apply: bool,
     accept_inferred: bool,
+    assign: &[String],
 ) -> Result<()> {
     use dumo_identify::video::{self, AnalysisParams, TitleInput};
 
@@ -1114,6 +1120,22 @@ fn analyse_video(
         return Ok(());
     }
     dumo_identify::matching::sort_by_title_index(&mut titles);
+
+    // A bonus disc holds specials, in no episode order; matching it against a season's
+    // consecutive run of episodes can only produce confident nonsense.
+    if dumo_identify::specials::is_bonus_label(&label) {
+        println!("  Bonus disc, per the volume label: matching against the series' specials");
+        return identify_bonus_disc(
+            job,
+            &titles,
+            &shows,
+            &client,
+            cfg,
+            apply,
+            accept_inferred,
+            assign,
+        );
+    }
 
     // Judge candidates by how well their episodes actually fit these runtimes, not by
     // TMDB's search ranking. Searching "espn 30 for 30" puts a different, similarly
@@ -1304,6 +1326,180 @@ fn analyse_video(
         "Filed as {}. Run `dump-o-matic migrate` to place them.",
         best.confidence
     );
+    Ok(())
+}
+
+/// Match a bonus disc's titles against the specials (season 0) of the candidate series.
+///
+/// Each candidate's specials are tried and the one matching the most titles wins. Titles
+/// that fit no special stay in the job directory, as extras do.
+fn identify_bonus_disc(
+    job: &Job,
+    titles: &[dumo_identify::matching::DiscTitle],
+    shows: &[dumo_identify::tmdb::TvResult],
+    client: &dumo_identify::tmdb::TmdbClient,
+    cfg: &Config,
+    apply: bool,
+    accept_inferred: bool,
+    assign: &[String],
+) -> Result<()> {
+    const MAX_CANDIDATES: usize = 4;
+    let mut best: Option<(
+        &dumo_identify::tmdb::TvResult,
+        dumo_identify::tmdb::Season,
+        dumo_identify::specials::SpecialsMatch,
+    )> = None;
+    for c in shows.iter().take(MAX_CANDIDATES) {
+        let Ok(specials) = client.season(c.id, 0) else {
+            println!("    {:<34} no specials listed", truncate(&c.name, 34));
+            continue;
+        };
+        let r = dumo_identify::specials::match_specials(titles, &specials);
+        println!(
+            "    {:<34} {} of {} title(s) match one of {} specials",
+            truncate(&c.name, 34),
+            r.matched.len(),
+            titles.len(),
+            specials.episodes.len()
+        );
+        if best.as_ref().map(|(_, _, b)| r.matched.len() > b.matched.len()).unwrap_or(true) {
+            best = Some((c, specials, r));
+        }
+    }
+    let Some((candidate, specials, mut result)) =
+        best.filter(|(_, _, r)| !r.matched.is_empty() || !assign.is_empty())
+    else {
+        println!("  No title matched a special. They stay in the job directory as extras.");
+        return Ok(());
+    };
+
+    // Hand-confirmed pairings replace whatever the dialogue proposed for those titles.
+    let mut by_hand = 0usize;
+    for a in assign {
+        let Some((title_name, code)) = a.split_once('=') else {
+            anyhow::bail!("--assign {a:?}: expected TITLE=S00Enn");
+        };
+        let number = code
+            .trim()
+            .to_ascii_uppercase()
+            .strip_prefix("S00E")
+            .and_then(|n| n.parse::<u32>().ok())
+            .with_context(|| format!("--assign {a:?}: expected a special like S00E14"))?;
+        let Some(title) = titles.iter().find(|t| t.name == title_name.trim()) else {
+            anyhow::bail!("--assign {a:?}: this disc has no title named {title_name:?}");
+        };
+        let Some(episode) = specials.episodes.iter().find(|e| e.number == number) else {
+            anyhow::bail!("--assign {a:?}: {} lists no special {number}", candidate.name);
+        };
+        result.matched.retain(|(m, _)| m.title_name != title.name);
+        result.unmatched.retain(|(name, _)| *name != title.name);
+        if result.matched.iter().any(|(m, _)| m.episode.number == number) {
+            anyhow::bail!("--assign {a:?}: another title is already filed as S00E{number:02}");
+        }
+        let mins = title.duration_secs / 60.0;
+        result.matched.push((
+            dumo_identify::matching::TitleMatch {
+                title_name: title.name.clone(),
+                title_mins: mins,
+                episode: episode.clone(),
+                delta_mins: episode
+                    .runtime_mins
+                    .map(|rt| (mins - f64::from(rt)).abs())
+                    .unwrap_or(f64::NAN),
+            },
+            f64::NAN,
+        ));
+        by_hand += 1;
+    }
+    if by_hand > 0 {
+        result.evidence.insert(
+            0,
+            format!("{by_hand} title(s) assigned by hand with --assign, not by the dialogue match"),
+        );
+    }
+
+    let year = candidate
+        .year()
+        .map(|y| format!(" ({y})"))
+        .unwrap_or_default();
+    println!();
+    println!("  Series: {}{}  [tmdb:{}]", candidate.name, year, candidate.id);
+    for (m, margin) in &result.matched {
+        let how = if margin.is_nan() {
+            "assigned by hand".to_string()
+        } else {
+            format!("fit +{margin:.1}")
+        };
+        println!(
+            "    {:<16} {:>5.0} min  ->  S00E{:02} {:<44} ({how}, {})",
+            m.title_name,
+            m.title_mins,
+            m.episode.number,
+            truncate(&m.episode.name, 44),
+            delta_note(m.delta_mins)
+        );
+    }
+    for (name, closest) in &result.unmatched {
+        match closest {
+            Some((m, x)) => println!(
+                "    {name:<16} {:>5.0} min  ->  not matched; closest S00E{:02} {} only +{x:.1}",
+                m.title_mins,
+                m.episode.number,
+                truncate(&m.episode.name, 36)
+            ),
+            None => println!("    {name:<16}           ->  not matched; no special fits at all"),
+        }
+    }
+    println!(
+        "  Confidence: {}  (inferred — only exact hash matches are filed unattended)",
+        result.confidence
+    );
+    for e in &result.evidence {
+        println!("    - {e}");
+    }
+    println!();
+    println!("  Proposed names:");
+    for (m, _) in &result.matched {
+        println!(
+            "    tv/{}{}/Season 00/{}{} S00E{:02} - {}.mkv",
+            candidate.name,
+            year,
+            candidate.name,
+            year,
+            m.episode.number,
+            sanitise(&m.episode.name)
+        );
+    }
+    println!();
+    if !apply {
+        println!("  Nothing was filed. Re-run with --apply --accept-inferred to file these.");
+        return Ok(());
+    }
+    if !accept_inferred {
+        println!("  --apply given without --accept-inferred, so nothing was filed.");
+        return Ok(());
+    }
+    let matches: Vec<_> = result.matched.iter().map(|(m, _)| m.clone()).collect();
+    let show = format!("{}{}", sanitise(&candidate.name), year);
+    println!("Filing {} title(s) as an inferred match.", matches.len());
+    let failures = file_episodes(
+        &job.id,
+        &matches,
+        &show,
+        &candidate.name,
+        &if by_hand > 0 {
+            format!("inference (dialogue, bonus disc against specials; {by_hand} assigned by hand)")
+        } else {
+            "inference (dialogue, bonus disc against specials)".to_string()
+        },
+        result.confidence,
+        cfg,
+    )?;
+    println!();
+    if failures > 0 {
+        println!("{failures} title(s) were not filed; everything else is in ready/tv.");
+    }
+    println!("Filed as {}. Run `dump-o-matic migrate` to place them.", result.confidence);
     Ok(())
 }
 

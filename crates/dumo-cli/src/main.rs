@@ -224,6 +224,13 @@ enum Command {
         /// release to file it as (its MusicBrainz ID, as listed by identify).
         #[arg(long)]
         release: Option<String>,
+        /// On a bonus disc, file a title as a given special: `B3_t01.mkv=S00E14`.
+        ///
+        /// For a pairing confirmed by hand — by watching it, or reading its captions —
+        /// that the dialogue match could not settle on its own. Repeatable. Still needs
+        /// --apply --accept-inferred to file, and is recorded as assigned by hand.
+        #[arg(long, value_name = "TITLE=S00Enn")]
+        assign: Vec<String>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -432,7 +439,7 @@ fn main() -> Result<()> {
             config_file: config,
         })
         .map(|_| ()),
-        Command::Identify { job, apply, show, set, accept_inferred, release, config } => {
+        Command::Identify { job, apply, show, set, accept_inferred, release, assign, config } => {
             identify::run(identify::IdentifyArgs {
                 job,
                 config_file: config,
@@ -441,6 +448,7 @@ fn main() -> Result<()> {
                 set,
                 accept_inferred,
                 release,
+                assign,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {

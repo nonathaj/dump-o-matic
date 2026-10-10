@@ -112,6 +112,14 @@ with parts of a multi-part story kept in disc order. It only does so when the mo
 fit their new episodes clearly better, says which titles moved and why, and caps the
 result at `weak` so a person reviews it.
 
+A disc whose volume label says it is a bonus disc (`BONUS`, `EXTRAS`, `SPECIALS`, …) is
+matched against the series' specials (TMDB season 0) instead, one title at a time and in
+any order, since bonus discs follow no episode order. Only specials with a synopsis are
+candidates, and a title is proposed only when its dialogue fits one special clearly
+better than any other whose runtime is plausible; the rest are listed with their closest
+candidate and stay in the job directory. A pairing you have confirmed yourself can be
+filed with `--assign B3_t01.mkv=S00E14`, and is recorded as assigned by hand.
+
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
 a whole disc, so the two can never be compared — but every block copied is checked against

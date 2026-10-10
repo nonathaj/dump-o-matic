@@ -148,7 +148,11 @@ impl Default for ScoringParams {
 /// ever *adds* matches, so on other languages it degrades to plain comparison rather
 /// than misbehaving.
 pub fn stem(word: &str) -> String {
-    let mut w = word.to_string();
+    // A possessive is the same word: a synopsis's "Zedd's" must meet the dialogue's
+    // "Zedd". Left on, the suffix strip below turned it into "zedd'", which matched
+    // nothing at all.
+    let base = word.strip_suffix("'s").unwrap_or(word).trim_end_matches('\'');
+    let mut w = base.to_string();
     for suffix in ["ing", "ed", "es", "s"] {
         if w.len() > suffix.len() + 3 && w.ends_with(suffix) {
             w.truncate(w.len() - suffix.len());
@@ -378,6 +382,144 @@ pub fn confidence_from_with(verdicts: &[TitleVerdict], params: &ScoringParams) -
     }
 }
 
+/// Least-cost one-to-one assignment of rows to columns of a square matrix.
+///
+/// The Hungarian algorithm, O(n^3) — a season's 50 titles are nothing. Infinite costs
+/// are honoured as "never", provided some finite assignment exists.
+pub fn assign_min_cost(cost: &[Vec<f64>]) -> Vec<usize> {
+    const NEVER: f64 = 1e12;
+    let n = cost.len();
+    let c = |i: usize, j: usize| {
+        let v = cost[i][j];
+        if v.is_finite() {
+            v
+        } else {
+            NEVER
+        }
+    };
+    // 1-indexed potentials, with column 0 a sentinel, as in the textbook formulation.
+    let mut u = vec![0.0; n + 1];
+    let mut v = vec![0.0; n + 1];
+    let mut row_of = vec![0usize; n + 1];
+    let mut way = vec![0usize; n + 1];
+    for i in 1..=n {
+        row_of[0] = i;
+        let mut j0 = 0usize;
+        let mut min_v = vec![f64::INFINITY; n + 1];
+        let mut used = vec![false; n + 1];
+        loop {
+            used[j0] = true;
+            let i0 = row_of[j0];
+            let mut delta = f64::INFINITY;
+            let mut j1 = 0usize;
+            for j in 1..=n {
+                if used[j] {
+                    continue;
+                }
+                let reduced = c(i0 - 1, j - 1) - u[i0] - v[j];
+                if reduced < min_v[j] {
+                    min_v[j] = reduced;
+                    way[j] = j0;
+                }
+                if min_v[j] < delta {
+                    delta = min_v[j];
+                    j1 = j;
+                }
+            }
+            for j in 0..=n {
+                if used[j] {
+                    u[row_of[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    min_v[j] -= delta;
+                }
+            }
+            j0 = j1;
+            if row_of[j0] == 0 {
+                break;
+            }
+        }
+        loop {
+            let j1 = way[j0];
+            row_of[j0] = row_of[j1];
+            j0 = j1;
+            if j0 == 0 {
+                break;
+            }
+        }
+    }
+    let mut out = vec![0usize; n];
+    for j in 1..=n {
+        out[row_of[j] - 1] = j - 1;
+    }
+    out
+}
+
+/// How well each title's dialogue fits each reference, as a z-score per title.
+///
+/// Inputs are stemmed: `dialogue` as word counts per title, `references` as the word
+/// set of each candidate's name and synopsis. A word is weighed by how rare it is among
+/// the references *and* among the titles' dialogue, so a character every title names
+/// counts for nothing while a monster one title names counts for a great deal; and by
+/// how often the title says it, logarithmically. Each title's row is then normalised,
+/// so `z[t][e]` reads as "how many standard deviations better than its other
+/// candidates does title `t` fit reference `e`".
+pub fn distinctive_fit(
+    dialogue: &[std::collections::HashMap<String, u32>],
+    references: &[HashSet<String>],
+) -> Vec<Vec<f64>> {
+    let idf = |documents: usize, containing: usize| {
+        ((documents as f64 + 1.0) / (containing as f64 + 1.0)).ln().max(0.0)
+    };
+    let mut ref_df: std::collections::HashMap<&str, usize> = Default::default();
+    for r in references {
+        for w in r {
+            *ref_df.entry(w).or_insert(0) += 1;
+        }
+    }
+    let mut dlg_df: std::collections::HashMap<&str, usize> = Default::default();
+    for d in dialogue {
+        for w in d.keys() {
+            *dlg_df.entry(w).or_insert(0) += 1;
+        }
+    }
+    let (n_refs, n_titles) = (references.len(), dialogue.len());
+
+    let mut z = Vec::with_capacity(n_titles);
+    for d in dialogue {
+        let raw: Vec<f64> = references
+            .iter()
+            .map(|r| {
+                let mut total = 0.0;
+                let mut hit = 0.0;
+                for w in r {
+                    let rw = idf(n_refs, ref_df[w.as_str()]);
+                    total += rw;
+                    if let Some(&count) = d.get(w) {
+                        hit += rw
+                            * idf(n_titles, dlg_df[w.as_str()])
+                            * (1.0 + f64::from(count)).ln();
+                    }
+                }
+                if total > 0.0 {
+                    hit / total
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let n = raw.len().max(1) as f64;
+        let mean = raw.iter().sum::<f64>() / n;
+        let sd = (raw.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+        z.push(
+            raw.iter()
+                .map(|x| if sd > 0.0 { (x - mean) / sd } else { 0.0 })
+                .collect(),
+        );
+    }
+    z
+}
+
 pub fn assign_unique(scores: &[(usize, u32, f64)], n_titles: usize) -> Vec<Option<(u32, f64)>> {
     let mut ranked = scores.to_vec();
     ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
@@ -415,6 +557,12 @@ mod tests {
 
     fn words(s: &str) -> HashSet<String> {
         s.split_whitespace().map(|w| w.to_lowercase()).collect()
+    }
+
+    #[test]
+    fn a_possessive_stems_to_its_word() {
+        assert_eq!(stem("zedd's"), stem("zedd"));
+        assert_eq!(stem("rangers'"), stem("rangers"));
     }
 
     #[test]

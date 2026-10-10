@@ -70,6 +70,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         // Likewise never chosen for you: an audio disc ID shared by several releases
         // stops here until a person picks one.
         release: None,
+        assign: Vec::new(),
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {

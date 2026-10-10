@@ -15,6 +15,7 @@ pub mod musicbrainz;
 pub mod platform;
 pub mod playall;
 pub mod signals;
+pub mod specials;
 pub mod tmdb;
 pub mod video;
 

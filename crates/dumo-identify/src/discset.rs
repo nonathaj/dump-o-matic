@@ -405,79 +405,6 @@ struct Reorder {
     moves: Vec<(usize, f64, f64)>,
 }
 
-/// Least-cost one-to-one assignment of rows to columns of a square matrix.
-///
-/// The Hungarian algorithm, O(n^3) — a season's 50 titles are nothing. Infinite costs
-/// are honoured as "never", provided some finite assignment exists.
-fn assign_min_cost(cost: &[Vec<f64>]) -> Vec<usize> {
-    const NEVER: f64 = 1e12;
-    let n = cost.len();
-    let c = |i: usize, j: usize| {
-        let v = cost[i][j];
-        if v.is_finite() {
-            v
-        } else {
-            NEVER
-        }
-    };
-    // 1-indexed potentials, with column 0 a sentinel, as in the textbook formulation.
-    let mut u = vec![0.0; n + 1];
-    let mut v = vec![0.0; n + 1];
-    let mut row_of = vec![0usize; n + 1];
-    let mut way = vec![0usize; n + 1];
-    for i in 1..=n {
-        row_of[0] = i;
-        let mut j0 = 0usize;
-        let mut min_v = vec![f64::INFINITY; n + 1];
-        let mut used = vec![false; n + 1];
-        loop {
-            used[j0] = true;
-            let i0 = row_of[j0];
-            let mut delta = f64::INFINITY;
-            let mut j1 = 0usize;
-            for j in 1..=n {
-                if used[j] {
-                    continue;
-                }
-                let reduced = c(i0 - 1, j - 1) - u[i0] - v[j];
-                if reduced < min_v[j] {
-                    min_v[j] = reduced;
-                    way[j] = j0;
-                }
-                if min_v[j] < delta {
-                    delta = min_v[j];
-                    j1 = j;
-                }
-            }
-            for j in 0..=n {
-                if used[j] {
-                    u[row_of[j]] += delta;
-                    v[j] -= delta;
-                } else {
-                    min_v[j] -= delta;
-                }
-            }
-            j0 = j1;
-            if row_of[j0] == 0 {
-                break;
-            }
-        }
-        loop {
-            let j1 = way[j0];
-            row_of[j0] = row_of[j1];
-            j0 = j1;
-            if j0 == 0 {
-                break;
-            }
-        }
-    }
-    let mut out = vec![0usize; n];
-    for j in 1..=n {
-        out[row_of[j] - 1] = j - 1;
-    }
-    out
-}
-
 /// The story an episode is one part of, if its name numbers the part.
 ///
 /// Both conventions TMDB uses: a trailing "Ninja Quest (2)", and a "Green with Evil
@@ -536,52 +463,7 @@ fn reorder_by_dialogue(
         .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
         .collect();
 
-    // Inverse document frequency on both sides: among the synopses, and among the titles.
-    let idf = |documents: usize, containing: usize| {
-        ((documents as f64 + 1.0) / (containing as f64 + 1.0)).ln().max(0.0)
-    };
-    let mut ref_df: std::collections::HashMap<&str, usize> = Default::default();
-    for r in &references {
-        for w in r {
-            *ref_df.entry(w).or_insert(0) += 1;
-        }
-    }
-    let mut dlg_df: std::collections::HashMap<&str, usize> = Default::default();
-    for d in &dialogue {
-        for w in d.keys() {
-            *dlg_df.entry(w).or_insert(0) += 1;
-        }
-    }
-
-    let mut z = Vec::with_capacity(n);
-    for d in &dialogue {
-        let raw: Vec<f64> = references
-            .iter()
-            .map(|r| {
-                let mut total = 0.0;
-                let mut hit = 0.0;
-                for w in r {
-                    let rw = idf(n, ref_df[w.as_str()]);
-                    total += rw;
-                    if let Some(&count) = d.get(w) {
-                        hit += rw * idf(n, dlg_df[w.as_str()]) * (1.0 + f64::from(count)).ln();
-                    }
-                }
-                if total > 0.0 {
-                    hit / total
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let mean = raw.iter().sum::<f64>() / n as f64;
-        let sd = (raw.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
-        z.push(
-            raw.iter()
-                .map(|x| if sd > 0.0 { (x - mean) / sd } else { 0.0 })
-                .collect::<Vec<f64>>(),
-        );
-    }
+    let z = signals::distinctive_fit(&dialogue, &references);
 
     let cost: Vec<Vec<f64>> = (0..n)
         .map(|t| {
@@ -596,7 +478,7 @@ fn reorder_by_dialogue(
                 .collect()
         })
         .collect();
-    let mut order = assign_min_cost(&cost);
+    let mut order = signals::assign_min_cost(&cost);
     if (0..n).any(|t| implausible(t, order[t])) {
         return None;
     }
@@ -1595,9 +1477,9 @@ mod grouping_tests {
         // Greedy takes (0,0)=1 and is then forced into (1,1)=10, total 11; the optimum
         // is (0,1)+(1,0) = 2+2 = 4.
         let cost = vec![vec![1.0, 2.0], vec![2.0, 10.0]];
-        assert_eq!(assign_min_cost(&cost), vec![1, 0]);
+        assert_eq!(signals::assign_min_cost(&cost), vec![1, 0]);
         let never = vec![vec![f64::INFINITY, 5.0], vec![1.0, 1.0]];
-        assert_eq!(assign_min_cost(&never), vec![1, 0]);
+        assert_eq!(signals::assign_min_cost(&never), vec![1, 0]);
     }
 
     #[test]
