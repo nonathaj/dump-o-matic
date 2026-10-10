@@ -44,29 +44,67 @@ pub struct SpecialsMatch {
 /// Match `titles` one-to-one against the episodes of `specials`.
 pub fn match_specials(titles: &[DiscTitle], specials: &Season) -> SpecialsMatch {
     let params = ScoringParams::default();
-    // Only specials with a synopsis are candidates. One with just a name — TMDB lists
-    // placeholders such as "Episode 41" — gives dialogue a word or two to hit, and
-    // scoring by the share of a reference matched makes a single chance hit on a
-    // two-word reference outrank a real synopsis. Measured: "The Monster Wrangler"
-    // beat "Lord Zedd's Monster Heads" for the Halloween special on "monster" alone.
+    // Every special with a real name is a candidate; TMDB's placeholders ("Episode
+    // 41") carry nothing to match and are left out. A special without a synopsis is
+    // scored on its name alone — see below.
     let episodes: Vec<&crate::tmdb::Episode> = specials
         .episodes
         .iter()
-        .filter(|e| e.overview.as_deref().map(|o| !o.trim().is_empty()).unwrap_or(false))
+        .filter(|e| !is_placeholder_name(&e.name))
         .collect();
     let unlisted = specials.episodes.len() - episodes.len();
     let (n, m) = (titles.len(), episodes.len());
 
     let with_dialogue: Vec<usize> = (0..n).filter(|&t| titles[t].dialogue.is_some()).collect();
-    let references: Vec<HashSet<String>> = episodes
+    // Two scores, added. The synopsis, among only the specials that have one: scoring
+    // by the share of a reference matched, a bare name of three words is matched in
+    // full by one chance hit and outranks every real synopsis — "The Monster Wrangler"
+    // beat "Lord Zedd's Monster Heads" on "monster" alone. And the name, among all of
+    // them: specials come in near-identical siblings — "The Green Ranger Kata" and "The
+    // White Ranger Kata" — whose synopses differ in what they happen to describe, while
+    // the word that tells them apart is in the name. Measured: the White Ranger video
+    // says "white" 30 times and "green" never, yet matched the Green one by 2.4 standard
+    // deviations on synopsis alone, because only that synopsis listed the moves.
+    let with_synopsis: Vec<usize> = (0..m)
+        .filter(|&e| {
+            let o = episodes[e].overview.as_deref().unwrap_or("");
+            !o.trim().is_empty()
+        })
+        .collect();
+    let synopses: Vec<HashSet<String>> = with_synopsis
         .iter()
-        .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
+        // The synopsis alone: the name is scored separately below, and counting it in
+        // both would give a special with a synopsis two chances at its name's words.
+        .map(|&e| {
+            let synopsis = episodes[e].overview.as_deref().unwrap_or("");
+            signals::stem_all(&dumo_core::text::tokenize(synopsis))
+        })
+        .collect();
+    let names: Vec<HashSet<String>> = episodes
+        .iter()
+        .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.name)))
         .collect();
     let dialogue: Vec<_> = with_dialogue
         .iter()
         .map(|&t| signals::stem_counts(titles[t].dialogue.as_ref().expect("filtered")))
         .collect();
-    let fit_rows = signals::distinctive_fit(&dialogue, &references);
+    let by_synopsis = signals::distinctive_fit(&dialogue, &synopses);
+    let by_name = signals::distinctive_fit(&dialogue, &names);
+    let fit_rows: Vec<Vec<f64>> = (0..dialogue.len())
+        .map(|row| {
+            (0..m)
+                .map(|e| {
+                    // No synopsis scores as an average one: no evidence either way.
+                    let synopsis = with_synopsis
+                        .iter()
+                        .position(|&s| s == e)
+                        .map(|i| by_synopsis[row][i])
+                        .unwrap_or(0.0);
+                    synopsis + by_name[row][e]
+                })
+                .collect()
+        })
+        .collect();
     let fit = |t: usize, e: usize| -> Option<f64> {
         with_dialogue
             .iter()
@@ -159,7 +197,7 @@ pub fn match_specials(titles: &[DiscTitle], specials: &Season) -> SpecialsMatch 
     ];
     if unlisted > 0 {
         evidence.push(format!(
-            "{unlisted} special(s) have no synopsis on TMDB and could not be considered"
+            "{unlisted} special(s) are unnamed placeholders on TMDB and could not be considered"
         ));
     }
     if with_dialogue.len() < n {
@@ -176,6 +214,13 @@ pub fn match_specials(titles: &[DiscTitle], specials: &Season) -> SpecialsMatch 
         confidence: Confidence::Weak,
         evidence,
     }
+}
+
+/// Whether an episode name is TMDB's placeholder for an unnamed one: "Episode 41".
+fn is_placeholder_name(name: &str) -> bool {
+    name.strip_prefix("Episode ")
+        .map(|n| !n.is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
 }
 
 /// Whether a volume label marks a disc of extras rather than episodes.
@@ -271,6 +316,28 @@ mod tests {
         t.dialogue = None;
         let r = match_specials(&[t], &specials());
         assert!(r.matched.is_empty());
+    }
+
+    #[test]
+    fn placeholder_names_are_recognised() {
+        assert!(is_placeholder_name("Episode 41"));
+        assert!(!is_placeholder_name("Episode 41: The Return"));
+        assert!(!is_placeholder_name("Fan Club Video"));
+    }
+
+    #[test]
+    fn a_special_without_a_synopsis_is_matched_on_its_name() {
+        let titles = vec![
+            title("t00", 30.0, "fan club video members welcome"),
+            title("t01", 25.0, "zedd halloween party monster"),
+        ];
+        let r = match_specials(&titles, &specials());
+        let got: Vec<(&str, u32)> = r
+            .matched
+            .iter()
+            .map(|(m, _)| (m.title_name.as_str(), m.episode.number))
+            .collect();
+        assert_eq!(got, vec![("t00", 1), ("t01", 4)]);
     }
 
     #[test]

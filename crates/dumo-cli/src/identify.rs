@@ -1099,8 +1099,16 @@ fn analyse_video(
     // runtime alone routinely cannot separate one alignment from twenty others; the
     // words spoken can. This path used to pass None and score on runtime only, which
     // left the strongest available signal unread on a single disc.
+    // On a bonus disc every title is a candidate: the content-length threshold that
+    // separates episodes from extras would discard the short specials such a disc
+    // exists to hold — a 14 minute fan retrospective is a listed special.
+    let bonus = dumo_identify::specials::is_bonus_label(&label);
     let mut titles: Vec<dumo_identify::matching::DiscTitle> = Vec::new();
-    for t in analysis.main_titles() {
+    for t in analysis
+        .titles
+        .iter()
+        .filter(|t| bonus || t.role != dumo_identify::video::TitleRole::Extra)
+    {
         let path = job_dir.join(&t.name);
         print!("  reading dialogue from {} ... ", t.name);
         std::io::stdout().flush().ok();
@@ -1123,7 +1131,7 @@ fn analyse_video(
 
     // A bonus disc holds specials, in no episode order; matching it against a season's
     // consecutive run of episodes can only produce confident nonsense.
-    if dumo_identify::specials::is_bonus_label(&label) {
+    if bonus {
         println!("  Bonus disc, per the volume label: matching against the series' specials");
         return identify_bonus_disc(
             job,
