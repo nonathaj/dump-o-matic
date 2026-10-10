@@ -120,6 +120,16 @@ better than any other whose runtime is plausible; the rest are listed with their
 candidate and stay in the job directory. A pairing you have confirmed yourself can be
 filed with `--assign B3_t01.mkv=S00E14`, and is recorded as assigned by hand.
 
+With OpenSubtitles credentials configured (`api.opensubtitles_api_key`,
+`api.opensubtitles_username`, `api.opensubtitles_password`, or the matching
+`DUMO_OPENSUBTITLES_*` variables), every proposed episode is then checked against a
+reference subtitle of that episode. A synopsis says what an episode is about; a subtitle
+says what is spoken in it, so the comparison is of three-word phrases. On one season's
+captions, different episodes shared at most 5% of their phrases, and a title is confirmed
+only at 25% or more and three times any other episode checked. A title whose dialogue
+belongs to another episode stops the filing. Downloads are metered per day, so each
+reference is cached under `<staging>/cache/subtitles` and fetched only once.
+
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
 a whole disc, so the two can never be compared — but every block copied is checked against

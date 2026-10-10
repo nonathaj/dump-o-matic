@@ -15,6 +15,7 @@ mod devices;
 mod identify;
 mod migrate;
 mod music;
+mod refsubs;
 mod repack;
 mod rip;
 mod run;

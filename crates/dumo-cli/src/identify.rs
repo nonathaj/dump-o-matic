@@ -1302,6 +1302,11 @@ fn analyse_video(
         );
     }
     println!();
+    let proposals: Vec<_> = best.matches.iter().map(|m| (job.id.as_str(), m)).collect();
+    if !crate::refsubs::permits_filing(crate::refsubs::check(cfg, candidate.id, &proposals)?) {
+        return Ok(());
+    }
+    println!();
     if !apply {
         println!("  Nothing was filed. Re-run with --apply --accept-inferred to file these.");
         return Ok(());
@@ -1477,6 +1482,11 @@ fn identify_bonus_disc(
             m.episode.number,
             sanitise(&m.episode.name)
         );
+    }
+    println!();
+    let proposals: Vec<_> = result.matched.iter().map(|(m, _)| (job.id.as_str(), m)).collect();
+    if !crate::refsubs::permits_filing(crate::refsubs::check(cfg, candidate.id, &proposals)?) {
+        return Ok(());
     }
     println!();
     if !apply {
@@ -1819,6 +1829,15 @@ fn solve_one_set(
         }
         println!();
     }
+    let proposals: Vec<_> = solution
+        .placements
+        .iter()
+        .flat_map(|p| p.matches.iter().map(move |m| (p.job_id.as_str(), m)))
+        .collect();
+    if !crate::refsubs::permits_filing(crate::refsubs::check(cfg, series.id, &proposals)?) {
+        return Ok(());
+    }
+    println!();
     if !accept_inferred {
         println!("Review the above, then re-run with --apply --accept-inferred to file it.");
         return Ok(());

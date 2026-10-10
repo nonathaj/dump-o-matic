@@ -156,6 +156,15 @@ pub struct ApiConfig {
     pub igdb_client_id: Option<String>,
     #[serde(default)]
     pub igdb_client_secret: Option<String>,
+    /// OpenSubtitles consumer API key, for fetching reference subtitles to check video
+    /// identification against. Searching needs only this; downloading also needs an
+    /// account, below.
+    #[serde(default)]
+    pub opensubtitles_api_key: Option<String>,
+    #[serde(default)]
+    pub opensubtitles_username: Option<String>,
+    #[serde(default)]
+    pub opensubtitles_password: Option<String>,
 }
 
 impl ApiConfig {
@@ -172,6 +181,15 @@ impl ApiConfig {
         }
         if let Some(v) = env("DUMO_TVDB_API_KEY") {
             self.tvdb_api_key = Some(v);
+        }
+        if let Some(v) = env("DUMO_OPENSUBTITLES_API_KEY") {
+            self.opensubtitles_api_key = Some(v);
+        }
+        if let Some(v) = env("DUMO_OPENSUBTITLES_USERNAME") {
+            self.opensubtitles_username = Some(v);
+        }
+        if let Some(v) = env("DUMO_OPENSUBTITLES_PASSWORD") {
+            self.opensubtitles_password = Some(v);
         }
         if let Some(v) = env("DUMO_IGDB_CLIENT_ID") {
             self.igdb_client_id = Some(v);
@@ -210,6 +228,12 @@ impl ApiConfig {
         }
         if self.igdb_client_id.is_some() && self.igdb_client_secret.is_some() {
             v.push("igdb");
+        }
+        if self.opensubtitles_api_key.is_some()
+            && self.opensubtitles_username.is_some()
+            && self.opensubtitles_password.is_some()
+        {
+            v.push("opensubtitles");
         }
         v
     }
@@ -397,6 +421,8 @@ impl Config {
         redact(&mut c.api.tvdb_api_key);
         redact(&mut c.api.igdb_client_id);
         redact(&mut c.api.igdb_client_secret);
+        redact(&mut c.api.opensubtitles_api_key);
+        redact(&mut c.api.opensubtitles_password);
         c
     }
 
@@ -712,9 +738,13 @@ mod tests {
     fn secrets_are_redacted_not_echoed() {
         let mut c = sample();
         c.api.tmdb_api_key = Some("super-secret-value".into());
+        c.api.opensubtitles_api_key = Some("os-key-value".into());
+        c.api.opensubtitles_password = Some("os-password-value".into());
         let r = c.redacted();
         let rendered = toml::to_string(&r).unwrap();
         assert!(!rendered.contains("super-secret-value"));
+        assert!(!rendered.contains("os-key-value"));
+        assert!(!rendered.contains("os-password-value"));
         assert!(rendered.contains("<set>"));
         // The real config is untouched.
         assert_eq!(c.api.tmdb_api_key.as_deref(), Some("super-secret-value"));

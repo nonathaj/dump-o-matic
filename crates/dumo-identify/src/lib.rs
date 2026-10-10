@@ -12,11 +12,13 @@ pub mod discset;
 pub mod http;
 pub mod matching;
 pub mod musicbrainz;
+pub mod opensubtitles;
 pub mod platform;
 pub mod playall;
 pub mod signals;
 pub mod specials;
 pub mod tmdb;
+pub mod transcript;
 pub mod video;
 
 pub use datfile::{Datfile, DatfileSet, Game, Rom};

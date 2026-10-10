@@ -48,6 +48,31 @@ pub fn get(url: &str, headers: &[(&str, String)], timeout_secs: u32) -> Result<S
 
 /// Perform a GET and return the raw response body, for binary formats.
 pub fn get_bytes(url: &str, headers: &[(&str, String)], timeout_secs: u32) -> Result<Vec<u8>> {
+    request(url, headers, None, timeout_secs)
+}
+
+/// Perform a POST of a JSON body and return the response body as text.
+///
+/// The body travels over stdin with the rest of the request, so a password in it is no
+/// more visible to other users than a header is.
+pub fn post_json(
+    url: &str,
+    headers: &[(&str, String)],
+    body: &str,
+    timeout_secs: u32,
+) -> Result<String> {
+    let mut headers = headers.to_vec();
+    headers.push(("Content-Type", "application/json".to_string()));
+    request(url, &headers, Some(body), timeout_secs)
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+}
+
+fn request(
+    url: &str,
+    headers: &[(&str, String)],
+    body: Option<&str>,
+    timeout_secs: u32,
+) -> Result<Vec<u8>> {
     let mut child = Command::new(TOOL)
         // Read every other option from stdin. Only this flag is visible in `ps`.
         .arg("--config")
@@ -71,13 +96,22 @@ pub fn get_bytes(url: &str, headers: &[(&str, String)], timeout_secs: u32) -> Re
         for (k, v) in headers {
             cfg.push_str(&format!("header = {}\n", quote(&format!("{k}: {v}"))));
         }
+        if let Some(body) = body {
+            // `data-binary` sends the body exactly as given; plain `data` would strip
+            // newlines. It also makes curl POST.
+            cfg.push_str(&format!("data-binary = {}\n", quote(body)));
+        }
         cfg.push_str("silent\n");
         cfg.push_str("show-error\n");
         // Report the HTTP status rather than printing an error page as if it were data.
         cfg.push_str("write-out = \"\\n%{http_code}\"\n");
         cfg.push_str(&format!("max-time = {timeout_secs}\n"));
         cfg.push_str("location\n");
-        cfg.push_str("retry = 2\n");
+        // A POST is not retried: a download request that reached the server once has
+        // already been counted against the day's quota.
+        if body.is_none() {
+            cfg.push_str("retry = 2\n");
+        }
         stdin.write_all(cfg.as_bytes())?;
     }
 
