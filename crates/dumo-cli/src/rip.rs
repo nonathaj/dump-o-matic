@@ -180,11 +180,11 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
     }
 
     // --- Build the job ---
-    let label = probe
-        .content
-        .title_guess
-        .clone()
-        .or_else(|| scan.disc_name.clone());
+    // A Blu-ray usually has no volume label the probe can read, but MakeMKV names the
+    // disc from its own metadata. Recorded as the probe's title guess so identify has
+    // something to search for, with evidence saying where it came from.
+    let probe = with_disc_name(probe, scan.disc_name.as_deref());
+    let label = probe.content.title_guess.clone();
     let job_id = job::new_job_id(label.as_deref());
     let job_dir = cfg.staging.job_dir(&job_id);
     let raw_dir = cfg.staging.job_raw_dir(&job_id);
@@ -698,6 +698,24 @@ pub fn preflight_space(cfg: &Config, required_content: u64, assume_yes: bool) ->
     }
 }
 
+/// Fill in a missing title guess from the disc name MakeMKV reported.
+///
+/// Only when the probe found none: a volume label the probe read is the disc's own
+/// statement and is kept. A blank name is no name.
+fn with_disc_name(mut probe: dumo_core::DiscProbe, disc_name: Option<&str>) -> dumo_core::DiscProbe {
+    if probe.content.title_guess.is_some() {
+        return probe;
+    }
+    if let Some(name) = disc_name.map(str::trim).filter(|n| !n.is_empty()) {
+        probe.content.title_guess = Some(name.to_string());
+        probe
+            .content
+            .evidence
+            .push(format!("no volume label; MakeMKV's disc name {name:?} used as title guess"));
+    }
+    probe
+}
+
 fn relative_to(path: &Path, base: &Path) -> String {
     path.strip_prefix(base)
         .unwrap_or(path)
@@ -748,4 +766,46 @@ pub fn confirm(prompt: &str) -> Result<bool> {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     Ok(matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dumo_core::{Confidence, ContentHint, DiscProbe};
+
+    fn probe(title: Option<&str>) -> DiscProbe {
+        let mut content = ContentHint::new(MediaKind::BluRayVideo, Confidence::Strong);
+        content.title_guess = title.map(str::to_string);
+        DiscProbe {
+            device: "/dev/sr0".into(),
+            profile: None,
+            content,
+            volume: None,
+            toc: None,
+            game_serial: None,
+            capacity_bytes: None,
+            root_entries: Vec::new(),
+            probe_millis: 0,
+        }
+    }
+
+    #[test]
+    fn disc_name_fills_a_missing_title_guess() {
+        let p = with_disc_name(probe(None), Some("The Substance"));
+        assert_eq!(p.content.title_guess.as_deref(), Some("The Substance"));
+        assert!(p.content.evidence.iter().any(|e| e.contains("MakeMKV")));
+    }
+
+    #[test]
+    fn a_volume_label_wins_over_the_disc_name() {
+        let p = with_disc_name(probe(Some("THE_THIN_RED_LINE")), Some("Something Else"));
+        assert_eq!(p.content.title_guess.as_deref(), Some("THE_THIN_RED_LINE"));
+        assert!(p.content.evidence.is_empty());
+    }
+
+    #[test]
+    fn a_blank_disc_name_is_no_name() {
+        let p = with_disc_name(probe(None), Some("  "));
+        assert_eq!(p.content.title_guess, None);
+    }
 }
