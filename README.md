@@ -130,6 +130,12 @@ only at 25% or more and three times any other episode checked. A title whose dia
 belongs to another episode stops the filing. Downloads are metered per day, so each
 reference is cached under `<staging>/cache/subtitles` and fetched only once.
 
+A disc with one feature-length title is matched against TMDB's films instead: the name
+finds the candidates and the runtime checks them. It is `strong` only when the top search
+result is the one candidate whose runtime fits; two same-named films that both fit stay
+`weak` until `--show "Title (1986)"` names the year. It is filed as
+`movies/Title (Year).mkv`.
+
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
 a whole disc, so the two can never be compared — but every block copied is checked against

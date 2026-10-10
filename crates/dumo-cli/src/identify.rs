@@ -1057,6 +1057,10 @@ fn analyse_video(
         }
     };
 
+    if matches!(analysis.category, Some(video::MediaCategory::Movies)) {
+        return identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred);
+    }
+
     println!();
     println!("  Searching TMDB for {query:?} ...");
     let shows = client.search_tv(&query).context("searching TMDB")?;
@@ -1339,6 +1343,134 @@ fn analyse_video(
         "Filed as {}. Run `dump-o-matic migrate` to place them.",
         best.confidence
     );
+    Ok(())
+}
+
+/// Name a feature film disc: its longest main title, matched to a TMDB movie by name
+/// and checked by runtime.
+fn identify_movie(
+    job: &Job,
+    analysis: &dumo_identify::DiscAnalysis,
+    client: &dumo_identify::tmdb::TmdbClient,
+    query: &str,
+    cfg: &Config,
+    apply: bool,
+    accept_inferred: bool,
+) -> Result<()> {
+    use dumo_identify::movie;
+
+    let Some(feature) = analysis
+        .main_titles()
+        .max_by(|a, b| a.duration_secs.total_cmp(&b.duration_secs))
+    else {
+        println!("  No main title to match.");
+        return Ok(());
+    };
+    let title_mins = feature.duration_secs / 60.0;
+    let (name, year) = movie::split_year(query);
+
+    println!();
+    println!("  Searching TMDB movies for {name:?} ...");
+    let found = client.search_movie(&name).context("searching TMDB")?;
+    // Search results carry no runtime; the details do. Fetched for the few that are
+    // weighed, falling back to the search result if a lookup fails.
+    let candidates: Vec<_> = found
+        .iter()
+        .filter(|m| year.map(|y| m.year() == Some(y)).unwrap_or(true))
+        .take(movie::CANDIDATES)
+        .map(|m| client.movie(m.id).unwrap_or_else(|_| m.clone()))
+        .collect();
+    for c in &candidates {
+        println!(
+            "    {:<44} {:>6}  [tmdb:{}]",
+            truncate(
+                &format!(
+                    "{} ({})",
+                    c.title,
+                    c.year().map(|y| y.to_string()).unwrap_or_else(|| "?".into())
+                ),
+                44
+            ),
+            c.runtime_mins
+                .map(|r| format!("{r} min"))
+                .unwrap_or_else(|| "? min".into()),
+            c.id
+        );
+    }
+    let Some(best) = movie::match_movie(title_mins, &candidates, year) else {
+        println!("  No film matched. Try --show \"<title> (<year>)\".");
+        return Ok(());
+    };
+
+    let film = &best.movie;
+    let year_part = film.year().map(|y| format!(" ({y})")).unwrap_or_default();
+    let ext = std::path::Path::new(&feature.name)
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mkv".into());
+    let file_name = format!("{}{year_part}.{ext}", sanitise(&film.title));
+    let rel = format!("ready/movies/{file_name}");
+
+    println!();
+    println!(
+        "  Film: {}{}  [tmdb:{}]   {:.0} min on the disc{}",
+        film.title,
+        year_part,
+        film.id,
+        title_mins,
+        best.delta_mins
+            .map(|d| format!(", {d:+.0} min against the listing"))
+            .unwrap_or_default()
+    );
+    println!(
+        "  Confidence: {}  (inferred — only exact hash matches are filed unattended)",
+        best.confidence
+    );
+    for e in &best.evidence {
+        println!("    - {e}");
+    }
+    println!();
+    println!("  Proposed name:");
+    println!("    movies/{file_name}");
+    let skipped: Vec<_> = analysis
+        .titles
+        .iter()
+        .filter(|t| t.name != feature.name)
+        .map(|t| t.name.trim_start_matches("raw/"))
+        .collect();
+    if !skipped.is_empty() {
+        println!("  Left in the job directory: {}", skipped.join(", "));
+    }
+    println!();
+    if !apply {
+        println!("  Nothing was filed. Re-run with --apply --accept-inferred to file it.");
+        return Ok(());
+    }
+    if !accept_inferred {
+        println!("  --apply given without --accept-inferred, so nothing was filed.");
+        return Ok(());
+    }
+
+    let title_name = feature.name.trim_start_matches("raw/").to_string();
+    let failures = file_titles(
+        &job.id,
+        &[(title_name, rel)],
+        &format!("{}{year_part}", film.title),
+        "movies",
+        "inference (title + runtime, movie)",
+        best.confidence,
+        &format!("tmdb movie {}", film.id),
+        cfg,
+    )?;
+    println!();
+    if failures > 0 {
+        println!("The film was not filed.");
+    } else {
+        println!(
+            "Filed as {}. Run `dump-o-matic migrate` to place it.",
+            best.confidence
+        );
+    }
     Ok(())
 }
 
@@ -1871,33 +2003,71 @@ fn file_episodes(
     cfg: &Config,
 ) -> Result<usize> {
     let job_dir = cfg.staging.job_dir(job_id);
+    let items: Vec<(String, String)> = matches
+        .iter()
+        .map(|m| {
+            let ext = title_source(&job_dir, &m.title_name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_else(|| "mkv".into());
+            let name = format!(
+                "{show} S{:02}E{:02} - {}.{ext}",
+                m.episode.season,
+                m.episode.number,
+                sanitise(&m.episode.name)
+            );
+            let rel = format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season);
+            (m.title_name.clone(), rel)
+        })
+        .collect();
+    file_titles(
+        job_id,
+        &items,
+        show,
+        "tv",
+        matched_on,
+        confidence,
+        &format!("tmdb series {series}"),
+        cfg,
+    )
+}
+
+/// Where a ripped title lives: under `raw/`, or at the top level of an older job.
+fn title_source(job_dir: &std::path::Path, title_name: &str) -> std::path::PathBuf {
+    let src = job_dir.join("raw").join(title_name);
+    if src.is_file() {
+        src
+    } else {
+        job_dir.join(title_name)
+    }
+}
+
+/// Move each `(title name, staging-relative destination)` into `ready/` and record the
+/// identification on the job. Returns how many titles failed to move.
+#[allow(clippy::too_many_arguments)]
+fn file_titles(
+    job_id: &str,
+    items: &[(String, String)],
+    title: &str,
+    slug: &str,
+    matched_on: &str,
+    confidence: dumo_core::Confidence,
+    source: &str,
+    cfg: &Config,
+) -> Result<usize> {
+    let job_dir = cfg.staging.job_dir(job_id);
     let mut job = Job::load(&job_dir).with_context(|| format!("loading job {job_id}"))?;
     let mut filed: Vec<dumo_core::ReadyFile> = Vec::new();
     let mut moved_sources: Vec<String> = Vec::new();
     let mut failures = 0usize;
 
-    for m in matches {
+    for (title_name, rel) in items {
         // The solver reports the title by its staging-relative name.
-        let src = job_dir.join("raw").join(&m.title_name);
-        let src = if src.is_file() {
-            src
-        } else {
-            job_dir.join(&m.title_name)
-        };
-        let ext = src
-            .extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_else(|| "mkv".into());
-        let name = format!(
-            "{show} S{:02}E{:02} - {}.{ext}",
-            m.episode.season,
-            m.episode.number,
-            sanitise(&m.episode.name)
-        );
-        let rel = format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season);
+        let src = title_source(&job_dir, title_name);
+        let rel = rel.clone();
         let dest = cfg.staging.root.join(&rel);
 
-        print!("  {} -> {} ... ", m.title_name, rel);
+        print!("  {} -> {} ... ", title_name, rel);
         std::io::stdout().flush().ok();
 
         if !src.is_file() {
@@ -1929,7 +2099,7 @@ fn file_episodes(
                     bytes: outcome.bytes,
                     sha256,
                 });
-                moved_sources.push(m.title_name.clone());
+                moved_sources.push(title_name.clone());
             }
             Err(e) => {
                 println!("FAILED");
@@ -1951,14 +2121,14 @@ fn file_episodes(
         .retain(|a| !moved_sources.iter().any(|src| a.relative_path.ends_with(src)));
 
     job.identification = Some(dumo_core::Identification {
-        title: show.to_string(),
+        title: title.to_string(),
         platform: "TMDB".into(),
-        platform_slug: "tv".into(),
+        platform_slug: slug.into(),
         matched_on: matched_on.to_string(),
         // Recorded as reached, never promoted. A filed file does not become proven
         // by having been filed.
         confidence,
-        source: format!("tmdb series {series}"),
+        source: source.to_string(),
         files: filed,
         superseded: Vec::new(),
         identified_at: std::time::SystemTime::now()

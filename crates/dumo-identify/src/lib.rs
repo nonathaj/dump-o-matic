@@ -11,6 +11,7 @@ pub mod datfile;
 pub mod discset;
 pub mod http;
 pub mod matching;
+pub mod movie;
 pub mod musicbrainz;
 pub mod opensubtitles;
 pub mod platform;

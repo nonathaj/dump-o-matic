@@ -173,6 +173,15 @@ impl TmdbClient {
         Ok(parse_movie_results(&v))
     }
 
+    /// Fetch one film's details. Unlike a search result, these carry its runtime.
+    pub fn movie(&self, id: u64) -> Result<MovieResult> {
+        let v = self.get_json(&format!("/movie/{id}"), "")?;
+        parse_movie(&v).ok_or_else(|| TmdbError::Malformed {
+            endpoint: format!("/movie/{id}"),
+            detail: "no id or title".into(),
+        })
+    }
+
     /// Fetch a season's episode list.
     pub fn season(&self, tv_id: u64, season: u32) -> Result<Season> {
         let v = self.get_json(&format!("/tv/{tv_id}/season/{season}"), "")?;
@@ -228,23 +237,27 @@ pub fn parse_tv_results(v: &serde_json::Value) -> Vec<TvResult> {
 pub fn parse_movie_results(v: &serde_json::Value) -> Vec<MovieResult> {
     v.get("results")
         .and_then(|r| r.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| {
-                    Some(MovieResult {
-                        id: r.get("id")?.as_u64()?,
-                        title: r.get("title")?.as_str()?.to_string(),
-                        release_date: r
-                            .get("release_date")
-                            .and_then(|d| d.as_str())
-                            .filter(|d| !d.is_empty())
-                            .map(str::to_string),
-                        runtime_mins: r.get("runtime").and_then(|d| d.as_u64()).map(|d| d as u32),
-                    })
-                })
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(parse_movie).collect())
         .unwrap_or_default()
+}
+
+/// One film, from a search result or a details response. A runtime of 0 is TMDB's way
+/// of saying it does not know one.
+pub fn parse_movie(r: &serde_json::Value) -> Option<MovieResult> {
+    Some(MovieResult {
+        id: r.get("id")?.as_u64()?,
+        title: r.get("title")?.as_str()?.to_string(),
+        release_date: r
+            .get("release_date")
+            .and_then(|d| d.as_str())
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+        runtime_mins: r
+            .get("runtime")
+            .and_then(|d| d.as_u64())
+            .filter(|d| *d > 0)
+            .map(|d| d as u32),
+    })
 }
 
 pub fn parse_episodes(v: &serde_json::Value, season: u32) -> Vec<Episode> {
