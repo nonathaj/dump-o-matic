@@ -52,6 +52,7 @@ pub enum Tier {
     Redundant,
     /// Raw stream, per-sector state and subchannel data. Irreplaceable — nothing can
     /// regenerate them, least of all the packed image, which discards precisely this.
+    /// Also a dumped image with no packed copy to rebuild it from (see [`classify`]).
     /// Removed only when explicitly asked for.
     Provenance,
     /// Logs, TOCs and the cue sheet: the record of how the dump went. Kilobytes, and the
@@ -79,6 +80,20 @@ pub fn tier_of(relative_path: &str) -> Tier {
         "scram" | "state" | "subcode" => Tier::Provenance,
         // Anything unrecognised is kept. A new sidecar should cost disk, not data.
         _ => Tier::Audit,
+    }
+}
+
+/// Classify a job artifact, knowing whether its job recorded a packed (CHD) copy.
+///
+/// A dumped image is only redundant when something at the destination can reproduce
+/// it, and the CHD is the only thing that proof can unpack. Without one — an audio CD,
+/// filed as MP3s that can never give back the lossless tracks — the image is the only
+/// exact copy there is, so it joins the irreplaceable tier instead of being listed as
+/// reclaimable and then refused.
+pub fn classify(relative_path: &str, has_packed_copy: bool) -> Tier {
+    match tier_of(relative_path) {
+        Tier::Redundant if !has_packed_copy => Tier::Provenance,
+        t => t,
     }
 }
 
@@ -123,11 +138,15 @@ pub fn run(args: CleanArgs) -> Result<()> {
         let Some(id) = &job.identification else {
             continue;
         };
+        let has_packed_copy = id
+            .files
+            .iter()
+            .any(|f| f.path.to_ascii_lowercase().ends_with(".chd"));
         for a in &job.artifacts {
             if !dir.join(&a.relative_path).is_file() {
                 continue;
             }
-            match tier_of(&a.relative_path) {
+            match classify(&a.relative_path, has_packed_copy) {
                 Tier::Redundant => redundant.push(RawFile {
                     job_dir: dir.clone(),
                     job_id: job.id.clone(),
@@ -422,8 +441,9 @@ fn report_retained(
         let p: u64 = provenance.iter().map(|f| f.bytes).sum();
         if p > 0 {
             println!(
-                "Provenance retained ({}): raw stream, sector state and subchannel data. \
-                 Nothing can regenerate these — pass --provenance to drop them.",
+                "Provenance retained ({}): raw stream, sector state, subchannel data, and \
+                 images with no packed copy to rebuild them from. Nothing can regenerate \
+                 these — pass --provenance to drop them.",
                 crate::migrate::human_size(p)
             );
         }
@@ -550,6 +570,18 @@ mod tests {
         // The cue is tiny and chdman does not reproduce its text byte for byte, so it is
         // kept rather than claimed reproducible.
         assert_eq!(tier_of("raw/SLUS-21038.cue"), Tier::Audit);
+    }
+
+    /// An audio CD is filed as MP3s, which cannot give back its lossless tracks, so its
+    /// image must never be listed as reproducible.
+    #[test]
+    fn an_image_without_a_packed_copy_is_irreplaceable() {
+        assert_eq!(classify("raw/audio (Track 01).bin", false), Tier::Provenance);
+        assert_eq!(classify("raw/GAME.iso", false), Tier::Provenance);
+        assert_eq!(classify("raw/SLUS-21038.bin", true), Tier::Redundant);
+        // Everything else is classified as before.
+        assert_eq!(classify("raw/SLUS-21038.log", false), Tier::Audit);
+        assert_eq!(classify("raw/SLUS-21038.state", true), Tier::Provenance);
     }
 
     /// An unrecognised sidecar must cost disk space, not data. A future redumper version
