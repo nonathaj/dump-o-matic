@@ -10,6 +10,8 @@ pub mod chdman;
 pub mod ffprobe;
 pub mod id3;
 pub mod makemkv;
+pub mod ocr;
+pub mod pgs;
 pub mod redumper;
 pub mod subtitles;
 

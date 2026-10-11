@@ -20,47 +20,82 @@ const PROBE_TOOL: &str = "ffprobe";
 /// carry pictures of words and cannot become SRT without OCR.
 const TEXT_SUBTITLE_CODECS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"];
 
-/// Index, among the subtitle streams, of the first one holding text.
-///
-/// Selecting `0:s:0` is wrong on a ripped DVD: MakeMKV emits the original VOBSUB track
-/// first and the closed-caption-derived text track second, so mapping the first
-/// subtitle stream hands ffmpeg a bitmap format, the conversion fails, and the title
-/// silently reports no dialogue at all. Ask what the streams actually are instead.
-fn first_text_subtitle_index(path: &Path) -> Option<usize> {
-    let out = Command::new(PROBE_TOOL)
+/// Bitmap subtitle codecs that can be read by OCR. Blu-ray PGS only, for now: DVD
+/// VOBSUB pictures need the disc's palette from elsewhere in the file, and every DVD
+/// met so far has had a closed-caption text track anyway.
+const OCR_SUBTITLE_CODECS: &[&str] = &["hdmv_pgs_subtitle"];
+
+/// Which subtitle stream to read a title's dialogue from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// Text, read directly. Index among the subtitle streams.
+    Text(usize),
+    /// Pictures, read by OCR. Index among the subtitle streams.
+    Pictures(usize),
+}
+
+/// Each subtitle stream's codec and whether it is flagged as forced.
+fn subtitle_streams(path: &Path) -> Vec<(String, bool)> {
+    let Ok(out) = Command::new(PROBE_TOOL)
         .args([
             "-v", "error",
             "-select_streams", "s",
-            "-show_entries", "stream=codec_name",
+            "-show_entries", "stream=codec_name:stream_disposition=forced",
             "-of", "csv=p=0",
         ])
         .arg(path)
         .output()
-        .ok()?;
+    else {
+        return Vec::new();
+    };
     if !out.status.success() {
-        return None;
+        return Vec::new();
     }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim().trim_end_matches(',').to_ascii_lowercase())
-        .filter(|l| !l.is_empty())
-        .position(|c| TEXT_SUBTITLE_CODECS.contains(&c.as_str()))
+    parse_streams(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Extract the first text subtitle track as SRT.
+fn parse_streams(csv: &str) -> Vec<(String, bool)> {
+    csv.lines()
+        .map(|l| l.trim().trim_end_matches(','))
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let mut parts = l.split(',');
+            let codec = parts.next().unwrap_or("").to_ascii_lowercase();
+            let forced = parts.next().map(|f| f.trim() == "1").unwrap_or(false);
+            (codec, forced)
+        })
+        .collect()
+}
+
+/// Choose the stream to read: the first text stream, and only failing that the first
+/// picture stream that is not a forced track.
 ///
-/// `limit_secs` bounds how much is read: the opening minutes are plenty to identify an
-/// episode, and stopping early keeps this fast over a whole library.
-pub fn extract_text(path: &Path, limit_secs: u32) -> Result<String> {
-    // No text track at all is ordinary — an extra, or a disc with only bitmap subs.
-    let Some(stream) = first_text_subtitle_index(path) else {
-        return Ok(String::new());
-    };
+/// Selecting `0:s:0` is wrong on a ripped DVD: MakeMKV emits the original VOBSUB track
+/// first and the closed-caption-derived text track second, so mapping the first
+/// subtitle stream hands ffmpeg a bitmap format, the conversion fails, and the title
+/// silently reports no dialogue at all. Text always wins because it is exact and free;
+/// OCR is the costly fallback. A forced track holds only the lines in another language
+/// or on a sign, too few to identify anything by.
+fn choose(streams: &[(String, bool)]) -> Option<Source> {
+    if let Some(i) = streams
+        .iter()
+        .position(|(c, _)| TEXT_SUBTITLE_CODECS.contains(&c.as_str()))
+    {
+        return Some(Source::Text(i));
+    }
+    streams
+        .iter()
+        .position(|(c, forced)| !forced && OCR_SUBTITLE_CODECS.contains(&c.as_str()))
+        .map(Source::Pictures)
+}
+
+fn run_ffmpeg(path: &Path, limit_secs: u32, stream: usize, output: &[&str]) -> Result<Option<Vec<u8>>> {
     let out = Command::new(TOOL)
-        .args(["-v", "error", "-to", &limit_secs.to_string()])
+        .args(["-nostdin", "-v", "error", "-to", &limit_secs.to_string()])
         .arg("-i")
         .arg(path)
-        .args(["-map", &format!("0:s:{stream}"), "-f", "srt", "-"])
+        .args(["-map", &format!("0:s:{stream}")])
+        .args(output)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -72,13 +107,39 @@ pub fn extract_text(path: &Path, limit_secs: u32) -> Result<String> {
                 }
             }
         })?;
+    // A stream that will not convert is ordinary, not an error worth aborting a run
+    // over: the title simply has no readable dialogue.
+    Ok(out.status.success().then_some(out.stdout))
+}
 
-    // A title with no subtitle track fails here; that is ordinary, not an error worth
-    // aborting a run over.
-    if !out.status.success() {
+/// Extract a title's subtitle text.
+///
+/// From a text track this is SRT. From a Blu-ray's picture track it is the recognised
+/// lines, without timings — the words are what matching uses. Picture subtitles need
+/// Tesseract; without it this returns [`BackendError::NotInstalled`] so the caller can
+/// say why a title has no dialogue, instead of the title quietly having none.
+///
+/// `limit_secs` bounds how much is read.
+pub fn extract_text(path: &Path, limit_secs: u32) -> Result<String> {
+    // No subtitle stream at all is ordinary — an extra, usually.
+    let Some(source) = choose(&subtitle_streams(path)) else {
         return Ok(String::new());
+    };
+    match source {
+        Source::Text(stream) => Ok(run_ffmpeg(path, limit_secs, stream, &["-f", "srt", "-"])?
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .unwrap_or_default()),
+        Source::Pictures(stream) => {
+            if !crate::ocr::available() {
+                return Err(BackendError::NotInstalled { tool: "tesseract" });
+            }
+            let Some(sup) = run_ffmpeg(path, limit_secs, stream, &["-c", "copy", "-f", "sup", "-"])?
+            else {
+                return Ok(String::new());
+            };
+            crate::ocr::read_captions(&crate::pgs::decode(&sup))
+        }
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// Strip SRT markup down to spoken words.
@@ -141,6 +202,41 @@ mod tests {
 >> WHEN YOU'RE 27, YOU THINK
 YOU KNOW EVERYTHING.
 "#;
+
+    fn streams(s: &[(&str, bool)]) -> Vec<(String, bool)> {
+        s.iter().map(|(c, f)| (c.to_string(), *f)).collect()
+    }
+
+    #[test]
+    fn text_is_read_before_pictures_whatever_the_order() {
+        // A ripped DVD: VOBSUB first, closed captions second.
+        let dvd = streams(&[("dvd_subtitle", false), ("subrip", false)]);
+        assert_eq!(choose(&dvd), Some(Source::Text(1)));
+        let bd = streams(&[("hdmv_pgs_subtitle", false), ("hdmv_pgs_subtitle", false)]);
+        assert_eq!(choose(&bd), Some(Source::Pictures(0)));
+    }
+
+    #[test]
+    fn a_forced_picture_track_is_passed_over() {
+        let bd = streams(&[("hdmv_pgs_subtitle", true), ("hdmv_pgs_subtitle", false)]);
+        assert_eq!(choose(&bd), Some(Source::Pictures(1)));
+        assert_eq!(choose(&streams(&[("hdmv_pgs_subtitle", true)])), None);
+    }
+
+    #[test]
+    fn unreadable_picture_formats_are_not_chosen() {
+        assert_eq!(choose(&streams(&[("dvd_subtitle", false)])), None);
+        assert_eq!(choose(&[]), None);
+    }
+
+    #[test]
+    fn parses_ffprobe_stream_listing() {
+        let s = parse_streams("hdmv_pgs_subtitle,0\nhdmv_pgs_subtitle,1\nsubrip,\n\n");
+        assert_eq!(
+            s,
+            streams(&[("hdmv_pgs_subtitle", false), ("hdmv_pgs_subtitle", true), ("subrip", false)])
+        );
+    }
 
     #[test]
     fn strips_srt_markup_to_dialogue() {

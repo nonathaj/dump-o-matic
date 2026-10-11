@@ -103,6 +103,13 @@ across that season rather than against any hardcoded stopword list. Discs of a b
 solved jointly, since the discs of a season hold consecutive non-overlapping runs of
 episodes, which frequently decides cases that runtimes alone cannot.
 
+Dialogue comes from a title's text subtitle track where it has one — on a DVD,
+MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
+so when there is no text track, the first non-forced PGS track is decoded and read with
+Tesseract (`sudo apt install tesseract-ocr`). That costs time, so it only happens when
+no text exists; without Tesseract such a title simply has no dialogue to score, and
+`identify` says why.
+
 That disc order is an assumption, and a set authored in broadcast order breaks it: one
 season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2, so 16 of
 33 titles came out one episode early. So once the discs are placed, dialogue may reorder

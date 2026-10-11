@@ -319,7 +319,23 @@ const DIALOGUE_WINDOW_SECS: u32 = 4 * 3600;
 
 /// Dialogue for one title as word counts, or `None` if it has no usable subtitle track.
 fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashMap<String, u32>> {
-    let srt = dumo_backends::subtitles::extract_text(path, DIALOGUE_WINDOW_SECS).ok()?;
+    let srt = match dumo_backends::subtitles::extract_text(path, DIALOGUE_WINDOW_SECS) {
+        Ok(s) => s,
+        Err(dumo_backends::BackendError::NotInstalled { tool }) => {
+            // Said once per run: the reason every Blu-ray title after this one also
+            // has no dialogue is the same.
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                println!();
+                println!(
+                    "  (subtitles here are pictures; reading them needs {tool}, which is \
+                     not installed — e.g. `sudo apt install tesseract-ocr`)"
+                );
+            }
+            return None;
+        }
+        Err(_) => return None,
+    };
     let words =
         dumo_backends::subtitles::count_words(&dumo_backends::subtitles::dialogue_text(&srt));
     // A handful of words is a stray forced-subtitle caption, not dialogue; scoring on it
