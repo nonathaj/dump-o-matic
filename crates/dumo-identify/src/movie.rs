@@ -25,6 +25,8 @@ pub struct MovieMatch {
     pub movie: MovieResult,
     /// Disc runtime minus listed runtime, in minutes; `None` when TMDB lists none.
     pub delta_mins: Option<f64>,
+    /// Whether the chosen film's listed runtime agrees with the disc's.
+    pub runtime_fits: bool,
     pub confidence: Confidence,
     pub evidence: Vec<String>,
 }
@@ -127,6 +129,7 @@ pub fn match_movie(title_mins: f64, candidates: &[MovieResult], year: Option<u32
     Some(MovieMatch {
         movie: chosen.clone(),
         delta_mins: delta(chosen),
+        runtime_fits: chosen.runtime_mins.map(|r| fits(title_mins, r)).unwrap_or(false),
         confidence,
         evidence,
     })
@@ -159,6 +162,7 @@ mod tests {
         let m = match_movie(141.3, &c, None).unwrap();
         assert_eq!(m.movie.id, 1);
         assert_eq!(m.confidence, Confidence::Strong);
+        assert!(m.runtime_fits);
     }
 
     #[test]
@@ -187,6 +191,7 @@ mod tests {
         assert_eq!(m.movie.id, 1);
         assert_eq!(m.confidence, Confidence::Weak);
         assert!(m.evidence.iter().any(|e| e.contains("another cut")));
+        assert!(!m.runtime_fits);
         assert_eq!(m.delta_mins, Some(17.0));
     }
 

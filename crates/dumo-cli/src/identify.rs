@@ -1057,8 +1057,22 @@ fn analyse_video(
         }
     };
 
-    if matches!(analysis.category, Some(video::MediaCategory::Movies)) {
-        return identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred);
+    // A disc of one feature is a film. So, often, is a disc the analysis could not
+    // place: a feature with long extras beside it looks like neither a film nor a
+    // season. That one is tried as a film first and kept as one only if a film's
+    // listed runtime fits its longest title; otherwise it goes on to be matched as
+    // episodes, where a feature length title would fit nothing anyway.
+    match analysis.category {
+        Some(video::MediaCategory::Movies) => {
+            identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, false)?;
+            return Ok(());
+        }
+        None => {
+            if identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, true)? {
+                return Ok(());
+            }
+        }
+        Some(video::MediaCategory::Tv) => {}
     }
 
     println!();
@@ -1348,6 +1362,10 @@ fn analyse_video(
 
 /// Name a feature film disc: its longest main title, matched to a TMDB movie by name
 /// and checked by runtime.
+///
+/// With `only_if_runtime_fits`, nothing is printed or filed unless a film's runtime
+/// fits, and `false` is returned so the caller can try the disc as episodes instead.
+#[allow(clippy::too_many_arguments)]
 fn identify_movie(
     job: &Job,
     analysis: &dumo_identify::DiscAnalysis,
@@ -1356,15 +1374,23 @@ fn identify_movie(
     cfg: &Config,
     apply: bool,
     accept_inferred: bool,
-) -> Result<()> {
+    only_if_runtime_fits: bool,
+) -> Result<bool> {
     use dumo_identify::movie;
 
-    let Some(feature) = analysis
-        .main_titles()
-        .max_by(|a, b| a.duration_secs.total_cmp(&b.duration_secs))
-    else {
-        println!("  No main title to match.");
-        return Ok(());
+    // The longest main title, and the first of equals in disc order: a Blu-ray often
+    // carries the feature twice, as two playlists differing only in an opening logo.
+    let mut feature: Option<&dumo_identify::video::AnalysedTitle> = None;
+    for t in analysis.main_titles() {
+        if feature.map(|f| t.duration_secs > f.duration_secs + 1.0).unwrap_or(true) {
+            feature = Some(t);
+        }
+    }
+    let Some(feature) = feature else {
+        if !only_if_runtime_fits {
+            println!("  No main title to match.");
+        }
+        return Ok(false);
     };
     let title_mins = feature.duration_secs / 60.0;
     let (name, year) = movie::split_year(query);
@@ -1380,6 +1406,18 @@ fn identify_movie(
         .take(movie::CANDIDATES)
         .map(|m| client.movie(m.id).unwrap_or_else(|_| m.clone()))
         .collect();
+    let best = movie::match_movie(title_mins, &candidates, year);
+    if only_if_runtime_fits && !best.as_ref().map(|b| b.runtime_fits).unwrap_or(false) {
+        println!("  No film's runtime fits the longest title; trying it as a series.");
+        return Ok(false);
+    }
+    if only_if_runtime_fits {
+        println!(
+            "  Matched as a film: {} fits the longest title, {:.0} min",
+            feature.name.trim_start_matches("raw/"),
+            title_mins
+        );
+    }
     for c in &candidates {
         println!(
             "    {:<44} {:>6}  [tmdb:{}]",
@@ -1397,9 +1435,9 @@ fn identify_movie(
             c.id
         );
     }
-    let Some(best) = movie::match_movie(title_mins, &candidates, year) else {
+    let Some(best) = best else {
         println!("  No film matched. Try --show \"<title> (<year>)\".");
-        return Ok(());
+        return Ok(true);
     };
 
     let film = &best.movie;
@@ -1444,11 +1482,11 @@ fn identify_movie(
     println!();
     if !apply {
         println!("  Nothing was filed. Re-run with --apply --accept-inferred to file it.");
-        return Ok(());
+        return Ok(true);
     }
     if !accept_inferred {
         println!("  --apply given without --accept-inferred, so nothing was filed.");
-        return Ok(());
+        return Ok(true);
     }
 
     let title_name = feature.name.trim_start_matches("raw/").to_string();
@@ -1471,7 +1509,7 @@ fn identify_movie(
             best.confidence
         );
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Match a bonus disc's titles against the specials (season 0) of the candidate series.
