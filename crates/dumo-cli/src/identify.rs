@@ -1170,7 +1170,7 @@ fn analyse_video(
             None => print!("no usable text subtitle track"),
         }
         match cards.first() {
-            Some(c) => println!(", title card \"episode {} {}\"", c.number, c.following),
+            Some(c) => println!(", title card for episode {}", c.number),
             None => println!(),
         }
         titles.push(dumo_identify::matching::DiscTitle {
@@ -1823,7 +1823,7 @@ fn solve_video_set(
                 None => print!("no subtitle track"),
             }
             match cards.first() {
-                Some(c) => println!(", title card \"episode {} {}\"", c.number, c.following),
+                Some(c) => println!(", title card for episode {}", c.number),
                 None => println!(),
             }
             titles.push(DiscTitle {

@@ -579,6 +579,9 @@ fn check_against_cards(m: &mut SeasonMatch, titles: &[DiscTitle], season: &Seaso
         ));
         m.confidence = Confidence::Weak;
     } else if agree == titles.len() {
+        // The runtime summary's advice to check the episode titles has been followed.
+        m.evidence
+            .retain(|e| !(e.starts_with("next-best") && e.ends_with("check the episode titles")));
         m.evidence.push(format!(
             "every title's on-screen title card names the episode proposed for it ({agree} of {agree})"
         ));
@@ -1004,6 +1007,11 @@ mod tests {
         assert!(!m.disc_hint_used && !m.dialogue_decided);
         assert_eq!(m.confidence, Confidence::Strong, "{:?}", m.evidence);
         assert!(m.evidence[0].contains("episodes 3"), "{:?}", m.evidence[0]);
+        assert!(
+            !m.evidence.iter().any(|e| e.contains("check the episode titles")),
+            "the cards already did: {:?}",
+            m.evidence
+        );
     }
 
     #[test]
