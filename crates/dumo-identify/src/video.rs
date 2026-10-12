@@ -10,6 +10,7 @@
 //! the project's identification policy, only cryptographic matches qualify, and disc
 //! shape is inference. The output is a proposal with its reasoning attached.
 
+use crate::playall::{self, Span};
 use dumo_core::Confidence;
 
 /// What a single title on the disc appears to be.
@@ -195,15 +196,34 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     // 104-minute 8-chapter film and a 52-minute 4-chapter episode. On length alone it
     // cleared the 15-minute threshold and was counted as an episode, which pushed a
     // box set to 31 titles against a 30-episode season and made the whole set unsolvable.
+    // A title that plays others back to back is no content of its own, and counted as
+    // a main title it makes an episode disc look like a feature plus episodes.
+    let spans: Vec<Span> = titles
+        .iter()
+        .map(|t| Span {
+            secs: t.duration_secs.round() as u64,
+            chapters: t.chapters as u32,
+        })
+        .collect();
+    let play_all = playall::find(&spans);
+    let is_play_all = |t: &TitleInput| {
+        play_all
+            .as_ref()
+            .map(|p| std::ptr::eq(t, &titles[p.position]))
+            .unwrap_or(false)
+    };
+
     let long_enough: Vec<&TitleInput> = titles
         .iter()
-        .filter(|t| t.duration_secs >= params.min_main_secs)
+        .filter(|t| t.duration_secs >= params.min_main_secs && !is_play_all(t))
         .collect();
     let chaptering_is_meaningful = long_enough.iter().any(|t| t.chapters > 0)
         && long_enough.iter().any(|t| t.chapters == 0);
 
     let is_content = |t: &TitleInput| -> bool {
-        t.duration_secs >= params.min_main_secs && !(chaptering_is_meaningful && t.chapters == 0)
+        t.duration_secs >= params.min_main_secs
+            && !(chaptering_is_meaningful && t.chapters == 0)
+            && !is_play_all(t)
     };
 
     let mains: Vec<&TitleInput> = titles.iter().filter(|t| is_content(t)).collect();
@@ -249,7 +269,22 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
                 _ => TitleRole::Feature,
             }
         };
-        let why = if is_extra && !short {
+        let why = if is_play_all(t) {
+            let p = play_all.as_ref().expect("is_play_all implies a play-all");
+            format!(
+                "plays {} to {} back to back ({:.0} min against {:.0} min, chapters \
+                 {}) — a play-all, no unique content",
+                titles[p.members[0]].name,
+                titles[*p.members.last().expect("a play-all has members")].name,
+                t.duration_secs / 60.0,
+                p.members_secs as f64 / 60.0,
+                if p.members.iter().map(|&i| titles[i].chapters).sum::<usize>() == t.chapters {
+                    "the same"
+                } else {
+                    "differing"
+                }
+            )
+        } else if is_extra && !short {
             format!(
                 "{:.0} min but no chapters, where other titles here have them — \
                  authored as an extra",
@@ -283,12 +318,20 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     }
 
     // Explain the conclusion in the same terms a person would use.
+    let set_aside = usize::from(play_all.is_some());
     evidence.push(format!(
         "{} title(s): {} of content length, {} shorter",
         titles.len(),
         mains.len(),
-        titles.len() - mains.len()
+        titles.len() - mains.len() - set_aside
     ));
+    if let Some(p) = &play_all {
+        evidence.push(format!(
+            "{} plays {} other titles back to back, so it is set aside as a play-all",
+            titles[p.position].name,
+            p.members.len()
+        ));
+    }
 
     match shape {
         DiscShape::Series => {
@@ -362,6 +405,36 @@ mod tests {
     }
 
     /// Real data from ESPN 30 for 30 disc 1: three ~51 min titles plus two short extras.
+    /// Frieren S1 Part 1 disc 1: without setting the 201 min play-all aside, the disc
+    /// read as "mixed" and the play-all was proposed as episode 9.
+    #[test]
+    fn a_play_all_is_set_aside_not_counted_as_content() {
+        let mut titles: Vec<TitleInput> = [
+            (1561, 5), (1561, 5), (1471, 5), (1562, 5), (1471, 6), (1471, 6), (1472, 6),
+            (1471, 6), (12045, 44), (859, 8), (305, 8),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, &(secs, chapters))| TitleInput {
+            name: format!("FRIEREN_t{i:02}.mkv"),
+            duration_secs: secs as f64,
+            chapters,
+        })
+        .collect();
+        let a = analyse(&titles, AnalysisParams::default());
+        assert_eq!(a.shape, DiscShape::Series);
+        assert_eq!(a.main_titles().count(), 8);
+        let pa = a.titles.iter().find(|t| t.name == "FRIEREN_t08.mkv").unwrap();
+        assert_eq!(pa.role, TitleRole::Extra);
+        assert!(pa.why.contains("play-all"), "{}", pa.why);
+        assert!(a.evidence.iter().any(|e| e == "11 title(s): 8 of content length, 2 shorter"));
+
+        // Chapters that do not add up leave it as content: too weak to drop on.
+        titles[8].chapters = 30;
+        let a = analyse(&titles, AnalysisParams::default());
+        assert_eq!(a.main_titles().count(), 9);
+    }
+
     #[test]
     fn recognises_an_episode_disc() {
         let a = analyse(

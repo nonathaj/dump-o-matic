@@ -31,43 +31,109 @@ const DURATION_TOLERANCE: f64 = 0.005;
 /// its commentary track and means nothing.
 const MIN_CONSTITUENTS: usize = 2;
 
-/// The play-all title among `titles`, if there is one.
+/// One title's length and chapter count: all that detection looks at.
+#[derive(Debug, Clone, Copy)]
+pub struct Span {
+    pub secs: u64,
+    pub chapters: u32,
+}
+
+/// Where a play-all was found among a list of [`Span`]s, by position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// Position of the play-all itself.
+    pub position: usize,
+    /// Positions of the titles it plays, in order.
+    pub members: Vec<usize>,
+    pub members_secs: u64,
+}
+
+fn close(secs: u64, sum: u64) -> bool {
+    sum > 0 && (secs.abs_diff(sum) as f64) / (sum as f64) <= DURATION_TOLERANCE
+}
+
+/// The play-all among `spans`, which must be in disc order.
 ///
-/// Returns its index. Never returns a title that is not strictly the longest: a
-/// concatenation is always longer than its parts.
-pub fn detect(titles: &[TitleInfo]) -> Option<PlayAll> {
-    if titles.len() < MIN_CONSTITUENTS + 1 {
+/// Two ways to qualify, both requiring the title to be strictly the longest:
+///
+/// - it runs for the sum of **every** other title (the original test); or
+/// - it runs for the sum of a **consecutive run** of the others *and* its chapter count
+///   is exactly theirs added up. A disc's extras usually sit after the episodes and are
+///   not in the play-all, so the first test misses it; matching a run is easier to do
+///   by chance, so the chapters must agree as well. Frieren S1 Part 1 disc 1: 12045 s
+///   and 44 chapters, against 12040 s and 5+5+5+5+6+6+6+6 for the eight episodes, with
+///   two extras after them.
+pub fn find(spans: &[Span]) -> Option<Found> {
+    if spans.len() < MIN_CONSTITUENTS + 1 {
         return None;
     }
-
-    let longest = titles.iter().max_by_key(|t| t.duration_secs)?;
-    let others: Vec<&TitleInfo> = titles
+    let (position, longest) = spans
         .iter()
-        .filter(|t| t.index != longest.index)
-        .collect();
-    if others.len() < MIN_CONSTITUENTS {
-        return None;
-    }
-
+        .enumerate()
+        .max_by_key(|(_, s)| s.secs)?;
+    let others: Vec<usize> = (0..spans.len()).filter(|&i| i != position).collect();
     // A concatenation is strictly longer than any of its parts.
-    if others.iter().any(|t| t.duration_secs >= longest.duration_secs) {
+    if others.iter().any(|&i| spans[i].secs >= longest.secs) {
         return None;
+    }
+    let total = |members: &[usize]| -> (u64, u32) {
+        members
+            .iter()
+            .fold((0, 0), |(s, c), &i| (s + spans[i].secs, c + spans[i].chapters))
+    };
+
+    let (all_secs, _) = total(&others);
+    if close(longest.secs, all_secs) {
+        return Some(Found {
+            position,
+            members: others,
+            members_secs: all_secs,
+        });
     }
 
-    let sum: u64 = others.iter().map(|t| t.duration_secs).sum();
-    if sum == 0 {
+    if longest.chapters == 0 {
         return None;
     }
-    let delta = longest.duration_secs.abs_diff(sum);
-    if (delta as f64) / (sum as f64) > DURATION_TOLERANCE {
-        return None;
+    for start in 0..others.len() {
+        for end in start + MIN_CONSTITUENTS..=others.len() {
+            let run = &others[start..end];
+            let (secs, chapters) = total(run);
+            if secs > longest.secs + longest.secs / 100 {
+                break;
+            }
+            if close(longest.secs, secs) && chapters == longest.chapters {
+                return Some(Found {
+                    position,
+                    members: run.to_vec(),
+                    members_secs: secs,
+                });
+            }
+        }
     }
+    None
+}
 
+/// The play-all title among `titles`, if there is one; `titles` in disc order.
+///
+/// Never returns a title that is not strictly the longest: a concatenation is always
+/// longer than its parts.
+pub fn detect(titles: &[TitleInfo]) -> Option<PlayAll> {
+    let spans: Vec<Span> = titles
+        .iter()
+        .map(|t| Span {
+            secs: t.duration_secs,
+            chapters: t.chapters,
+        })
+        .collect();
+    let found = find(&spans)?;
+    let longest = &titles[found.position];
     Some(PlayAll {
         index: longest.index,
         duration_secs: longest.duration_secs,
-        constituents_total_secs: sum,
-        constituents: others.len(),
+        constituents_total_secs: found.members_secs,
+        constituents: found.members.len(),
+        first: titles[found.members[0]].index,
+        last: titles[*found.members.last()?].index,
         estimated_bytes: longest.estimated_bytes,
     })
 }
@@ -79,6 +145,9 @@ pub struct PlayAll {
     pub duration_secs: u64,
     pub constituents_total_secs: u64,
     pub constituents: usize,
+    /// Indexes of the first and last titles it plays.
+    pub first: u32,
+    pub last: u32,
     pub estimated_bytes: u64,
 }
 
@@ -86,11 +155,13 @@ impl PlayAll {
     /// Why this title was taken to be a play-all, for the operator to judge.
     pub fn evidence(&self) -> String {
         format!(
-            "title {} runs {}s, the same as titles 1-{} combined ({}s, {}s apart) — \
+            "title {} runs {}s, the same as the {} titles {}-{} combined ({}s, {}s apart) — \
              a play-all holding no unique content",
             self.index,
             self.duration_secs,
             self.constituents,
+            self.first,
+            self.last,
             self.constituents_total_secs,
             self.duration_secs.abs_diff(self.constituents_total_secs),
         )
@@ -150,6 +221,34 @@ mod tests {
     fn a_coincidental_sum_outside_tolerance_is_left_alone() {
         // 5000 vs 4800: 4% out, far past the 0.5% bar.
         let titles = vec![t(0, 5000, 10), t(1, 1600, 5), t(2, 1600, 5), t(3, 1600, 5)];
+        assert_eq!(detect(&titles), None);
+    }
+
+    /// Frieren S1 Part 1 disc 1, as scanned: eight episodes, the play-all, two extras.
+    fn frieren() -> Vec<TitleInfo> {
+        let d = [
+            (1561, 5), (1561, 5), (1471, 5), (1562, 5), (1471, 6), (1471, 6), (1472, 6),
+            (1471, 6), (12045, 44), (859, 8), (305, 8),
+        ];
+        d.iter()
+            .enumerate()
+            .map(|(i, &(secs, chapters))| t(i as u32, secs, chapters))
+            .collect()
+    }
+
+    #[test]
+    fn finds_a_play_all_of_the_episodes_but_not_the_extras() {
+        let found = detect(&frieren()).expect("play-all not detected");
+        assert_eq!(found.index, 8);
+        assert_eq!((found.first, found.last, found.constituents), (0, 7, 8));
+        assert_eq!(found.constituents_total_secs, 12040);
+    }
+
+    #[test]
+    fn a_run_that_only_matches_in_duration_is_left_alone() {
+        // Same durations, but the chapters no longer add up: could be anything.
+        let mut titles = frieren();
+        titles[8].chapters = 30;
         assert_eq!(detect(&titles), None);
     }
 
