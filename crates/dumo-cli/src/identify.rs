@@ -1325,10 +1325,10 @@ fn analyse_video(
     for m in &best.matches {
         println!(
             "    tv/{}{}/Season {:02}/{}{} S{:02}E{:02} - {}.mkv",
-            candidate.name,
+            sanitise(&candidate.name),
             year,
             m.episode.season,
-            candidate.name,
+            sanitise(&candidate.name),
             year,
             m.episode.season,
             m.episode.number,
@@ -2008,8 +2008,8 @@ fn solve_one_set(
         for m in &p.matches {
             println!(
                 "    tv/{}{}/Season {:02}/{}{} S{:02}E{:02} - {}.mkv",
-                series.name, year, m.episode.season,
-                series.name, year, m.episode.season, m.episode.number,
+                sanitise(&series.name), year, m.episode.season,
+                sanitise(&series.name), year, m.episode.season, m.episode.number,
                 sanitise(&m.episode.name)
             );
         }
