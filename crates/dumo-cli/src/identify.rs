@@ -1062,9 +1062,9 @@ fn analyse_video(
         .as_ref()
         .and_then(|p| p.content.title_guess.clone())
         .unwrap_or_default();
-    let query = show_override
-        .map(str::to_string)
-        .unwrap_or_else(|| dumo_identify::matching::query_from_label(&label));
+    let query = show_override.map(str::to_string).unwrap_or_else(|| {
+        dumo_identify::matching::search_terms(&dumo_identify::matching::query_from_label(&label))
+    });
 
     if query.trim().is_empty() {
         println!("  No search term: pass --show to name this disc's content.");
@@ -1126,6 +1126,18 @@ fn analyse_video(
             }
             from_titles
         }
+    };
+    // Part 2 of a season numbers its discs from 1 again, so its disc 1 is not the
+    // season's start, and the disc number says nothing about where it sits.
+    let disc_hint = match dumo_identify::matching::part_number_from_label(&label) {
+        Some(part) if part > 1 && disc_hint.is_some() => {
+            println!(
+                "  Part {part} of the season, per the volume label: its discs are numbered \
+                 from 1 again, so the disc number is not used as a position"
+            );
+            None
+        }
+        _ => disc_hint,
     };
     // The label usually names the season outright, and the publisher's own statement
     // outranks a runtime fit: episode runtimes across seasons of one show differ by
@@ -1906,7 +1918,7 @@ fn solve_one_set(
     let discs = &group.discs;
     let query = show_override
         .map(str::to_string)
-        .unwrap_or_else(|| group.series_key.clone());
+        .unwrap_or_else(|| dumo_identify::matching::search_terms(&group.series_key));
     if query.trim().is_empty() {
         println!("No search term for this set; pass --show.");
         return Ok(());

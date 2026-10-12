@@ -207,16 +207,64 @@ pub fn season_number_from_label(label: &str) -> Option<u32> {
                 return Some(n);
             }
         }
-        // "S02" / "S2", but not "S" alone and not the "S" of a word like "SEASON".
-        if let Some(rest) = w.strip_prefix('S') {
-            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(n) = rest.parse() {
-                    return Some(n);
-                }
-            }
+        // "S02" / "S2" / "S1P2", but not "S" alone and not the "S" of a word like
+        // "SEASON".
+        if let Some((season, _)) = season_token(w) {
+            return Some(season);
         }
     }
     None
+}
+
+/// A season glued into one token, with the part of it if one is given: `S05` is
+/// season 5, `S1P2` is season 1 part 2. Frieren's season 1 came as two box sets,
+/// `FRIEREN S1P1 D1` .. and `FRIEREN S1P2 D1` ...
+fn season_token(word: &str) -> Option<(u32, Option<u32>)> {
+    let up = word.to_ascii_uppercase();
+    let rest = up.strip_prefix('S')?;
+    let digits = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit());
+    match rest.split_once('P') {
+        Some((season, part)) if digits(season) && digits(part) => {
+            Some((season.parse().ok()?, Some(part.parse().ok()?)))
+        }
+        None if digits(rest) => Some((rest.parse().ok()?, None)),
+        _ => None,
+    }
+}
+
+/// Which part of a season a disc's label says it belongs to, as in `S1P2` or `PART 2`.
+///
+/// A season split across box sets numbers each set's discs from 1, so "disc 1" of part
+/// 2 is not where the season starts. Callers use this to stop trusting the disc number
+/// as a position.
+pub fn part_number_from_label(label: &str) -> Option<u32> {
+    let spaced = label.replace(['_', '.', '-'], " ").to_ascii_uppercase();
+    let words: Vec<&str> = spaced.split_whitespace().collect();
+    for (i, w) in words.iter().enumerate() {
+        if matches!(*w, "PART" | "PT") {
+            if let Some(n) = words.get(i + 1).and_then(|n| n.parse::<u32>().ok()) {
+                return Some(n);
+            }
+        }
+        if let Some((_, Some(part))) = season_token(w) {
+            return Some(part);
+        }
+    }
+    None
+}
+
+/// What to search a metadata provider for, given a label's [`query_from_label`].
+///
+/// The query keeps a trailing season token such as `s05` or `s1p1` on purpose: it is
+/// also the key that groups a box set's discs, and two seasons, or two parts of one,
+/// must not be grouped as one set. A search engine only sees an unknown word in it, and
+/// "frieren s1p1" found nothing. The season itself is read from the label separately.
+pub fn search_terms(query: &str) -> String {
+    let mut words: Vec<&str> = query.split_whitespace().collect();
+    while words.len() > 1 && words.last().map(|w| season_token(w).is_some()).unwrap_or(false) {
+        words.pop();
+    }
+    words.join(" ")
 }
 
 /// Smallest dialogue-score margin that counts as a decision.
@@ -1152,6 +1200,30 @@ mod tests {
         assert_eq!(season_number_from_label("SHADOWS_D2"), None);
         // A hyphen stays part of the title in a search query, as it always has.
         assert_eq!(query_from_label("SPIDER-MAN_D1"), "spider-man");
+    }
+
+    #[test]
+    fn searches_without_the_season_token_the_set_key_keeps() {
+        let key = query_from_label("FRIEREN S1P1 D1");
+        assert_eq!(key, "frieren s1p1");
+        assert_ne!(key, query_from_label("FRIEREN S1P2 D1"), "two parts, two sets");
+        assert_eq!(search_terms(&key), "frieren");
+        assert_eq!(search_terms(&query_from_label("FRIENDS_S05_DISC_3")), "friends");
+        assert_eq!(search_terms(&query_from_label("MMPR_S3D1")), "mmpr");
+        // Nothing else is touched, and a label that is only a season keeps it.
+        assert_eq!(search_terms("espn 30 for 30"), "espn 30 for 30");
+        assert_eq!(search_terms("shadows"), "shadows");
+        assert_eq!(search_terms("s2"), "s2");
+    }
+
+    #[test]
+    fn reads_a_season_and_part_glued_into_one_token() {
+        assert_eq!(season_number_from_label("FRIEREN S1P2 D1"), Some(1));
+        assert_eq!(part_number_from_label("FRIEREN S1P2 D1"), Some(2));
+        assert_eq!(disc_number_from_label("FRIEREN S1P2 D1"), Some(1));
+        assert_eq!(part_number_from_label("SHOW_SEASON_2_PART_3_DISC_1"), Some(3));
+        assert_eq!(part_number_from_label("FRIENDS_S05_DISC_3"), None);
+        assert_eq!(part_number_from_label("SPIDER-MAN_D1"), None);
     }
 
     #[test]
