@@ -31,7 +31,20 @@ struct SeasonScorer<'a> {
     cost: Vec<Vec<f64>>,
     /// `scores[title][episode]`, kept for reporting each signal separately.
     scores: Vec<Vec<SignalScores>>,
+    /// The episode each title's own on-screen title card names, as an index into
+    /// `episodes`; see [`crate::cards`].
+    card: Vec<Option<usize>>,
 }
+
+/// Added to a title's cost at every episode other than the one its title card names.
+///
+/// The whole range of an ordinary cost, so a card outweighs any runtime or dialogue
+/// difference, but finite: a misread card makes an arrangement worse, never impossible,
+/// and the check after solving still reports it.
+const CARD_MISMATCH_COST: f64 = 1.0;
+
+/// The same, in the reorder's units of standard deviations: far past any dialogue fit.
+const CARD_REORDER_COST: f64 = 100.0;
 
 impl<'a> SeasonScorer<'a> {
     /// `titles` must be the flattened list, in disc order, that the solver will index.
@@ -50,6 +63,16 @@ impl<'a> SeasonScorer<'a> {
             .map(|t| t.dialogue.as_ref().map(|d| signals::stem_all(d.keys())))
             .collect();
 
+        let card: Vec<Option<usize>> = titles
+            .iter()
+            .map(|t| {
+                let own = crate::cards::own_episode(&t.cards, episodes)?;
+                episodes
+                    .iter()
+                    .position(|e| e.season == own.season && e.number == own.number)
+            })
+            .collect();
+
         let mut scores = Vec::with_capacity(titles.len());
         let mut cost = Vec::with_capacity(titles.len());
         for (ti, t) in titles.iter().enumerate() {
@@ -65,8 +88,11 @@ impl<'a> SeasonScorer<'a> {
                 };
                 // An impossible pairing is excluded outright rather than merely scored
                 // badly, so no amount of dialogue agreement can vote it back in.
+                let named_elsewhere = card[ti].map(|c| c != ei).unwrap_or(false);
                 crow.push(if signals::runtime_is_implausible(mins, e, &params) {
                     f64::INFINITY
+                } else if named_elsewhere {
+                    1.0 - sc.combined_with(&params) + CARD_MISMATCH_COST
                 } else {
                     1.0 - sc.combined_with(&params)
                 });
@@ -80,6 +106,7 @@ impl<'a> SeasonScorer<'a> {
             episodes,
             cost,
             scores,
+            card,
         }
     }
 
@@ -403,6 +430,8 @@ struct Reorder {
     mean_gain: f64,
     /// Per moved title: (title index, gain, z-score at the new position).
     moves: Vec<(usize, f64, f64)>,
+    /// How many of the moves put a title where its own title card says it belongs.
+    by_cards: usize,
 }
 
 /// The story an episode is one part of, if its name numbers the part.
@@ -444,11 +473,16 @@ fn story_name(name: &str) -> Option<&str> {
 /// them; disc order can. Each story's parts are therefore put back in disc order among
 /// the slots the assignment gave that story.
 ///
+/// A title whose own title card names one of the window's episodes is held to that
+/// episode, and a move onto it needs no further support: the card is the disc saying
+/// so outright.
+///
 /// Returns `None` — leave disc order alone — unless the moves are well supported.
 fn reorder_by_dialogue(
     titles: &[&DiscTitle],
     window: &[&Episode],
     implausible: impl Fn(usize, usize) -> bool,
+    card_slot: impl Fn(usize) -> Option<usize>,
 ) -> Option<Reorder> {
     let n = titles.len();
     if n < MIN_REORDER_TITLES || window.len() != n {
@@ -469,10 +503,15 @@ fn reorder_by_dialogue(
         .map(|t| {
             (0..n)
                 .map(|e| {
+                    let card = match card_slot(t) {
+                        Some(slot) if slot == e => -CARD_REORDER_COST,
+                        Some(_) => CARD_REORDER_COST,
+                        None => 0.0,
+                    };
                     if implausible(t, e) {
                         f64::INFINITY
                     } else {
-                        -z[t][e] + REORDER_DISTANCE_COST * t.abs_diff(e) as f64
+                        -z[t][e] + REORDER_DISTANCE_COST * t.abs_diff(e) as f64 + card
                     }
                 })
                 .collect()
@@ -506,10 +545,15 @@ fn reorder_by_dialogue(
         return None;
     }
     let mean_gain = moves.iter().map(|m| m.1).sum::<f64>() / moves.len() as f64;
-    (mean_gain >= MIN_REORDER_GAIN).then_some(Reorder {
+    let by_cards = moves
+        .iter()
+        .filter(|m| card_slot(m.0) == Some(order[m.0]))
+        .count();
+    (by_cards > 0 || mean_gain >= MIN_REORDER_GAIN).then_some(Reorder {
         order,
         mean_gain,
         moves,
+        by_cards,
     })
 }
 
@@ -570,9 +614,12 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         .collect();
     // ...and where the dialogue says each one belongs among those same episodes.
     let window: Vec<&Episode> = disc_order.iter().map(|&i| &episodes[i]).collect();
-    let reorder = reorder_by_dialogue(&flat, &window, |t, e| {
-        sc.cost[t][disc_order[e]].is_infinite()
-    });
+    let reorder = reorder_by_dialogue(
+        &flat,
+        &window,
+        |t, e| sc.cost[t][disc_order[e]].is_infinite(),
+        |t| sc.card[t].and_then(|c| disc_order.iter().position(|&i| i == c)),
+    );
     let assigned: Vec<usize> = match &reorder {
         Some(r) => r.order.iter().map(|&p| disc_order[p]).collect(),
         None => disc_order.clone(),
@@ -721,13 +768,23 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         ),
     }
     if let Some(r) = &reorder {
-        evidence.push(format!(
-            "dialogue moved {} title(s) out of disc order (mean fit {:.1} standard \
-             deviations better than in disc order) — the disc order did not match the \
-             episode numbering",
-            r.moves.len(),
-            r.mean_gain
-        ));
+        if r.by_cards > 0 {
+            evidence.push(format!(
+                "title cards moved {} title(s) out of disc order, to the episodes they \
+                 caption ({} moved in all) — the disc order did not match the episode \
+                 numbering",
+                r.by_cards,
+                r.moves.len()
+            ));
+        } else {
+            evidence.push(format!(
+                "dialogue moved {} title(s) out of disc order (mean fit {:.1} standard \
+                 deviations better than in disc order) — the disc order did not match the \
+                 episode numbering",
+                r.moves.len(),
+                r.mean_gain
+            ));
+        }
         let mut strongest = r.moves.clone();
         strongest.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         let disc_of: Vec<u32> = ordered
@@ -743,6 +800,48 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             ));
         }
     }
+    // Hold the answer up against the title cards, whatever decided it: one naming
+    // another episode means something is wrong; one on every title, each agreeing, is
+    // as close to proof as inference gets.
+    let disc_of_title: Vec<u32> = ordered
+        .iter()
+        .flat_map(|d| std::iter::repeat(d.disc_number).take(d.titles.len()))
+        .collect();
+    let mut agree = 0usize;
+    let mut wrong: Vec<String> = Vec::new();
+    for (t, title) in flat.iter().enumerate() {
+        let Some(c) = sc.card[t] else { continue };
+        if c == assigned[t] {
+            agree += 1;
+        } else {
+            let (own, got) = (&episodes[c], &episodes[assigned[t]]);
+            wrong.push(format!(
+                "disc {} {} is captioned as S{:02}E{:02} \"{}\", not S{:02}E{:02}",
+                disc_of_title[t], title.name, own.season, own.number, own.name, got.season,
+                got.number
+            ));
+        }
+    }
+    if !wrong.is_empty() {
+        evidence.push(format!(
+            "title cards contradict this for {} title(s): {}",
+            wrong.len(),
+            wrong.join("; ")
+        ));
+        confidence = Confidence::Weak;
+    } else if agree == total_titles {
+        evidence.push(format!(
+            "every title's on-screen title card names the episode proposed for it \
+             ({agree} of {agree})"
+        ));
+        confidence = Confidence::Strong;
+    } else if agree > 0 {
+        evidence.push(format!(
+            "{agree} of {total_titles} titles carry a title card, each naming the episode \
+             proposed for it"
+        ));
+    }
+
     evidence
         .push("solving the set jointly is still inference — confirm before filing".to_string());
 
@@ -1581,6 +1680,98 @@ mod grouping_tests {
         assert_eq!(s.placements[1].first_episode, 4);
         assert!(s.evidence.iter().any(|e| e.contains("out of disc order")));
         assert_eq!(s.confidence, Confidence::Weak, "a reordering is for a person to confirm");
+    }
+
+    /// A 20 minute title with no dialogue.
+    fn silent(name: &str) -> DiscTitle {
+        DiscTitle {
+            name: name.into(),
+            duration_secs: 20.0 * 60.0,
+            dialogue: None,
+            cards: Vec::new(),
+        }
+    }
+
+    /// A title whose subtitles caption episode `n` of the monster season's title card.
+    fn captioned(mut t: DiscTitle, n: u32) -> DiscTitle {
+        let name = monster_season().episodes[n as usize - 1].name.clone();
+        t.cards = crate::cards::find(&format!("\"Episode {n}: {name}\" and then"));
+        t
+    }
+
+    fn numbers(s: &SetSolution) -> Vec<Vec<u32>> {
+        s.placements
+            .iter()
+            .map(|p| p.matches.iter().map(|m| m.episode.number).collect())
+            .collect()
+    }
+
+    #[test]
+    fn title_cards_place_a_set_that_runtime_cannot() {
+        // Every episode runs 20 minutes and there is no dialogue: nothing but the cards
+        // says the set starts at episode 3.
+        let discs = vec![
+            SetDisc {
+                disc_number: 1,
+                job_id: "a".into(),
+                titles: (3..=5).map(|n| captioned(silent(&format!("t{n}")), n)).collect(),
+            },
+            SetDisc {
+                disc_number: 2,
+                job_id: "b".into(),
+                titles: (6..=8).map(|n| captioned(silent(&format!("t{n}")), n)).collect(),
+            },
+        ];
+        let s = solve(&discs, &[monster_season()]).expect("solved");
+        assert_eq!(numbers(&s), vec![vec![3, 4, 5], vec![6, 7, 8]]);
+        assert_eq!(s.confidence, Confidence::Strong, "{:?}", s.evidence);
+        assert!(s.evidence.iter().any(|e| e.contains("6 of 6")), "{:?}", s.evidence);
+    }
+
+    #[test]
+    fn title_cards_move_a_holiday_episode_the_dialogue_says_nothing_about() {
+        // The broadcast-order case again, but the dialogue shares no word with any
+        // synopsis: only the cards can say the fourth title is the Christmas episode.
+        let order = [[1, 2, 3, 7], [4, 5, 6, 8]];
+        let discs: Vec<SetDisc> = order
+            .iter()
+            .enumerate()
+            .map(|(d, eps)| SetDisc {
+                disc_number: d as u32 + 1,
+                job_id: format!("{d}"),
+                titles: eps
+                    .iter()
+                    .map(|&n| captioned(spoken(&format!("t{n}"), &format!("blorp{n} quux{n}")), n))
+                    .collect(),
+            })
+            .collect();
+        let s = solve(&discs, &[monster_season()]).expect("solved");
+        assert_eq!(numbers(&s), vec![vec![1, 2, 3, 7], vec![4, 5, 6, 8]]);
+        assert!(
+            s.evidence.iter().any(|e| e.contains("title cards moved")),
+            "{:?}",
+            s.evidence
+        );
+        assert_eq!(s.confidence, Confidence::Strong, "{:?}", s.evidence);
+    }
+
+    #[test]
+    fn a_title_card_the_answer_disagrees_with_keeps_the_set_weak() {
+        let mut titles: Vec<DiscTitle> =
+            (1..=6).map(|n| captioned(silent(&format!("t{n}")), n)).collect();
+        // One card from another part of the season: no consecutive placement honours it.
+        titles[1] = captioned(silent("t2"), 8);
+        let discs = vec![
+            SetDisc { disc_number: 1, job_id: "a".into(), titles: titles[..3].to_vec() },
+            SetDisc { disc_number: 2, job_id: "b".into(), titles: titles[3..].to_vec() },
+        ];
+        let s = solve(&discs, &[monster_season()]).expect("solved");
+        assert_eq!(s.confidence, Confidence::Weak);
+        assert!(
+            s.evidence.iter().any(|e| e.contains("contradict") && e.contains("t2")),
+            "{:?}",
+            s.evidence
+        );
     }
 
     #[test]

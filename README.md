@@ -114,10 +114,13 @@ took 29 seconds, with near-perfect text.
 Many series caption their episode's title card — `"Episode 5: Phantoms of the Dead"` —
 which names the episode outright. A title's earliest such card, where the words after
 the number are an episode's name in that season, is taken as its own; a later one is
-usually the next episode's preview. When runtimes tie, the cards decide before the
-synopsis comparison or the disc number does. A card naming a different episode than the
-one proposed keeps the match `weak` and says which title; a card on every title, each
-agreeing, makes it `strong`. That is still inference, so it is still confirmed by hand.
+usually the next episode's preview. On a single disc, when runtimes tie, the cards decide
+before the synopsis comparison or the disc number does. Solving a box set, a card makes
+every other episode a poor fit for that title, and holds it to its episode when titles
+are reordered — so a card alone can move a holiday episode authored out of order. Either
+way, a card naming a different episode than the one proposed keeps the match `weak` and
+says which title; a card on every title, each agreeing, makes it `strong`. That is still
+inference, so it is still confirmed by hand.
 
 That disc order is an assumption, and a set authored in broadcast order breaks it: one
 season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2, so 16 of
