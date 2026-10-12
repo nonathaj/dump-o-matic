@@ -779,6 +779,7 @@ mod tests {
             name: name.into(),
             duration_secs: mins * 60.0,
             dialogue: None,
+            cards: Vec::new(),
         }
     }
 
@@ -1138,6 +1139,7 @@ mod tests {
             name: name.into(),
             duration_secs: mins * 60.0,
             dialogue: Some(dumo_core::text::count_words(dialogue)),
+            cards: Vec::new(),
         }
     }
 
@@ -1392,6 +1394,7 @@ mod grouping_tests {
                     name: format!("t{i:02}.mkv"),
                     duration_secs: 3060.0,
                     dialogue: None,
+                    cards: Vec::new(),
                 })
                 .collect(),
         }
@@ -1538,6 +1541,7 @@ mod grouping_tests {
             name: name.into(),
             duration_secs: 20.0 * 60.0,
             dialogue: Some(dumo_core::text::count_words(&text)),
+            cards: Vec::new(),
         }
     }
 

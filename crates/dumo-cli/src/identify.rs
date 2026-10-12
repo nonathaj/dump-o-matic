@@ -318,7 +318,13 @@ fn identify_job(
 const DIALOGUE_WINDOW_SECS: u32 = 4 * 3600;
 
 /// Dialogue for one title as word counts, or `None` if it has no usable subtitle track.
-fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashMap<String, u32>> {
+/// A title's dialogue words, and the "Episode N: Name" cards captioned in it.
+type Dialogue = (
+    Option<std::collections::HashMap<String, u32>>,
+    Vec<dumo_identify::cards::Card>,
+);
+
+fn read_dialogue(path: &std::path::Path) -> Dialogue {
     let srt = match dumo_backends::subtitles::extract_text(path, DIALOGUE_WINDOW_SECS) {
         Ok(s) => s,
         Err(dumo_backends::BackendError::NotInstalled { tool }) => {
@@ -332,15 +338,15 @@ fn read_dialogue(path: &std::path::Path) -> Option<std::collections::HashMap<Str
                      not installed — e.g. `sudo apt install tesseract-ocr`)"
                 );
             }
-            return None;
+            return (None, Vec::new());
         }
-        Err(_) => return None,
+        Err(_) => return (None, Vec::new()),
     };
-    let words =
-        dumo_backends::subtitles::count_words(&dumo_backends::subtitles::dialogue_text(&srt));
+    let text = dumo_backends::subtitles::dialogue_text(&srt);
+    let words = dumo_backends::subtitles::count_words(&text);
     // A handful of words is a stray forced-subtitle caption, not dialogue; scoring on it
     // would be worse than admitting we have no signal.
-    (words.len() >= 20).then_some(words)
+    ((words.len() >= 20).then_some(words), dumo_identify::cards::find(&text))
 }
 
 /// Describe a runtime difference, or say there was nothing to compare.
@@ -1146,15 +1152,20 @@ fn analyse_video(
         let path = job_dir.join(&t.name);
         print!("  reading dialogue from {} ... ", t.name);
         std::io::stdout().flush().ok();
-        let dialogue = read_dialogue(&path);
+        let (dialogue, cards) = read_dialogue(&path);
         match &dialogue {
-            Some(w) => println!("{} words", w.len()),
-            None => println!("no usable text subtitle track"),
+            Some(w) => print!("{} words", w.len()),
+            None => print!("no usable text subtitle track"),
+        }
+        match cards.first() {
+            Some(c) => println!(", title card \"episode {} {}\"", c.number, c.following),
+            None => println!(),
         }
         titles.push(dumo_identify::matching::DiscTitle {
             name: t.name.trim_start_matches("raw/").to_string(),
             duration_secs: t.duration_secs,
             dialogue,
+            cards,
         });
     }
     if titles.is_empty() {
@@ -1794,15 +1805,20 @@ fn solve_video_set(
             let path = dir.join(&t.name);
             print!("  reading dialogue from {} ... ", t.name);
             std::io::stdout().flush().ok();
-            let dialogue = read_dialogue(&path);
+            let (dialogue, cards) = read_dialogue(&path);
             match &dialogue {
-                Some(w) => println!("{} words", w.len()),
-                None => println!("no subtitle track"),
+                Some(w) => print!("{} words", w.len()),
+                None => print!("no subtitle track"),
+            }
+            match cards.first() {
+                Some(c) => println!(", title card \"episode {} {}\"", c.number, c.following),
+                None => println!(),
             }
             titles.push(DiscTitle {
                 name: t.name.trim_start_matches("raw/").to_string(),
                 duration_secs: t.duration_secs,
                 dialogue,
+                cards,
             });
         }
         if titles.is_empty() {

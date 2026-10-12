@@ -6,6 +6,7 @@
 //! acceptance.
 
 pub mod accuraterip;
+pub mod cards;
 pub mod cue;
 pub mod datfile;
 pub mod discset;

@@ -286,6 +286,7 @@ mod tests {
             name: name.into(),
             duration_secs: mins * 60.0,
             dialogue: Some(dumo_core::text::count_words(&text)),
+            cards: Vec::new(),
         }
     }
 

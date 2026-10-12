@@ -47,6 +47,8 @@ pub struct SeasonMatch {
     pub disc_hint_used: bool,
     /// Whether dialogue chose between alignments that runtime could not separate.
     pub dialogue_decided: bool,
+    /// Whether on-screen episode title cards chose between tied alignments.
+    pub cards_decided: bool,
     /// Every scored window: (mean, max, counted, start index).
     pub all_windows: Vec<(f64, f64, usize, usize)>,
     /// How many titles in the chosen window actually had a runtime to compare against.
@@ -85,6 +87,8 @@ pub struct DiscTitle {
     /// the same minute, but they do not say the same words. `None` means the title had
     /// no text subtitle track, and scoring falls back to runtime alone.
     pub dialogue: Option<std::collections::HashMap<String, u32>>,
+    /// "Episode N: Name" captions in the subtitles, in order; see [`crate::cards`].
+    pub cards: Vec<crate::cards::Card>,
 }
 
 impl DiscTitle {
@@ -331,7 +335,43 @@ pub fn match_season_with_hint(
         // that assumption outright — both sides are "disc 1" — so the packing signal can
         // be confidently wrong in a way dialogue is not.
         let tied_starts: Vec<usize> = tied.iter().map(|w| w.3).collect();
-        if let Some((start, margin)) = best_window_by_dialogue(titles, season, &tied_starts) {
+        // Title cards before either: a caption naming the episode is the disc saying
+        // outright what a synopsis or a disc number can only suggest.
+        if let Some((start, agree)) = best_window_by_cards(titles, season, &tied_starts) {
+            let window = &season.episodes[start..start + k];
+            m.first_episode = window.first().map(|e| e.number).unwrap_or(0);
+            if let Some(w) = tied.iter().find(|w| w.3 == start) {
+                m.mean_delta = w.0;
+                m.max_delta = w.1;
+            }
+            m.matches = titles
+                .iter()
+                .zip(window.iter())
+                .map(|(t, e)| TitleMatch {
+                    title_name: t.name.clone(),
+                    title_mins: t.mins(),
+                    episode: e.clone(),
+                    delta_mins: e
+                        .runtime_mins
+                        .map(|rt| (t.mins() - f64::from(rt)).abs())
+                        .unwrap_or(f64::NAN),
+                })
+                .collect();
+            m.tied_alternatives = tied
+                .iter()
+                .map(|w| season.episodes[w.3].number)
+                .filter(|n| *n != m.first_episode)
+                .collect();
+            m.cards_decided = true;
+            m.restate_window(season.number, k);
+            m.evidence.push(format!(
+                "runtimes tie between {} alignments; on-screen title cards name the \
+                 episode for {agree} title(s), and only episodes {}-{} agree with all of them",
+                tied.len(),
+                m.first_episode,
+                m.first_episode + k as u32 - 1,
+            ));
+        } else if let Some((start, margin)) = best_window_by_dialogue(titles, season, &tied_starts) {
             let window = &season.episodes[start..start + k];
             m.first_episode = window.first().map(|e| e.number).unwrap_or(0);
             if let Some(w) = tied.iter().find(|w| w.3 == start) {
@@ -411,7 +451,96 @@ pub fn match_season_with_hint(
             }
         }
     }
+    check_against_cards(&mut m, titles, season);
     Some(m)
+}
+
+/// What the title cards say about one alignment: (agreeing, disagreeing) titles.
+fn card_votes(titles: &[DiscTitle], season: &Season, start: usize) -> (usize, usize) {
+    titles
+        .iter()
+        .zip(season.episodes[start..].iter())
+        .fold((0, 0), |(agree, disagree), (t, e)| {
+            match crate::cards::own_episode(&t.cards, &season.episodes) {
+                Some(own) if own.number == e.number => (agree + 1, disagree),
+                Some(_) => (agree, disagree + 1),
+                None => (agree, disagree),
+            }
+        })
+}
+
+/// The tied alignment the title cards support, with how many titles' cards agree.
+///
+/// Only an alignment no card contradicts can win, and it must be the only one with
+/// that much support; otherwise the cards decide nothing and the weaker signals get
+/// their turn.
+fn best_window_by_cards(
+    titles: &[DiscTitle],
+    season: &Season,
+    starts: &[usize],
+) -> Option<(usize, usize)> {
+    let k = titles.len();
+    let votes: Vec<(usize, usize, usize)> = starts
+        .iter()
+        .filter(|&&s| s + k <= season.episodes.len())
+        .map(|&s| {
+            let (agree, disagree) = card_votes(titles, season, s);
+            (s, agree, disagree)
+        })
+        .collect();
+    let &(start, agree, _) = votes
+        .iter()
+        .filter(|v| v.2 == 0 && v.1 > 0)
+        .max_by_key(|v| v.1)?;
+    let rivals = votes.iter().filter(|v| v.0 != start && v.1 >= agree).count();
+    (rivals == 0).then_some((start, agree))
+}
+
+/// Hold the chosen alignment up against the title cards, whatever chose it.
+///
+/// A card naming another episode than the one proposed means the proposal is wrong
+/// somewhere, so it can be no better than weak and the evidence says which title. A
+/// card on every title, each naming the proposed episode, is as close to proof as
+/// inference gets, and makes it strong — still inference, so still confirmed by hand.
+fn check_against_cards(m: &mut SeasonMatch, titles: &[DiscTitle], season: &Season) {
+    let Some(start) = season
+        .episodes
+        .iter()
+        .position(|e| e.number == m.first_episode)
+    else {
+        return;
+    };
+    if start + titles.len() > season.episodes.len() {
+        return;
+    }
+    let (agree, disagree) = card_votes(titles, season, start);
+    if disagree > 0 {
+        let wrong: Vec<String> = titles
+            .iter()
+            .zip(season.episodes[start..].iter())
+            .filter_map(|(t, e)| {
+                let own = crate::cards::own_episode(&t.cards, &season.episodes)?;
+                (own.number != e.number).then(|| {
+                    format!("{} is captioned as E{:02} \"{}\", not E{:02}", t.name, own.number, own.name, e.number)
+                })
+            })
+            .collect();
+        m.evidence.push(format!(
+            "title cards contradict this for {disagree} title(s): {}",
+            wrong.join("; ")
+        ));
+        m.confidence = Confidence::Weak;
+    } else if agree == titles.len() {
+        m.evidence.push(format!(
+            "every title's on-screen title card names the episode proposed for it ({agree} of {agree})"
+        ));
+        m.confidence = Confidence::Strong;
+    } else if agree > 0 {
+        m.evidence.push(format!(
+            "{agree} of {} titles carry a title card, each naming the episode proposed for it",
+            titles.len()
+        ));
+    }
 }
 
 /// Find the best contiguous run of episodes matching these titles.
@@ -534,6 +663,7 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
         tied_alternatives,
         disc_hint_used: false,
         dialogue_decided: false,
+        cards_decided: false,
         all_windows: scored.clone(),
     })
 }
@@ -666,6 +796,7 @@ mod tests {
             name: name.into(),
             duration_secs: mins * 60.0,
             dialogue: None,
+            cards: Vec::new(),
         }
     }
 
@@ -779,6 +910,69 @@ mod tests {
         assert_eq!(disc_number_from_label("MOVIE_TITLE"), None);
     }
 
+    /// Nine 25-minute episodes, so runtime ties everywhere; titles captioned like
+    /// Frieren's, each with its own card and the next episode's preview card.
+    fn carded(first: u32, count: u32) -> (Season, Vec<DiscTitle>) {
+        let names = [
+            "The Journey's End", "It Didn't Have to Be Magic...", "Killing Magic",
+            "The Land Where Souls Rest", "Phantoms of the Dead", "The Hero of the Village",
+            "Like a Fairy Tale", "Frieren the Slayer", "Aura the Guillotine",
+        ];
+        let episodes: Vec<Episode> = (1..=9)
+            .map(|n| Episode {
+                season: 1,
+                number: n,
+                name: names[n as usize - 1].into(),
+                runtime_mins: Some(25),
+                air_date: None,
+                overview: None,
+            })
+            .collect();
+        let titles = (first..first + count)
+            .map(|n| {
+                let mut text = format!("\"Episode {n}: {}\" dialogue", names[n as usize - 1]);
+                if let Some(next) = names.get(n as usize) {
+                    text += &format!(" \"Episode {} {next}\"", n + 1);
+                }
+                DiscTitle {
+                    name: format!("t{:02}.mkv", n - first),
+                    duration_secs: 25.0 * 60.0,
+                    dialogue: None,
+                    cards: crate::cards::find(&text),
+                }
+            })
+            .collect();
+        (Season { number: 1, episodes }, titles)
+    }
+
+    #[test]
+    fn title_cards_break_a_tie_and_outrank_the_disc_number() {
+        // A "disc 1" holding episodes 3-6: the disc number would say 1-4. The preview
+        // cards also name 4-7, which must not make the window one later score as well.
+        let (season, titles) = carded(3, 4);
+        let m = match_season_with_hint(&titles, &season, Some(1)).expect("matched");
+        assert_eq!(m.first_episode, 3, "{:?}", m.evidence);
+        assert!(m.cards_decided);
+        assert!(!m.disc_hint_used && !m.dialogue_decided);
+        assert_eq!(m.confidence, Confidence::Strong, "{:?}", m.evidence);
+        assert!(m.evidence[0].contains("episodes 3"), "{:?}", m.evidence[0]);
+    }
+
+    #[test]
+    fn a_title_card_naming_another_episode_keeps_the_match_weak() {
+        let (season, mut titles) = carded(1, 4);
+        // Swap two titles' cards: the alignment by runtime can no longer be right.
+        let c = titles[1].cards.clone();
+        titles[1].cards = titles[2].cards.clone();
+        titles[2].cards = c;
+        let mut m = match_season(&titles, &season).expect("matched");
+        m.confidence = Confidence::Strong;
+        check_against_cards(&mut m, &titles, &season);
+        assert_eq!(m.confidence, Confidence::Weak);
+        let said = m.evidence.last().unwrap();
+        assert!(said.contains("contradict") && said.contains("t01.mkv"), "{said}");
+    }
+
     #[test]
     fn dialogue_breaks_a_runtime_tie_and_outranks_the_disc_number() {
         // Every episode runs 47 min, so runtime ties across the whole season and the
@@ -809,6 +1003,7 @@ mod tests {
                 dialogue: Some(dumo_core::text::count_words(
                     "the forger stole a priceless painting from the gallery",
                 )),
+                cards: Vec::new(),
             },
             DiscTitle {
                 name: "b.mkv".into(),
@@ -816,6 +1011,7 @@ mod tests {
                 dialogue: Some(dumo_core::text::count_words(
                     "the disco owner hypnotises dancers with that record",
                 )),
+                cards: Vec::new(),
             },
             DiscTitle {
                 name: "c.mkv".into(),
@@ -823,6 +1019,7 @@ mod tests {
                 dialogue: Some(dumo_core::text::count_words(
                     "an entomologist controls ants attacking the chemical plant",
                 )),
+                cards: Vec::new(),
             },
         ];
 
@@ -858,6 +1055,7 @@ mod tests {
                 name: (*n).into(),
                 duration_secs: 47.0 * 60.0,
                 dialogue: None,
+                cards: Vec::new(),
             })
             .collect();
 
