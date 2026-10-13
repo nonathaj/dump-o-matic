@@ -13,6 +13,7 @@ mod adopt;
 mod clean;
 mod devices;
 mod identify;
+mod languages;
 mod migrate;
 mod music;
 mod refsubs;

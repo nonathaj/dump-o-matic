@@ -823,6 +823,7 @@ fn record_identification(
         source: file_name(&m.source),
         files,
         superseded: Vec::new(),
+        trimmed: Vec::new(),
         identified_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -948,6 +949,7 @@ fn identify_device_content(
                         sha256: sha256.clone(),
                     }],
                     superseded: Vec::new(),
+                    trimmed: Vec::new(),
                     identified_at: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -2152,7 +2154,9 @@ fn file_titles(
     let mut job = Job::load(&job_dir).with_context(|| format!("loading job {job_id}"))?;
     let mut filed: Vec<dumo_core::ReadyFile> = Vec::new();
     let mut moved_sources: Vec<String> = Vec::new();
+    let mut trimmed: Vec<dumo_core::Trimmed> = Vec::new();
     let mut failures = 0usize;
+    let languages = cfg.video.languages_for(title);
 
     for (title_name, rel) in items {
         // The solver reports the title by its staging-relative name.
@@ -2173,6 +2177,74 @@ fn file_titles(
             .iter()
             .find(|a| src.ends_with(&a.relative_path))
             .map(|a| a.sha256.clone());
+
+        // Tracks in languages nobody asked for are dropped by filing a remuxed copy;
+        // the rip itself stays in the job until that copy is verified at the
+        // destination, because it is the only one holding what was dropped.
+        if let Some(langs) = &languages {
+            let selection = match dumo_backends::mkvmerge::tracks(&src) {
+                Ok(tracks) => crate::languages::choose(&tracks, langs),
+                Err(e) => {
+                    println!("FAILED");
+                    println!("     could not read its tracks: {e}");
+                    println!("     Nothing was moved or deleted for this title.");
+                    failures += 1;
+                    continue;
+                }
+            };
+            for note in &selection.kept_whole {
+                print!("[{note}] ");
+            }
+            if selection.trims() {
+                if dest.exists() {
+                    println!("FAILED");
+                    println!("     {} already exists; refusing to overwrite", dest.display());
+                    failures += 1;
+                    continue;
+                }
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let partial = dumo_core::fsops::partial_path(&dest);
+                let placed = dumo_backends::mkvmerge::remux_keeping(
+                    &src,
+                    &partial,
+                    &selection.audio,
+                    &selection.subtitles,
+                )
+                .map_err(anyhow::Error::from)
+                .and_then(|()| {
+                    dumo_core::fsops::place_written(&dest).map_err(anyhow::Error::from)
+                });
+                match placed {
+                    Ok(sha256) => {
+                        let bytes = std::fs::metadata(&dest)?.len();
+                        println!("trimmed: dropped {}", selection.dropped.join(", "));
+                        filed.push(dumo_core::ReadyFile {
+                            path: rel.clone(),
+                            bytes,
+                            sha256,
+                        });
+                        let original = src
+                            .strip_prefix(&job_dir)
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|_| title_name.clone());
+                        trimmed.push(dumo_core::Trimmed {
+                            original,
+                            filed: rel,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&partial);
+                        println!("FAILED");
+                        println!("     {e}");
+                        println!("     Nothing was moved or deleted for this title.");
+                        failures += 1;
+                    }
+                }
+                continue;
+            }
+        }
 
         match dumo_core::fsops::move_verified(&src, &dest, recorded.as_deref()) {
             Ok(outcome) => {
@@ -2224,6 +2296,7 @@ fn file_titles(
         source: source.to_string(),
         files: filed,
         superseded: Vec::new(),
+        trimmed,
         identified_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

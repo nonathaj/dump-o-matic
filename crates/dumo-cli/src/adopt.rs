@@ -297,6 +297,7 @@ fn adopt_one(a: &Adoptable, cfg: &Config) -> Result<String> {
             sha256: a.sha256.clone(),
         }],
         superseded: Vec::new(),
+        trimmed: Vec::new(),
         identified_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

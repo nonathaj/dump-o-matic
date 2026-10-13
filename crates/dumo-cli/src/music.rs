@@ -397,6 +397,7 @@ pub fn identify_audio(
         source: "redumper .bin/.cue".into(),
         files,
         superseded: Vec::new(),
+        trimmed: Vec::new(),
         identified_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

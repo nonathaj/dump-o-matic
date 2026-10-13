@@ -115,6 +115,26 @@ placement is doubtful — its dialogue barely singles out its episode, or anothe
 would fit about as well — is named and keeps the match `weak`. Dialogue is not proof: on
 that Scott Pilgrim disc it placed six titles of eight, against none in disc order.
 
+Which audio and subtitle languages a filed video keeps is `[video] languages`, with
+`[video.keep_languages]` naming shows or films that keep more:
+
+```toml
+[video]
+languages = ["eng"]
+
+[video.keep_languages]
+"Frieren: Beyond Journey's End" = ["eng", "jpn"]
+```
+
+MakeMKV itself has to keep every track for this to work — add
+`app_DefaultSelectionString = "+sel:all,-sel:mvcvideo"` to its `settings.conf` — since its
+default drops audio in other languages before anything here sees it. Filing then remuxes
+each title with mkvmerge, without re-encoding, keeping the wanted tracks; a title with no
+track of a kind in a wanted language keeps all of that kind, so nothing is filed silent,
+and a track that does not say its language is kept. The rip stays in the job until
+`clean` has re-hashed the trimmed copy at the destination, since it alone holds what was
+dropped. With no `[video]` section, every track is kept, as before.
+
 Dialogue comes from a title's text subtitle track where it has one — on a DVD,
 MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
 so when there is no text track, the first non-forced PGS track is decoded and read with

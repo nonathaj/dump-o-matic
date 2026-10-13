@@ -128,6 +128,8 @@ pub fn run(args: CleanArgs) -> Result<()> {
     let mut unfiled_bytes = 0u64;
     let mut unfiled: Vec<RawFile> = Vec::new();
     let mut not_migrated = 0usize;
+    // Rips filed as a trimmed copy: (the rip, the copy's destination, the copy's hash).
+    let mut trimmed: Vec<(RawFile, PathBuf, String)> = Vec::new();
 
     for dir in &dirs {
         let Ok(job) = Job::load(dir) else { continue };
@@ -144,6 +146,31 @@ pub fn run(args: CleanArgs) -> Result<()> {
             .any(|f| f.path.to_ascii_lowercase().ends_with(".chd"));
         for a in &job.artifacts {
             if !dir.join(&a.relative_path).is_file() {
+                continue;
+            }
+            // A rip filed as a copy with fewer tracks: redundant once that copy is safe
+            // at the destination, whatever its tier would otherwise be.
+            if let Some(t) = id.trimmed.iter().find(|t| t.original == a.relative_path) {
+                let filed = id.files.iter().find(|f| f.path == t.filed);
+                let category = crate::migrate::category_of(&t.filed);
+                let dest = cfg
+                    .destinations
+                    .iter()
+                    .find(|d| d.accepts(&category))
+                    .map(|d| crate::migrate::destination_path(&d.root, &t.filed));
+                if let (Some(filed), Some(dest)) = (filed, dest) {
+                    trimmed.push((
+                        RawFile {
+                            job_dir: dir.clone(),
+                            job_id: job.id.clone(),
+                            relative: a.relative_path.clone(),
+                            sha256: a.sha256.clone(),
+                            bytes: a.bytes,
+                        },
+                        dest,
+                        filed.sha256.clone(),
+                    ));
+                }
                 continue;
             }
             match classify(&a.relative_path, has_packed_copy) {
@@ -213,7 +240,7 @@ pub fn run(args: CleanArgs) -> Result<()> {
         to_drop.extend(unfiled.iter());
     }
 
-    if candidates.is_empty() && to_drop.is_empty() {
+    if candidates.is_empty() && to_drop.is_empty() && trimmed.is_empty() {
         println!("Nothing to reclaim.");
         if not_migrated > 0 {
             println!(
@@ -241,7 +268,18 @@ pub fn run(args: CleanArgs) -> Result<()> {
         println!();
     }
 
-    let raw_total: u64 = to_drop.iter().map(|f| f.bytes).sum();
+    let raw_total: u64 = to_drop.iter().map(|f| f.bytes).sum::<u64>()
+        + trimmed.iter().map(|(f, _, _)| f.bytes).sum::<u64>();
+    if !trimmed.is_empty() {
+        println!("Rips filed as a copy with fewer tracks (the dropped tracks exist only here):");
+        for (f, dest, _) in &trimmed {
+            println!("  {}/{} ({})", f.job_id, f.relative, crate::migrate::human_size(f.bytes));
+            println!("      filed as: {}", dest.display());
+        }
+        println!("      each is removed only once its filed copy is re-hashed at the");
+        println!("      destination and matches.");
+        println!();
+    }
     if !redundant.is_empty() {
         println!("Dumped images, reproducible from the packed copy at the destination:");
         for f in &redundant {
@@ -330,6 +368,40 @@ pub fn run(args: CleanArgs) -> Result<()> {
             }
             Err(e) => {
                 println!("KEPT — could not read the destination: {e}");
+                kept += 1;
+            }
+        }
+    }
+
+    // --- Rips filed as a trimmed copy, once that copy is proved at the destination ----
+    for (f, dest, filed_sha) in &trimmed {
+        print!("  {}/{} ... ", f.job_id, f.relative);
+        std::io::stdout().flush().ok();
+        if !dest.is_file() {
+            println!("KEPT — no filed copy at {}", dest.display());
+            kept += 1;
+            continue;
+        }
+        match hash::sha256_file(dest) {
+            Ok((sha256, _)) if &sha256 == filed_sha => {
+                match std::fs::remove_file(f.job_dir.join(&f.relative)) {
+                    Ok(()) => {
+                        freed += f.bytes;
+                        record_reclaimed(&f.job_dir, &f.relative);
+                        println!("reclaimed (its trimmed copy verified at the destination)");
+                    }
+                    Err(e) => {
+                        println!("KEPT — could not remove: {e}");
+                        kept += 1;
+                    }
+                }
+            }
+            Ok(_) => {
+                println!("KEPT — the filed copy does not match the manifest");
+                kept += 1;
+            }
+            Err(e) => {
+                println!("KEPT — could not read the filed copy: {e}");
                 kept += 1;
             }
         }

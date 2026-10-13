@@ -260,6 +260,45 @@ pub fn copy_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result<S
     Ok(actual)
 }
 
+/// Where another program should write a file that is to end up at `dest`: a hidden
+/// sibling, so an interrupted write never leaves anything at the real path.
+pub fn partial_path(dest: &Path) -> PathBuf {
+    temp_sibling(dest)
+}
+
+/// Put a file another program wrote at [`partial_path`]`(dest)` in place at `dest`.
+///
+/// The partial file is synced, hashed as read back from storage, and only then renamed
+/// to `dest`, which must not exist. Returns that hash: the file was produced here, so
+/// there is nothing earlier to compare it with, and the hash read back is what gets
+/// recorded. On any failure the partial file is removed and `dest` is never created.
+pub fn place_written(dest: &Path) -> Result<String> {
+    let tmp = temp_sibling(dest);
+    if dest.exists() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(FsError::DestinationExists {
+            path: dest.to_path_buf(),
+        });
+    }
+    let synced = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)
+        .and_then(|f| f.sync_all());
+    if let Err(e) = synced {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(FsError::Io { path: tmp, source: e });
+    }
+    let actual = match hash_evicting(&tmp) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(FsError::Io { path: tmp, source: e });
+        }
+    };
+    std::fs::rename(&tmp, dest).map_err(io_err(dest))?;
+    Ok(actual)
+}
+
 /// Hash a file after evicting it from the page cache, so the read reaches storage.
 pub fn hash_evicting(path: &Path) -> std::io::Result<String> {
     {
@@ -300,6 +339,26 @@ fn temp_sibling(dest: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_file_is_placed_with_its_hash_and_never_over_another() {
+        let dir = std::env::temp_dir().join(format!("dumo-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.mkv");
+        std::fs::write(partial_path(&dest), b"remuxed").unwrap();
+        let h = place_written(&dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"remuxed");
+        assert_eq!(h, crate::hash::sha256_file(&dest).unwrap().0);
+        assert!(!partial_path(&dest).exists());
+
+        // An occupied destination is refused, and the new partial file is cleaned up.
+        std::fs::write(partial_path(&dest), b"second").unwrap();
+        assert!(matches!(place_written(&dest), Err(FsError::DestinationExists { .. })));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"remuxed");
+        assert!(!partial_path(&dest).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     use std::io::Write;
 
     fn scratch(name: &str) -> PathBuf {

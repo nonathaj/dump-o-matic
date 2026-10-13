@@ -141,8 +141,22 @@ pub struct Identification {
     /// whole point of the field, so nothing is ever deleted before its successor exists.
     #[serde(default)]
     pub superseded: Vec<String>,
+    /// Rips that were filed as a copy with fewer tracks, each with the file filed in
+    /// its place. The original stays in the job until that copy is verified at the
+    /// destination, since it is the only one holding the tracks that were dropped.
+    #[serde(default)]
+    pub trimmed: Vec<Trimmed>,
     /// Unix timestamp of identification.
     pub identified_at: u64,
+}
+
+/// A rip filed as a copy with only some of its tracks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Trimmed {
+    /// The rip, relative to the job directory, e.g. `raw/B1_t01.mkv`.
+    pub original: String,
+    /// The copy filed in its place, relative to staging, as in [`Identification::files`].
+    pub filed: String,
 }
 
 /// Provenance for content taken off a storage device rather than ripped from a disc.

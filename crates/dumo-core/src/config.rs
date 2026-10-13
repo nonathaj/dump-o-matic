@@ -256,6 +256,60 @@ pub struct DatfileConfig {
 /// `.bin` — is not always the form a front-end wants. Which transformation is right
 /// depends on the platform, so this is configuration rather than a rule baked into the
 /// code.
+/// Which audio and subtitle languages a filed video keeps.
+///
+/// MakeMKV is set to rip every track, so that the original audio is there for the shows
+/// that want it; filing then drops the tracks in other languages, by remuxing without
+/// re-encoding. Left empty, nothing is dropped.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct VideoConfig {
+    /// ISO 639-2 codes to keep, e.g. `["eng"]`. Empty keeps every track.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// Shows and films that keep more than `languages`, by title as filed, with or
+    /// without the year: `"Frieren: Beyond Journey's End" = ["eng", "jpn"]`.
+    #[serde(default)]
+    pub keep_languages: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl VideoConfig {
+    /// The languages a title keeps, or `None` to keep every track.
+    ///
+    /// `title` is as filed, e.g. `Frieren: Beyond Journey's End (2023)`; a key matches it
+    /// with or without the year, ignoring case and punctuation.
+    pub fn languages_for(&self, title: &str) -> Option<Vec<String>> {
+        fn norm(s: &str) -> String {
+            s.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect()
+        }
+        let without_year = match title.trim_end().strip_suffix(')') {
+            Some(rest) => match rest.rfind(" (") {
+                Some(i) if rest[i + 2..].chars().all(|c| c.is_ascii_digit()) => &rest[..i],
+                _ => title,
+            },
+            None => title,
+        };
+        let extra = self
+            .keep_languages
+            .iter()
+            .find(|(k, _)| norm(k) == norm(title) || norm(k) == norm(without_year))
+            .map(|(_, v)| v.clone());
+        if self.languages.is_empty() && extra.is_none() {
+            return None;
+        }
+        let mut all: Vec<String> = self.languages.clone();
+        for l in extra.unwrap_or_default() {
+            if !all.contains(&l) {
+                all.push(l);
+            }
+        }
+        // A per-title list alone, with no default, keeps exactly what it names.
+        Some(all)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GamesConfig {
     /// Platform slugs whose disc images are packed into a single CHD.
@@ -341,6 +395,9 @@ pub struct Config {
 
     #[serde(default)]
     pub api: ApiConfig,
+
+    #[serde(default)]
+    pub video: VideoConfig,
 
     /// Path this config was loaded from. Not part of the file itself.
     #[serde(skip)]
@@ -668,6 +725,27 @@ pub fn check(cfg: &Config) -> Vec<CheckResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_languages_default_to_keeping_everything() {
+        assert_eq!(VideoConfig::default().languages_for("Dogma (1999)"), None);
+    }
+
+    #[test]
+    fn a_title_keeps_its_own_languages_besides_the_default() {
+        let mut v = VideoConfig {
+            languages: vec!["eng".into()],
+            ..Default::default()
+        };
+        v.keep_languages
+            .insert("Frieren: Beyond Journey's End".into(), vec!["eng".into(), "jpn".into()]);
+        assert_eq!(
+            v.languages_for("Frieren: Beyond Journey's End (2023)"),
+            Some(vec!["eng".to_string(), "jpn".to_string()])
+        );
+        assert_eq!(v.languages_for("frieren beyond journeys end"), Some(vec!["eng".into(), "jpn".into()]));
+        assert_eq!(v.languages_for("Attack on Titan (2013)"), Some(vec!["eng".to_string()]));
+    }
 
     fn sample() -> Config {
         toml::from_str(

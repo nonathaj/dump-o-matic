@@ -64,6 +64,105 @@ pub fn split_chapters(src: &Path, out_dir: &Path, stem: &str) -> Result<Vec<Path
     Ok(pieces(out_dir, stem))
 }
 
+/// What kind of stream a track carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    Video,
+    Audio,
+    Subtitles,
+    Other,
+}
+
+/// One track of a Matroska file, as mkvmerge numbers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Track {
+    pub id: u32,
+    pub kind: TrackKind,
+    /// ISO 639-2 code, e.g. `eng`; `und` or empty when the file does not say.
+    pub language: String,
+    pub codec: String,
+}
+
+/// The tracks of a Matroska file.
+pub fn tracks(path: &Path) -> Result<Vec<Track>> {
+    let out = Command::new(TOOL)
+        .arg("-J")
+        .arg(path)
+        .output()
+        .map_err(not_installed)?;
+    if !out.status.success() {
+        return Err(BackendError::Failed {
+            tool: TOOL,
+            detail: format!("could not read the tracks of {}", path.display()),
+        });
+    }
+    parse_tracks(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_tracks(json: &str) -> Result<Vec<Track>> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| BackendError::Failed {
+        tool: TOOL,
+        detail: format!("unreadable track list: {e}"),
+    })?;
+    Ok(v["tracks"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| {
+            Some(Track {
+                id: t["id"].as_u64()? as u32,
+                kind: match t["type"].as_str()? {
+                    "video" => TrackKind::Video,
+                    "audio" => TrackKind::Audio,
+                    "subtitles" => TrackKind::Subtitles,
+                    _ => TrackKind::Other,
+                },
+                language: t["properties"]["language"].as_str().unwrap_or("").to_string(),
+                codec: t["codec"].as_str().unwrap_or("").to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Copy `src` to `dest` keeping only the given audio and subtitle tracks, without
+/// re-encoding. Video and everything else is kept. `dest` must not exist.
+pub fn remux_keeping(src: &Path, dest: &Path, audio: &[u32], subtitles: &[u32]) -> Result<()> {
+    if dest.exists() {
+        return Err(BackendError::Failed {
+            tool: TOOL,
+            detail: format!("{} already exists", dest.display()),
+        });
+    }
+    let ids = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let mut cmd = Command::new(TOOL);
+    cmd.arg("--output").arg(dest);
+    // An empty list must be said as "none": `--audio-tracks ""` is not accepted.
+    if audio.is_empty() {
+        cmd.arg("--no-audio");
+    } else {
+        cmd.args(["--audio-tracks", &ids(audio)]);
+    }
+    if subtitles.is_empty() {
+        cmd.arg("--no-subtitles");
+    } else {
+        cmd.args(["--subtitle-tracks", &ids(subtitles)]);
+    }
+    let out = cmd.arg(src).output().map_err(not_installed)?;
+    if out.status.code().map(|c| c > 1).unwrap_or(true) {
+        let _ = std::fs::remove_file(dest);
+        return Err(BackendError::Failed {
+            tool: TOOL,
+            detail: String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| l.contains("Error"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+    Ok(())
+}
+
 /// The `<stem>-NNN.mkv` files in `dir`, in number order.
 fn pieces(dir: &Path, stem: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -95,6 +194,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn reads_track_kinds_and_languages() {
+        // Trimmed from `mkvmerge -J` on a Frieren Blu-ray episode.
+        let json = r#"{"tracks":[
+            {"id":0,"type":"video","codec":"AVC/H.264/MPEG-4p10","properties":{"language":"eng"}},
+            {"id":1,"type":"audio","codec":"TrueHD","properties":{"language":"eng"}},
+            {"id":2,"type":"audio","codec":"TrueHD","properties":{"language":"jpn"}},
+            {"id":3,"type":"subtitles","codec":"HDMV PGS","properties":{}}
+        ]}"#;
+        let t = parse_tracks(json).unwrap();
+        assert_eq!(t.len(), 4);
+        assert_eq!((t[2].kind, t[2].language.as_str()), (TrackKind::Audio, "jpn"));
+        assert_eq!((t[3].kind, t[3].language.as_str()), (TrackKind::Subtitles, ""));
     }
 
     #[test]
