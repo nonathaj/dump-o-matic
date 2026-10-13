@@ -19,6 +19,7 @@ mod refsubs;
 mod repack;
 mod rip;
 mod run;
+mod split;
 mod verify;
 
 use anyhow::{Context, Result};
@@ -232,6 +233,13 @@ enum Command {
         /// --apply --accept-inferred to file, and is recorded as assigned by hand.
         #[arg(long, value_name = "TITLE=S00Enn")]
         assign: Vec<String>,
+        /// Match every title against the series' specials (season 0), as on a bonus
+        /// disc, whatever the volume label says.
+        ///
+        /// For extras that are listed specials: the pieces `split` cuts from a
+        /// compilation of shorts, say. Filing still needs --apply --accept-inferred.
+        #[arg(long)]
+        specials: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -303,6 +311,24 @@ enum Command {
         /// Do not prompt for confirmation.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Cut one title of a job at its chapter marks, into a new job.
+    ///
+    /// For a compilation of things filed separately, such as a run of shorts that are
+    /// each a special. The pieces are cut without re-encoding and hashed into a new job
+    /// that carries the source disc's probe; the source job and its title are not
+    /// changed, and nothing is deleted. Follow with `identify <new job> --specials`.
+    Split {
+        /// Job id or a fragment of one.
+        job: String,
+        /// The title to cut, by file name, e.g. `FRIEREN S1P2 D1_t07.mkv`.
+        title: String,
+        /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -440,7 +466,17 @@ fn main() -> Result<()> {
             config_file: config,
         })
         .map(|_| ()),
-        Command::Identify { job, apply, show, set, accept_inferred, release, assign, config } => {
+        Command::Identify {
+            job,
+            apply,
+            show,
+            set,
+            accept_inferred,
+            release,
+            assign,
+            specials,
+            config,
+        } => {
             identify::run(identify::IdentifyArgs {
                 job,
                 config_file: config,
@@ -450,6 +486,7 @@ fn main() -> Result<()> {
                 accept_inferred,
                 release,
                 assign,
+                specials,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {
@@ -477,6 +514,12 @@ fn main() -> Result<()> {
                 config_file: config,
             })
         }
+        Command::Split { job, title, dry_run, config } => split::run(split::SplitArgs {
+            job,
+            title,
+            dry_run,
+            config_file: config,
+        }),
         Command::Clean { job, provenance, discard_unfiled, dry_run, yes, config } => {
             clean::run(clean::CleanArgs {
                 job,

@@ -146,6 +146,15 @@ candidates, and a title is proposed only when its dialogue fits one special clea
 better than any other whose runtime is plausible; the rest are listed with their closest
 candidate and stay in the job directory. A pairing you have confirmed yourself can be
 filed with `--assign B3_t01.mkv=S00E14`, and is recorded as assigned by hand.
+`identify --specials` does the same for any job, whatever its label.
+
+Some extras are compilations of specials in one title, a chapter each — Frieren's
+eleven "OO Magic" mini-anime shorts are one 14-minute title. `split <job> <title>` cuts
+such a title at its chapter marks with mkvmerge, without re-encoding, into a new job
+whose pieces are hashed like any rip; the source job and title are left exactly as they
+were. `identify <new job> --specials` then files each piece as its special. On that disc
+the dialogue placed ten of the eleven, and the eleventh was assigned by hand from the
+spell its subtitles name.
 
 With OpenSubtitles credentials configured (`api.opensubtitles_api_key`,
 `api.opensubtitles_username`, `api.opensubtitles_password`, or the matching

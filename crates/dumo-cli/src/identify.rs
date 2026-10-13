@@ -34,6 +34,9 @@ pub struct IdentifyArgs {
     pub release: Option<String>,
     /// Hand-confirmed `TITLE=S00Enn` pairings for a bonus disc.
     pub assign: Vec<String>,
+    /// Match every title against the series' specials, as on a bonus disc, whatever
+    /// the label says.
+    pub specials: bool,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -113,6 +116,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
             args.accept_inferred,
             args.release.as_deref(),
             &args.assign,
+            args.specials,
         )?;
         println!();
     }
@@ -146,6 +150,7 @@ fn identify_job(
     accept_inferred: bool,
     release: Option<&str>,
     assign: &[String],
+    specials: bool,
 ) -> Result<()> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
@@ -173,6 +178,7 @@ fn identify_job(
             apply,
             accept_inferred,
             assign,
+            specials,
         );
     }
     if kind == MediaKind::AudioCd {
@@ -991,6 +997,7 @@ fn analyse_video(
     apply: bool,
     accept_inferred: bool,
     assign: &[String],
+    specials: bool,
 ) -> Result<()> {
     use dumo_identify::video::{self, AnalysisParams, TitleInput};
 
@@ -1154,7 +1161,7 @@ fn analyse_video(
     // On a bonus disc every title is a candidate: the content-length threshold that
     // separates episodes from extras would discard the short specials such a disc
     // exists to hold — a 14 minute fan retrospective is a listed special.
-    let bonus = dumo_identify::specials::is_bonus_label(&label);
+    let bonus = specials || dumo_identify::specials::is_bonus_label(&label);
     let mut titles: Vec<dumo_identify::matching::DiscTitle> = Vec::new();
     for t in analysis
         .titles
@@ -1189,7 +1196,11 @@ fn analyse_video(
     // A bonus disc holds specials, in no episode order; matching it against a season's
     // consecutive run of episodes can only produce confident nonsense.
     if bonus {
-        println!("  Bonus disc, per the volume label: matching against the series' specials");
+        if specials {
+            println!("  Matching every title against the series' specials, as asked");
+        } else {
+            println!("  Bonus disc, per the volume label: matching against the series' specials");
+        }
         return identify_bonus_disc(
             job,
             &titles,
@@ -1684,9 +1695,9 @@ fn identify_bonus_disc(
     for (m, _) in &result.matched {
         println!(
             "    tv/{}{}/Season 00/{}{} S00E{:02} - {}.mkv",
-            candidate.name,
+            sanitise(&candidate.name),
             year,
-            candidate.name,
+            sanitise(&candidate.name),
             year,
             m.episode.number,
             sanitise(&m.episode.name)

@@ -71,6 +71,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         // stops here until a person picks one.
         release: None,
         assign: Vec::new(),
+        specials: false,
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {
