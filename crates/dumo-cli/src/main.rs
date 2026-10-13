@@ -227,12 +227,13 @@ enum Command {
         /// release to file it as (its MusicBrainz ID, as listed by identify).
         #[arg(long)]
         release: Option<String>,
-        /// On a bonus disc, file a title as a given special: `B3_t01.mkv=S00E14`.
+        /// File a title as a given episode: `B3_t01.mkv=S02E04`, or on a bonus disc a
+        /// special, `B3_t01.mkv=S00E14`.
         ///
         /// For a pairing confirmed by hand — by watching it, or reading its captions —
-        /// that the dialogue match could not settle on its own. Repeatable. Still needs
+        /// that the match could not settle on its own. Repeatable. Still needs
         /// --apply --accept-inferred to file, and is recorded as assigned by hand.
-        #[arg(long, value_name = "TITLE=S00Enn")]
+        #[arg(long, value_name = "TITLE=SxxEyy")]
         assign: Vec<String>,
         /// Match every title against the series' specials (season 0), as on a bonus
         /// disc, whatever the volume label says.

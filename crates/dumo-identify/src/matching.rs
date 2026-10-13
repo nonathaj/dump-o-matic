@@ -227,6 +227,10 @@ pub fn season_number_from_label(label: &str) -> Option<u32> {
                 return Some(n);
             }
         }
+        // "SEASON2", as in `AttackOnTitan Season2 D1`.
+        if let Some(n) = glued_number(w, &["SEASON", "SERIES"]) {
+            return Some(n);
+        }
         // "S02" / "S2" / "S1P2", but not "S" alone and not the "S" of a word like
         // "SEASON".
         if let Some((season, _)) = season_token(w) {
@@ -234,6 +238,41 @@ pub fn season_number_from_label(label: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// The number glued to the end of one of `words`: `SEASON2` -> 2.
+fn glued_number(token: &str, words: &[&str]) -> Option<u32> {
+    let up = token.to_ascii_uppercase();
+    words.iter().find_map(|w| {
+        let rest = up.strip_prefix(w)?;
+        (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+            .then(|| rest.parse().ok())
+            .flatten()
+    })
+}
+
+/// Split a word written in CamelCase into its words: `AttackOnTitan` -> `Attack On Titan`.
+///
+/// Only at two or more lowercase-to-uppercase boundaries: one is as often a name as
+/// run-together words ("McDonald", "iCarly", "MythBusters"), and a search for the
+/// name as written does better than one split wrongly.
+fn split_camel_case(word: &str) -> String {
+    let chars: Vec<char> = word.chars().collect();
+    let boundaries = chars
+        .windows(2)
+        .filter(|w| w[0].is_lowercase() && w[1].is_uppercase())
+        .count();
+    if boundaries < 2 {
+        return word.to_string();
+    }
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if i > 0 && c.is_uppercase() && chars[i - 1].is_lowercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A season glued into one token, with the part of it if one is given: `S05` is
@@ -884,6 +923,11 @@ pub fn match_seasons(
 /// since they are about the physical disc rather than the work.
 pub fn query_from_label(label: &str) -> String {
     let spaced = split_season_disc(&label.replace(['_', '.'], " "));
+    let spaced = spaced
+        .split_whitespace()
+        .map(split_camel_case)
+        .collect::<Vec<_>>()
+        .join(" ");
     let words: Vec<&str> = spaced.split_whitespace().collect();
 
     let mut end = words.len();
@@ -905,9 +949,10 @@ pub fn query_from_label(label: &str) -> String {
             .iter()
             .filter(|m| last.len() > m.len())
             .find(|m| last.starts_with(**m) && last[m.len()..].chars().all(|c| c.is_ascii_digit()));
+        let glued_season = glued_number(&last, &["SEASON", "VOL", "VOLUME"]).is_some();
         if is_number && marker.contains(&prev.as_str()) {
             end -= 2;
-        } else if marker.contains(&last.as_str()) || glued.is_some() {
+        } else if marker.contains(&last.as_str()) || glued.is_some() || glued_season {
             end -= 1;
         } else {
             break;
@@ -1314,6 +1359,21 @@ mod tests {
         assert_eq!(season_number_from_label("SHADOWS_D2"), None);
         // A hyphen stays part of the title in a search query, as it always has.
         assert_eq!(query_from_label("SPIDER-MAN_D1"), "spider-man");
+    }
+
+    #[test]
+    fn reads_a_run_together_label() {
+        let label = "AttackOnTitan Season2 D1";
+        assert_eq!(query_from_label(label), "Attack On Titan");
+        assert_eq!(season_number_from_label(label), Some(2));
+        assert_eq!(disc_number_from_label(label), Some(1));
+        // Shouty or plain labels are untouched by the CamelCase split.
+        assert_eq!(query_from_label("MAD_MEN"), "mad men");
+        assert_eq!(split_camel_case("iCarly"), "iCarly");
+        assert_eq!(split_camel_case("McDonald"), "McDonald");
+        assert_eq!(split_camel_case("MythBusters"), "MythBusters");
+        assert_eq!(split_camel_case("Frieren"), "Frieren");
+        assert_eq!(season_number_from_label("SEASONS_OF_LOVE"), None);
     }
 
     #[test]

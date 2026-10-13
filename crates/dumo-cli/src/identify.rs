@@ -1313,6 +1313,8 @@ fn analyse_video(
             best.mean_delta - runtime_best.mean_delta
         );
     }
+    let mut best = best.clone();
+    let by_hand = assign_episodes(&mut best, assign, &client, candidate.id)?;
 
     println!();
     println!(
@@ -1397,7 +1399,11 @@ fn analyse_video(
         &best.matches,
         &show,
         &candidate.name,
-        "inference (runtime + dialogue, single disc)",
+        &if by_hand > 0 {
+            format!("inference (runtime + dialogue, single disc; {by_hand} assigned by hand)")
+        } else {
+            "inference (runtime + dialogue, single disc)".to_string()
+        },
         best.confidence,
         cfg,
     )?;
@@ -1410,6 +1416,71 @@ fn analyse_video(
         best.confidence
     );
     Ok(())
+}
+
+/// Apply `--assign TITLE=SxxEyy` pairings to a proposal, returning how many there were.
+///
+/// For a placement checked by hand, by watching or by reading the captions, where the
+/// proposal's own placement is doubtful or wrong. Each named title gets that episode;
+/// two titles may not end up with the same one.
+fn assign_episodes(
+    best: &mut dumo_identify::matching::SeasonMatch,
+    assign: &[String],
+    client: &dumo_identify::tmdb::TmdbClient,
+    tv_id: u64,
+) -> Result<usize> {
+    let mut seasons: std::collections::HashMap<u32, dumo_identify::tmdb::Season> =
+        Default::default();
+    for a in assign {
+        let Some((title_name, code)) = a.split_once('=') else {
+            anyhow::bail!("--assign {a:?}: expected TITLE=SxxEyy");
+        };
+        let code = code.trim().to_ascii_uppercase();
+        let (season, number) = code
+            .strip_prefix('S')
+            .and_then(|r| r.split_once('E'))
+            .and_then(|(s, e)| Some((s.parse::<u32>().ok()?, e.parse::<u32>().ok()?)))
+            .with_context(|| format!("--assign {a:?}: expected an episode like S02E04"))?;
+        let Some(m) = best
+            .matches
+            .iter_mut()
+            .find(|m| m.title_name == title_name.trim())
+        else {
+            anyhow::bail!("--assign {a:?}: this disc has no title named {title_name:?}");
+        };
+        if !seasons.contains_key(&season) {
+            let s = client
+                .season(tv_id, season)
+                .with_context(|| format!("--assign {a:?}: fetching season {season}"))?;
+            seasons.insert(season, s);
+        }
+        let Some(episode) = seasons[&season].episodes.iter().find(|e| e.number == number) else {
+            anyhow::bail!("--assign {a:?}: season {season} lists no episode {number}");
+        };
+        m.episode = episode.clone();
+        m.delta_mins = episode
+            .runtime_mins
+            .map(|rt| (m.title_mins - f64::from(rt)).abs())
+            .unwrap_or(f64::NAN);
+    }
+    if assign.is_empty() {
+        return Ok(0);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for m in &best.matches {
+        if !seen.insert((m.episode.season, m.episode.number)) {
+            anyhow::bail!(
+                "--assign leaves two titles as S{:02}E{:02}; assign the other one too",
+                m.episode.season,
+                m.episode.number
+            );
+        }
+    }
+    best.evidence.push(format!(
+        "{} title(s) placed by hand with --assign, overriding the proposal",
+        assign.len()
+    ));
+    Ok(assign.len())
 }
 
 /// Name a feature film disc: its longest main title, matched to a TMDB movie by name
