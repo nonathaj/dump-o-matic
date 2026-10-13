@@ -43,8 +43,7 @@ struct SeasonScorer<'a> {
 /// and the check after solving still reports it.
 const CARD_MISMATCH_COST: f64 = 1.0;
 
-/// The same, in the reorder's units of standard deviations: far past any dialogue fit.
-const CARD_REORDER_COST: f64 = 100.0;
+
 
 impl<'a> SeasonScorer<'a> {
     /// `titles` must be the flattened list, in disc order, that the solver will index.
@@ -187,10 +186,12 @@ fn window_cost(
     if start + len > sc.episodes.len() {
         return None;
     }
-    let mut total = 0.0;
-    for i in 0..len {
-        total += sc.cost[title_offset + i][start + i];
-    }
+    // Paired by best fit, not by position: disc order is not episode order.
+    let cost: Vec<Vec<f64>> = (0..len)
+        .map(|i| (0..len).map(|j| sc.cost[title_offset + i][start + j]).collect())
+        .collect();
+    let pairing = signals::assign_min_cost(&cost);
+    let total: f64 = (0..len).map(|i| cost[i][pairing[i]]).sum();
     Some((total, len))
 }
 
@@ -400,162 +401,16 @@ fn place(discs: &[SetDisc], sc: &SeasonScorer, gap_penalty: f64) -> Option<SetPl
     })
 }
 
-/// Fewest titles a set must have before dialogue may reorder it.
+/// Cost of placing a title in another disc's run of episodes, in the placement's
+/// units of standard deviations of dialogue fit.
 ///
-/// Reordering compares each title against the others' episodes, normalised across the
-/// window. Over a handful of episodes that normalisation is mostly noise; across a
-/// season it is not.
-const MIN_REORDER_TITLES: usize = 6;
-
-/// How much better, on average, a moved title's dialogue must fit its new episode than
-/// its disc-order one, in standard deviations of that title's scores.
-///
-/// Measured on a 33-title season whose discs follow broadcast rather than TMDB order:
-/// the correct reordering moved 16 titles at a mean gain of 2.6, and every move was
-/// confirmed by reading the captions.
-const MIN_REORDER_GAIN: f64 = 1.0;
-
-/// Cost per position a title is moved from disc order, in the same units as the gain.
-///
-/// Enough that dialogue which cannot tell two episodes apart leaves them in disc
-/// order; far too little to hold a title in place against dialogue that names its
-/// episode outright.
-const REORDER_DISTANCE_COST: f64 = 0.1;
-
-/// A reordering of a set's titles within the episodes disc order gave them.
-struct Reorder {
-    /// For each title, the window position it moves to.
-    order: Vec<usize>,
-    /// Mean z-score gain over the moved titles.
-    mean_gain: f64,
-    /// Per moved title: (title index, gain, z-score at the new position).
-    moves: Vec<(usize, f64, f64)>,
-    /// How many of the moves put a title where its own title card says it belongs.
-    by_cards: usize,
-}
-
-/// The story an episode is one part of, if its name numbers the part.
-///
-/// Both conventions TMDB uses: a trailing "Ninja Quest (2)", and a "Green with Evil
-/// Part 2: Jason's Battle" whose subtitle differs per part.
-fn story_name(name: &str) -> Option<&str> {
-    let is_number = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-    let t = name.trim_end();
-    if let Some(inner) = t.strip_suffix(')') {
-        if let Some(open) = inner.rfind('(') {
-            if is_number(&inner[open + 1..]) {
-                return Some(inner[..open].trim_end());
-            }
-        }
-    }
-    let at = t.find(" Part ")?;
-    let number: String = t[at + 6..].chars().take_while(|c| c.is_ascii_digit()).collect();
-    (!number.is_empty()).then(|| &t[..at])
-}
-
-/// Let dialogue reorder titles among the episodes the consecutive solve gave them.
-///
-/// Disc order is an assumption about how a box was packed, and it fails in a specific
-/// way: a set authored in broadcast order puts an episode the metadata provider files
-/// elsewhere — a holiday special, typically — in the middle, and every title after it
-/// is then placed one episode early. Measured on such a season, 16 of 33 titles were
-/// misnamed, and no runtime could have said so: every episode ran 20 minutes.
-///
-/// Dialogue can, once it is scored for what distinguishes titles from *each other*. The
-/// existing score weighs a synopsis word by how rare it is among synopses; here it is
-/// also weighed by how rare it is among the set's dialogue, so a character named in
-/// every episode counts for nothing and a monster named in one counts for a great deal.
-/// Repetition counts too, logarithmically: a title that says "brick" 25 times is about
-/// a brick. Each title's scores are then normalised, and the titles are assigned to
-/// episodes jointly, one each, with a small cost for distance from disc order.
-///
-/// Parts of a multi-part story share nearly all their words, so dialogue cannot order
-/// them; disc order can. Each story's parts are therefore put back in disc order among
-/// the slots the assignment gave that story.
-///
-/// A title whose own title card names one of the window's episodes is held to that
-/// episode, and a move onto it needs no further support: the card is the disc saying
-/// so outright.
-///
-/// Returns `None` — leave disc order alone — unless the moves are well supported.
-fn reorder_by_dialogue(
-    titles: &[&DiscTitle],
-    window: &[&Episode],
-    implausible: impl Fn(usize, usize) -> bool,
-    card_slot: impl Fn(usize) -> Option<usize>,
-) -> Option<Reorder> {
-    let n = titles.len();
-    if n < MIN_REORDER_TITLES || window.len() != n {
-        return None;
-    }
-    let dialogue: Vec<std::collections::HashMap<String, u32>> = titles
-        .iter()
-        .map(|t| t.dialogue.as_ref().map(signals::stem_counts))
-        .collect::<Option<_>>()?;
-    let references: Vec<HashSet<String>> = window
-        .iter()
-        .map(|e| signals::stem_all(&dumo_core::text::tokenize(&e.reference_text())))
-        .collect();
-
-    let z = signals::distinctive_fit(&dialogue, &references);
-
-    let cost: Vec<Vec<f64>> = (0..n)
-        .map(|t| {
-            (0..n)
-                .map(|e| {
-                    let card = match card_slot(t) {
-                        Some(slot) if slot == e => -CARD_REORDER_COST,
-                        Some(_) => CARD_REORDER_COST,
-                        None => 0.0,
-                    };
-                    if implausible(t, e) {
-                        f64::INFINITY
-                    } else {
-                        -z[t][e] + REORDER_DISTANCE_COST * t.abs_diff(e) as f64 + card
-                    }
-                })
-                .collect()
-        })
-        .collect();
-    let mut order = signals::assign_min_cost(&cost);
-    if (0..n).any(|t| implausible(t, order[t])) {
-        return None;
-    }
-
-    // Parts of one story keep their disc order among the slots the story was given.
-    let mut stories: std::collections::HashMap<&str, Vec<usize>> = Default::default();
-    for t in 0..n {
-        if let Some(story) = story_name(&window[order[t]].name) {
-            stories.entry(story).or_default().push(t);
-        }
-    }
-    for ts in stories.values() {
-        let mut slots: Vec<usize> = ts.iter().map(|&t| order[t]).collect();
-        slots.sort_unstable();
-        for (&t, slot) in ts.iter().zip(slots) {
-            order[t] = slot;
-        }
-    }
-
-    let moves: Vec<(usize, f64, f64)> = (0..n)
-        .filter(|&t| order[t] != t)
-        .map(|t| (t, z[t][order[t]] - z[t][t], z[t][order[t]]))
-        .collect();
-    if moves.is_empty() {
-        return None;
-    }
-    let mean_gain = moves.iter().map(|m| m.1).sum::<f64>() / moves.len() as f64;
-    let by_cards = moves
-        .iter()
-        .filter(|m| card_slot(m.0) == Some(order[m.0]))
-        .count();
-    (by_cards > 0 || mean_gain >= MIN_REORDER_GAIN).then_some(Reorder {
-        order,
-        mean_gain,
-        moves,
-        by_cards,
-    })
-}
+/// Within a disc, titles go wherever they fit: disc order is not episode order. Across
+/// discs the set constraint says otherwise, so a title only crosses on real evidence:
+/// a title card, or dialogue that clearly names the other episode. Measured on a
+/// 33-title season authored in broadcast order, where a Christmas episode TMDB numbers
+/// 31st sat in the middle of disc 2, the correct moves fitted 2.6 standard deviations
+/// better on average.
+const CROSS_DISC_COST: f64 = 1.0;
 
 /// Find the best consistent placement of a disc set across the given seasons.
 pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
@@ -612,17 +467,29 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
         .zip(starts.iter())
         .flat_map(|(d, &start)| start..start + d.titles.len())
         .collect();
-    // ...and where the dialogue says each one belongs among those same episodes.
+    // ...and which title is which among those same episodes, on what each one says.
     let window: Vec<&Episode> = disc_order.iter().map(|&i| &episodes[i]).collect();
-    let reorder = reorder_by_dialogue(
-        &flat,
-        &window,
-        |t, e| sc.cost[t][disc_order[e]].is_infinite(),
-        |t| sc.card[t].and_then(|c| disc_order.iter().position(|&i| i == c)),
-    );
-    let assigned: Vec<usize> = match &reorder {
-        Some(r) => r.order.iter().map(|&p| disc_order[p]).collect(),
+    let disc_of: Vec<usize> = ordered
+        .iter()
+        .enumerate()
+        .flat_map(|(d, disc)| std::iter::repeat(d).take(disc.titles.len()))
+        .collect();
+    let placed = crate::ordering::place(&flat, &window, episodes, |t, e| {
+        if sc.cost[t][disc_order[e]].is_infinite() {
+            f64::INFINITY
+        } else if disc_of[t] != disc_of[e] {
+            CROSS_DISC_COST
+        } else {
+            0.0
+        }
+    });
+    let assigned: Vec<usize> = match &placed {
+        Some(p) => p.order.iter().map(|&e| disc_order[e]).collect(),
         None => disc_order.clone(),
+    };
+    let crossed: Vec<usize> = match &placed {
+        Some(p) => (0..flat.len()).filter(|&t| disc_of[t] != disc_of[p.order[t]]).collect(),
+        None => Vec::new(),
     };
 
     // Per-title verdicts: what each signal would have said on its own, so confidence can
@@ -702,10 +569,10 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
     if margin.map(|m| m < params.min_margin).unwrap_or(false) && confidence > Confidence::Weak {
         confidence = Confidence::Weak;
     }
-    // A reordering overrides the set constraint on the dialogue's word alone. It is the
-    // right call when the captions are this clear, but it is exactly the kind of call a
-    // person should look at.
-    if reorder.is_some() && confidence > Confidence::Weak {
+    // A title moved to another disc's episodes overrides the set constraint itself; a
+    // doubtful placement is a guess. Either is for a person to look at.
+    let doubtful = placed.as_ref().map(|p| p.doubtful.len()).unwrap_or(0);
+    if (!crossed.is_empty() || doubtful > 0) && confidence > Confidence::Weak {
         confidence = Confidence::Weak;
     }
 
@@ -767,36 +634,27 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             "this is the only arrangement that satisfies the set constraint".to_string(),
         ),
     }
-    if let Some(r) = &reorder {
-        if r.by_cards > 0 {
+    if let Some(p) = &placed {
+        let moved = (0..flat.len()).filter(|&t| p.order[t] != t).count();
+        if moved > 0 {
             evidence.push(format!(
-                "title cards moved {} title(s) out of disc order, to the episodes they \
-                 caption ({} moved in all) — the disc order did not match the episode \
-                 numbering",
-                r.by_cards,
-                r.moves.len()
+                "{moved} of {total_titles} title(s) are not in episode order on their disc; \
+                 each was placed on what it says:"
             ));
-        } else {
+        } else if doubtful > 0 {
+            evidence.push("how the doubtful titles were placed:".to_string());
+        }
+        evidence.extend(crate::ordering::describe(p, &flat, &window));
+        if !crossed.is_empty() {
             evidence.push(format!(
-                "dialogue moved {} title(s) out of disc order (mean fit {:.1} standard \
-                 deviations better than in disc order) — the disc order did not match the \
-                 episode numbering",
-                r.moves.len(),
-                r.mean_gain
+                "{} title(s) belong to another disc's run of episodes — the discs do not \
+                 hold consecutive runs, so check them",
+                crossed.len()
             ));
         }
-        let mut strongest = r.moves.clone();
-        strongest.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        let disc_of: Vec<u32> = ordered
-            .iter()
-            .flat_map(|d| std::iter::repeat(d.disc_number).take(d.titles.len()))
-            .collect();
-        for &(t, _, fit) in strongest.iter().take(3) {
-            let e = &episodes[assigned[t]];
+        if doubtful > 0 {
             evidence.push(format!(
-                "  disc {} {} is S{:02}E{:02} {}: its dialogue fits that synopsis {fit:.1} \
-                 standard deviations above its other candidates",
-                disc_of[t], flat[t].name, e.season, e.number, e.name
+                "{doubtful} title(s) are placed with doubt — check them before filing"
             ));
         }
     }
@@ -1586,6 +1444,7 @@ mod grouping_tests {
 
     #[test]
     fn story_names_drop_only_a_numeric_part_suffix() {
+        use crate::ordering::story_name;
         assert_eq!(story_name("Ninja Quest (2)"), Some("Ninja Quest"));
         assert_eq!(
             story_name("Master Vile and the Metallic Armor (1)"),
@@ -1678,8 +1537,17 @@ mod grouping_tests {
             .collect();
         assert_eq!(numbers, vec![vec![1, 2, 3, 7], vec![4, 5, 6, 8]]);
         assert_eq!(s.placements[1].first_episode, 4);
-        assert!(s.evidence.iter().any(|e| e.contains("out of disc order")));
-        assert_eq!(s.confidence, Confidence::Weak, "a reordering is for a person to confirm");
+        assert!(s.evidence.iter().any(|e| e.contains("not in episode order")));
+        assert!(
+            s.evidence.iter().any(|e| e.contains("another disc's run")),
+            "{:?}",
+            s.evidence
+        );
+        assert_eq!(
+            s.confidence,
+            Confidence::Weak,
+            "a title crossing to another disc's episodes is for a person to confirm"
+        );
     }
 
     /// A 20 minute title with no dialogue.
@@ -1748,7 +1616,7 @@ mod grouping_tests {
         let s = solve(&discs, &[monster_season()]).expect("solved");
         assert_eq!(numbers(&s), vec![vec![1, 2, 3, 7], vec![4, 5, 6, 8]]);
         assert!(
-            s.evidence.iter().any(|e| e.contains("title cards moved")),
+            s.evidence.iter().any(|e| e.contains("t7 is S03E07") && e.contains("title card")),
             "{:?}",
             s.evidence
         );
@@ -1805,7 +1673,7 @@ mod grouping_tests {
             .flat_map(|p| p.matches.iter().map(|m| m.episode.number))
             .collect();
         assert_eq!(numbers, (1..=8).collect::<Vec<_>>());
-        assert!(!s.evidence.iter().any(|e| e.contains("out of disc order")));
+        assert!(!s.evidence.iter().any(|e| e.contains("not in episode order")));
     }
 
     #[test]

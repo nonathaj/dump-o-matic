@@ -103,6 +103,18 @@ across that season rather than against any hardcoded stopword list. Discs of a b
 solved jointly, since the discs of a season hold consecutive non-overlapping runs of
 episodes, which frequently decides cases that runtimes alone cannot.
 
+A disc's titles are rarely in episode order — Scott Pilgrim Takes Off's disc holds its
+eight episodes as 5, 4, 8, 7, 2, 3, 6, 1 — so disc order decides nothing it does not have
+to. A disc is matched to a run of episodes by pairing titles with episodes by best fit,
+and then each title is assigned its episode within that run on what it says: its title
+card first, then the words that set it apart from the disc's *other* titles (a monster
+named in one episode, not a character named in all of them), then runtime. Disc order
+only breaks a tie nothing else can, and parts of a multi-part story keep it. Every title
+not in disc order is listed with the reason it was placed where it is, and a title whose
+placement is doubtful — its dialogue barely singles out its episode, or another title
+would fit about as well — is named and keeps the match `weak`. Dialogue is not proof: on
+that Scott Pilgrim disc it placed six titles of eight, against none in disc order.
+
 Dialogue comes from a title's text subtitle track where it has one — on a DVD,
 MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
 so when there is no text track, the first non-forced PGS track is decoded and read with
@@ -114,22 +126,18 @@ took 29 seconds, with near-perfect text.
 Many series caption their episode's title card — `"Episode 5: Phantoms of the Dead"` —
 which names the episode outright. A title's earliest such card, where the words after
 the number are an episode's name in that season, is taken as its own; a later one is
-usually the next episode's preview. On a single disc, when runtimes tie, the cards decide
-before the synopsis comparison or the disc number does. Solving a box set, a card makes
-every other episode a poor fit for that title, and holds it to its episode when titles
-are reordered — so a card alone can move a holiday episode authored out of order. Either
-way, a card naming a different episode than the one proposed keeps the match `weak` and
+usually the next episode's preview. When runtimes tie, the cards decide which episodes a
+disc holds before the synopsis comparison or the disc number does, and a card holds its
+title to its episode when titles are placed — so a card alone can move a holiday episode
+authored out of order. A card naming a different episode than the one proposed keeps the match `weak` and
 says which title; a card on every title, each agreeing, makes it `strong`. That is still
 inference, so it is still confirmed by hand.
 
-That disc order is an assumption, and a set authored in broadcast order breaks it: one
-season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2, so 16 of
-33 titles came out one episode early. So once the discs are placed, dialogue may reorder
-titles among the episodes they were given — scored on the words that set each title apart
-from the *others* (a monster named in one episode, not a character named in all of them),
-with parts of a multi-part story kept in disc order. It only does so when the moved titles
-fit their new episodes clearly better, says which titles moved and why, and caps the
-result at `weak` so a person reviews it.
+The consecutive runs are an assumption too, and a set authored in broadcast order breaks
+it: one season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2.
+So solving a set, a title may be placed in another disc's run of episodes, but only on
+real evidence — a title card, or dialogue that clearly fits — and that caps the result at
+`weak` so a person reviews it.
 
 A disc whose volume label says it is a bonus disc (`BONUS`, `EXTRAS`, `SPECIALS`, …) is
 matched against the series' specials (TMDB season 0) instead, one title at a time and in

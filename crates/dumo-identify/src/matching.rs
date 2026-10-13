@@ -49,6 +49,8 @@ pub struct SeasonMatch {
     pub dialogue_decided: bool,
     /// Whether on-screen episode title cards chose between tied alignments.
     pub cards_decided: bool,
+    /// How titles were assigned to the window's episodes, once that was decided.
+    pub placement: Option<crate::ordering::Placed>,
     /// Every scored window: (mean, max, counted, start index).
     pub all_windows: Vec<(f64, f64, usize, usize)>,
     /// How many titles in the chosen window actually had a runtime to compare against.
@@ -116,15 +118,27 @@ pub fn sort_by_title_index(titles: &mut [DiscTitle]) {
 
 /// Score one alignment: the mean absolute runtime difference.
 ///
+/// Titles are paired with the window's episodes by best runtime fit, not by position:
+/// disc order is not episode order, and comparing title 3 with the window's third
+/// episode on a disc authored 5, 4, 8, 7, ... compares the wrong pairs.
+///
 /// Episodes without runtime data are skipped rather than counted as a perfect or
 /// terrible match; TMDB omits runtime often enough that treating a missing value as
 /// zero would invent confidence that isn't there.
 fn score(titles: &[DiscTitle], episodes: &[Episode]) -> Option<(f64, f64, usize)> {
+    let k = titles.len().min(episodes.len());
+    let delta = |t: &DiscTitle, e: &Episode| e.runtime_mins.map(|rt| (t.mins() - f64::from(rt)).abs());
+    let cost: Vec<Vec<f64>> = titles[..k]
+        .iter()
+        .map(|t| episodes[..k].iter().map(|e| delta(t, e).unwrap_or(0.0)).collect())
+        .collect();
+    let pairing = crate::signals::assign_min_cost(&cost);
+
     let mut total = 0.0;
     let mut worst: f64 = 0.0;
     let mut counted = 0usize;
 
-    for (t, e) in titles.iter().zip(episodes.iter()) {
+    for (t, e) in titles[..k].iter().zip(pairing.iter().map(|&p| &episodes[p])) {
         let Some(rt) = e.runtime_mins else { continue };
         let d = (t.mins() - f64::from(rt)).abs();
         total += d;
@@ -138,7 +152,13 @@ fn score(titles: &[DiscTitle], episodes: &[Episode]) -> Option<(f64, f64, usize)
 }
 
 /// Two alignments this close in score are treated as indistinguishable on runtime alone.
-const TIE_EPSILON_MINS: f64 = 0.25;
+///
+/// Half a minute per episode: TMDB lists whole minutes, so a smaller difference is
+/// rounding. It was a quarter while titles were compared by position, where a
+/// misaligned window scored badly anyway; paired by best fit, every window scores
+/// closer, and ESPN 30 for 30 disc 1 (episodes 1-3) lost to 2-4 by 0.27 min/episode,
+/// which said nothing and kept the label's "DISC_1" from deciding.
+const TIE_EPSILON_MINS: f64 = 0.5;
 
 /// Split a token that glues season and disc together, `S3D1`, into `S3 D1`, the form
 /// the label parsers below already understand. Expects separators already turned into
@@ -307,11 +327,27 @@ fn best_window_by_dialogue(
         if start + titles.len() > season.episodes.len() {
             continue;
         }
+        // Paired by best fit within the window, not by position: disc order is not
+        // episode order.
+        let k = titles.len();
+        let fit: Vec<Vec<f64>> = dialogue
+            .iter()
+            .map(|d| {
+                (0..k)
+                    .map(|e| match d {
+                        Some(d) => signals::subtitle_score_stemmed(d, &references[start + e], &corpus),
+                        None => 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let cost: Vec<Vec<f64>> = fit.iter().map(|r| r.iter().map(|v| -v).collect()).collect();
+        let pairing = signals::assign_min_cost(&cost);
         let mut total = 0.0;
         let mut counted = 0usize;
         for (i, d) in dialogue.iter().enumerate() {
-            if let Some(d) = d {
-                total += signals::subtitle_score_stemmed(d, &references[start + i], &corpus);
+            if d.is_some() {
+                total += fit[i][pairing[i]];
                 counted += 1;
             }
         }
@@ -499,22 +535,91 @@ pub fn match_season_with_hint(
             }
         }
     }
+    place_titles(&mut m, titles, season);
     check_against_cards(&mut m, titles, season);
     Some(m)
 }
 
-/// What the title cards say about one alignment: (agreeing, disagreeing) titles.
+/// What the title cards say about one window of episodes: (agreeing, disagreeing)
+/// titles. A card agrees when it names an episode in the window, wherever: disc order
+/// is not episode order, so which title is which is settled afterwards.
 fn card_votes(titles: &[DiscTitle], season: &Season, start: usize) -> (usize, usize) {
-    titles
+    let end = (start + titles.len()).min(season.episodes.len());
+    let window = &season.episodes[start..end];
+    titles.iter().fold((0, 0), |(agree, disagree), t| {
+        match crate::cards::own_episode(&t.cards, &season.episodes) {
+            Some(own) if window.iter().any(|e| e.number == own.number) => (agree + 1, disagree),
+            Some(_) => (agree, disagree + 1),
+            None => (agree, disagree),
+        }
+    })
+}
+
+/// Decide which title is which episode within the chosen window; see
+/// [`crate::ordering`]. Until here every match pairs titles and episodes by position,
+/// which was only ever a placeholder.
+fn place_titles(m: &mut SeasonMatch, titles: &[DiscTitle], season: &Season) {
+    let k = titles.len();
+    let Some(start) = season
+        .episodes
         .iter()
-        .zip(season.episodes[start..].iter())
-        .fold((0, 0), |(agree, disagree), (t, e)| {
-            match crate::cards::own_episode(&t.cards, &season.episodes) {
-                Some(own) if own.number == e.number => (agree + 1, disagree),
-                Some(_) => (agree, disagree + 1),
-                None => (agree, disagree),
-            }
+        .position(|e| e.number == m.first_episode)
+    else {
+        return;
+    };
+    if start + k > season.episodes.len() {
+        return;
+    }
+    let refs: Vec<&DiscTitle> = titles.iter().collect();
+    let window: Vec<&Episode> = season.episodes[start..start + k].iter().collect();
+    let Some(placed) = crate::ordering::place(&refs, &window, &season.episodes, |_, _| 0.0)
+    else {
+        return;
+    };
+
+    m.matches = titles
+        .iter()
+        .zip(placed.order.iter().map(|&e| window[e]))
+        .map(|(t, e)| TitleMatch {
+            title_name: t.name.clone(),
+            title_mins: t.mins(),
+            episode: e.clone(),
+            delta_mins: e
+                .runtime_mins
+                .map(|rt| (t.mins() - f64::from(rt)).abs())
+                .unwrap_or(f64::NAN),
         })
+        .collect();
+    let measured: Vec<f64> = m
+        .matches
+        .iter()
+        .map(|x| x.delta_mins)
+        .filter(|d| !d.is_nan())
+        .collect();
+    if !measured.is_empty() {
+        m.mean_delta = measured.iter().sum::<f64>() / measured.len() as f64;
+        m.max_delta = measured.iter().cloned().fold(0.0, f64::max);
+    }
+
+    let moved = (0..k).filter(|&t| placed.order[t] != t).count();
+    if moved > 0 {
+        m.evidence.push(format!(
+            "{moved} of {k} title(s) are not in episode order on the disc; each was placed \
+             on what it says:"
+        ));
+    } else if !placed.doubtful.is_empty() {
+        m.evidence.push("how the doubtful titles were placed:".to_string());
+    }
+    m.evidence
+        .extend(crate::ordering::describe(&placed, &refs, &window));
+    if !placed.doubtful.is_empty() {
+        m.evidence.push(format!(
+            "{} title(s) are placed with doubt — check them before filing",
+            placed.doubtful.len()
+        ));
+        m.confidence = Confidence::Weak;
+    }
+    m.placement = Some(placed);
 }
 
 /// The tied alignment the title cards support, with how many titles' cards agree.
@@ -551,30 +656,25 @@ fn best_window_by_cards(
 /// card on every title, each naming the proposed episode, is as close to proof as
 /// inference gets, and makes it strong — still inference, so still confirmed by hand.
 fn check_against_cards(m: &mut SeasonMatch, titles: &[DiscTitle], season: &Season) {
-    let Some(start) = season
-        .episodes
-        .iter()
-        .position(|e| e.number == m.first_episode)
-    else {
-        return;
-    };
-    if start + titles.len() > season.episodes.len() {
-        return;
+    let mut agree = 0usize;
+    let mut wrong: Vec<String> = Vec::new();
+    for (t, proposed) in titles.iter().zip(m.matches.iter().map(|x| &x.episode)) {
+        let Some(own) = crate::cards::own_episode(&t.cards, &season.episodes) else {
+            continue;
+        };
+        if own.number == proposed.number {
+            agree += 1;
+        } else {
+            wrong.push(format!(
+                "{} is captioned as E{:02} \"{}\", not E{:02}",
+                t.name, own.number, own.name, proposed.number
+            ));
+        }
     }
-    let (agree, disagree) = card_votes(titles, season, start);
-    if disagree > 0 {
-        let wrong: Vec<String> = titles
-            .iter()
-            .zip(season.episodes[start..].iter())
-            .filter_map(|(t, e)| {
-                let own = crate::cards::own_episode(&t.cards, &season.episodes)?;
-                (own.number != e.number).then(|| {
-                    format!("{} is captioned as E{:02} \"{}\", not E{:02}", t.name, own.number, own.name, e.number)
-                })
-            })
-            .collect();
+    if !wrong.is_empty() {
         m.evidence.push(format!(
-            "title cards contradict this for {disagree} title(s): {}",
+            "title cards contradict this for {} title(s): {}",
+            wrong.len(),
             wrong.join("; ")
         ));
         m.confidence = Confidence::Weak;
@@ -715,6 +815,7 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
         disc_hint_used: false,
         dialogue_decided: false,
         cards_decided: false,
+        placement: None,
         all_windows: scored.clone(),
     })
 }
@@ -891,7 +992,12 @@ mod tests {
             title("D1_t02.mkv", 54.0),
             title("E1_t04.mkv", 51.9),
         ];
+        // Paired by best fit rather than by position, episodes 2-4 fit these runtimes
+        // 0.13 min/episode better than 1-3: noise, and reported as a tie. The label's
+        // disc number is what places the real disc, labelled DISC_1.
         let m = match_season(&titles, &season_one()).expect("matched");
+        assert!(m.tied_alternatives.contains(&1) || m.first_episode == 1, "{:?}", m.evidence);
+        let m = match_season_with_hint(&titles, &season_one(), Some(1)).expect("matched");
         assert_eq!(m.first_episode, 1);
         assert_eq!(m.matches[0].episode.name, "King's Ransom");
     }

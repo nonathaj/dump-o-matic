@@ -15,6 +15,7 @@ pub mod matching;
 pub mod movie;
 pub mod musicbrainz;
 pub mod opensubtitles;
+pub mod ordering;
 pub mod platform;
 pub mod playall;
 pub mod signals;
