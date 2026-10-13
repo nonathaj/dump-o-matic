@@ -58,11 +58,13 @@ fn close(secs: u64, sum: u64) -> bool {
 ///
 /// - it runs for the sum of **every** other title (the original test); or
 /// - it runs for the sum of a **consecutive run** of the others *and* its chapter count
-///   is exactly theirs added up. A disc's extras usually sit after the episodes and are
-///   not in the play-all, so the first test misses it; matching a run is easier to do
-///   by chance, so the chapters must agree as well. Frieren S1 Part 1 disc 1: 12045 s
+///   is theirs added up, or one more. A disc's extras usually sit after the episodes and
+///   are not in the play-all, so the first test misses it; matching a run is easier to
+///   do by chance, so the chapters must agree as well. Frieren S1 Part 1 disc 1: 12045 s
 ///   and 44 chapters, against 12040 s and 5+5+5+5+6+6+6+6 for the eight episodes, with
-///   two extras after them.
+///   two extras after them. The one more is a closing chapter some play-alls carry:
+///   Attack on Titan S2 disc 2's is 7240 s and 30 chapters, against 7228 s and
+///   6+6+6+6+5 for its five episodes.
 pub fn find(spans: &[Span]) -> Option<Found> {
     if spans.len() < MIN_CONSTITUENTS + 1 {
         return None;
@@ -101,7 +103,9 @@ pub fn find(spans: &[Span]) -> Option<Found> {
             if secs > longest.secs + longest.secs / 100 {
                 break;
             }
-            if close(longest.secs, secs) && chapters == longest.chapters {
+            if close(longest.secs, secs)
+                && (chapters == longest.chapters || chapters + 1 == longest.chapters)
+            {
                 return Some(Found {
                     position,
                     members: run.to_vec(),
@@ -249,6 +253,27 @@ mod tests {
         // Same durations, but the chapters no longer add up: could be anything.
         let mut titles = frieren();
         titles[8].chapters = 30;
+        assert_eq!(detect(&titles), None);
+    }
+
+    #[test]
+    fn a_play_all_may_carry_one_closing_chapter_more_than_its_episodes() {
+        // Attack on Titan Season 2 disc 2, as scanned: five episodes, the play-all, extras.
+        let d = [
+            (1451, 6), (1452, 6), (1451, 6), (1452, 6), (1422, 5), (7240, 30), (631, 6),
+            (1023, 2), (585, 0), (406, 0), (442, 0), (606, 0), (583, 0),
+        ];
+        let titles: Vec<TitleInfo> = d
+            .iter()
+            .enumerate()
+            .map(|(i, &(secs, chapters))| t(i as u32, secs, chapters))
+            .collect();
+        let found = detect(&titles).expect("play-all not detected");
+        assert_eq!(found.index, 5);
+        assert_eq!((found.first, found.last), (0, 4));
+        // Two more is not a closing chapter.
+        let mut titles = titles;
+        titles[5].chapters = 31;
         assert_eq!(detect(&titles), None);
     }
 
