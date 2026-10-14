@@ -243,7 +243,17 @@ pub fn describe(placed: &Placed, titles: &[&DiscTitle], window: &[&Episode]) -> 
             continue;
         }
         let why = match placed.reasons[t] {
-            Reason::Card => "its title card names it".to_string(),
+            Reason::Card => {
+                // Said apart, as a preview is one step removed from the title itself.
+                let own: Vec<cards::Card> =
+                    title.cards.iter().filter(|c| !c.next).cloned().collect();
+                let eps: Vec<Episode> = window.iter().map(|e| (*e).clone()).collect();
+                if cards::own_episode(&own, &eps).is_some() {
+                    "its title card names it".to_string()
+                } else {
+                    "its preview of the next episode names the one after it".to_string()
+                }
+            }
             Reason::Dialogue(z) => format!("its dialogue fits that episode best ({z:.1} sd)"),
             Reason::WeakDialogue(z) => format!(
                 "its dialogue barely singles that episode out ({z:.1} sd); the others \

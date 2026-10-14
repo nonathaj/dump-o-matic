@@ -1178,8 +1178,8 @@ fn analyse_video(
             Some(w) => print!("{} words", w.len()),
             None => print!("no usable text subtitle track"),
         }
-        match cards.first() {
-            Some(c) => println!(", title card for episode {}", c.number),
+        match dumo_identify::cards::first(&cards) {
+            Some(c) => println!(", {}", c.describe()),
             None => println!(),
         }
         titles.push(dumo_identify::matching::DiscTitle {
@@ -1317,11 +1317,13 @@ fn analyse_video(
     let by_hand = assign_episodes(&mut best, assign, &client, candidate.id)?;
 
     println!();
+    // From what is proposed now: --assign may have moved or removed titles.
+    let numbers = best.matches.iter().map(|m| m.episode.number);
     println!(
         "  Best match: season {}, episodes {}–{}",
         best.season,
-        best.first_episode,
-        best.first_episode + best.matches.len() as u32 - 1
+        numbers.clone().min().unwrap_or(best.first_episode),
+        numbers.max().unwrap_or(best.first_episode)
     );
     for m in &best.matches {
         println!(
@@ -1422,7 +1424,9 @@ fn analyse_video(
 ///
 /// For a placement checked by hand, by watching or by reading the captions, where the
 /// proposal's own placement is doubtful or wrong. Each named title gets that episode;
-/// two titles may not end up with the same one.
+/// two titles may not end up with the same one. `TITLE=extra` takes a title out of the
+/// proposal instead, for an extra the match counted as an episode; it stays in the job,
+/// unfiled.
 fn assign_episodes(
     best: &mut dumo_identify::matching::SeasonMatch,
     assign: &[String],
@@ -1436,6 +1440,14 @@ fn assign_episodes(
             anyhow::bail!("--assign {a:?}: expected TITLE=SxxEyy");
         };
         let code = code.trim().to_ascii_uppercase();
+        if code == "EXTRA" {
+            let before = best.matches.len();
+            best.matches.retain(|m| m.title_name != title_name.trim());
+            if best.matches.len() == before {
+                anyhow::bail!("--assign {a:?}: this disc has no title named {title_name:?}");
+            }
+            continue;
+        }
         let (season, number) = code
             .strip_prefix('S')
             .and_then(|r| r.split_once('E'))
@@ -1906,8 +1918,8 @@ fn solve_video_set(
                 Some(w) => print!("{} words", w.len()),
                 None => print!("no subtitle track"),
             }
-            match cards.first() {
-                Some(c) => println!(", title card for episode {}", c.number),
+            match dumo_identify::cards::first(&cards) {
+                Some(c) => println!(", {}", c.describe()),
                 None => println!(),
             }
             titles.push(DiscTitle {

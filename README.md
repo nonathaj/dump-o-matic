@@ -153,6 +153,10 @@ authored out of order. A card naming a different episode than the one proposed k
 says which title; a card on every title, each agreeing, makes it `strong`. That is still
 inference, so it is still confirmed by hand.
 
+Some series caption no card of their own but close with a preview that says what comes
+next — Attack on Titan's narrator ends each episode with `Next episode: "Children."`. A
+title without a card of its own is placed just before the episode its preview names.
+
 The consecutive runs are an assumption too, and a set authored in broadcast order breaks
 it: one season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2.
 So solving a set, a title may be placed in another disc's run of episodes, but only on
@@ -166,7 +170,10 @@ candidates, and a title is proposed only when its dialogue fits one special clea
 better than any other whose runtime is plausible; the rest are listed with their closest
 candidate and stay in the job directory. A pairing you have confirmed yourself can be
 filed with `--assign B3_t01.mkv=S00E14`, and is recorded as assigned by hand.
-`identify --specials` does the same for any job, whatever its label.
+`identify --specials` does the same for any job, whatever its label. `--assign` works for episodes
+too (`B3_t01.mkv=S02E04`), and `--assign B3_t07.mkv=extra` takes out of the proposal a
+title the match counted as an episode, such as an interview that runs nearly as long;
+it stays in the job, unfiled.
 
 Some extras are compilations of specials in one title, a chapter each — Frieren's
 eleven "OO Magic" mini-anime shorts are one 14-minute title. `split <job> <title>` cuts

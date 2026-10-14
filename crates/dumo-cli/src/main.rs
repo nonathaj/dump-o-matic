@@ -228,7 +228,8 @@ enum Command {
         #[arg(long)]
         release: Option<String>,
         /// File a title as a given episode: `B3_t01.mkv=S02E04`, or on a bonus disc a
-        /// special, `B3_t01.mkv=S00E14`.
+        /// special, `B3_t01.mkv=S00E14`; or `B3_t07.mkv=extra` to leave out a title that
+        /// is not an episode at all.
         ///
         /// For a pairing confirmed by hand — by watching it, or reading its captions —
         /// that the match could not settle on its own. Repeatable. Still needs
