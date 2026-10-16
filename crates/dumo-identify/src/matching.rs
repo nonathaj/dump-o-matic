@@ -291,7 +291,19 @@ fn season_token(word: &str) -> Option<(u32, Option<u32>)> {
     }
 }
 
-/// Which part of a season a disc's label says it belongs to, as in `S1P2` or `PART 2`.
+/// `P2`, the part written as a word of its own: only after a season token, as in
+/// Attack on Titan's `S3_P1_D1`, since alone it could be anything.
+fn part_token(word: &str, previous: Option<&str>) -> Option<u32> {
+    previous.and_then(season_token)?;
+    let rest = word.to_ascii_uppercase();
+    let rest = rest.strip_prefix('P')?;
+    (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        .then(|| rest.parse().ok())
+        .flatten()
+}
+
+/// Which part of a season a disc's label says it belongs to, as in `S1P2`, `S3 P1` or
+/// `PART 2`.
 ///
 /// A season split across box sets numbers each set's discs from 1, so "disc 1" of part
 /// 2 is not where the season starts. Callers use this to stop trusting the disc number
@@ -308,6 +320,9 @@ pub fn part_number_from_label(label: &str) -> Option<u32> {
         if let Some((_, Some(part))) = season_token(w) {
             return Some(part);
         }
+        if let Some(part) = part_token(w, i.checked_sub(1).map(|j| words[j])) {
+            return Some(part);
+        }
     }
     None
 }
@@ -317,10 +332,17 @@ pub fn part_number_from_label(label: &str) -> Option<u32> {
 /// The query keeps a trailing season token such as `s05` or `s1p1` on purpose: it is
 /// also the key that groups a box set's discs, and two seasons, or two parts of one,
 /// must not be grouped as one set. A search engine only sees an unknown word in it, and
-/// "frieren s1p1" found nothing. The season itself is read from the label separately.
+/// "frieren s1p1" found nothing, nor "attack on titan s3 p1". The season itself is read
+/// from the label separately.
 pub fn search_terms(query: &str) -> String {
     let mut words: Vec<&str> = query.split_whitespace().collect();
-    while words.len() > 1 && words.last().map(|w| season_token(w).is_some()).unwrap_or(false) {
+    while words.len() > 1 {
+        let n = words.len();
+        let last = words[n - 1];
+        let season = season_token(last).is_some();
+        if !season && part_token(last, (n >= 2).then(|| words[n - 2])).is_none() {
+            break;
+        }
         words.pop();
     }
     words.join(" ")
@@ -1388,6 +1410,20 @@ mod tests {
         assert_eq!(search_terms("espn 30 for 30"), "espn 30 for 30");
         assert_eq!(search_terms("shadows"), "shadows");
         assert_eq!(search_terms("s2"), "s2");
+    }
+
+    #[test]
+    fn reads_a_part_written_as_its_own_word() {
+        let label = "AttackOnTitan_S3_P1_D1";
+        let key = query_from_label(label);
+        assert_ne!(key, query_from_label("AttackOnTitan_S3_P2_D1"), "two parts, two sets");
+        assert_eq!(search_terms(&key), "Attack On Titan");
+        assert_eq!(season_number_from_label(label), Some(3));
+        assert_eq!(part_number_from_label(label), Some(1));
+        assert_eq!(disc_number_from_label(label), Some(1));
+        // Without a season before it, a P-number is left alone.
+        assert_eq!(part_number_from_label("STAR_WARS_P1_D1"), None);
+        assert_eq!(search_terms("star wars p1"), "star wars p1");
     }
 
     #[test]
