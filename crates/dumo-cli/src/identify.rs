@@ -324,10 +324,12 @@ fn identify_job(
 const DIALOGUE_WINDOW_SECS: u32 = 4 * 3600;
 
 /// Dialogue for one title as word counts, or `None` if it has no usable subtitle track.
-/// A title's dialogue words, and the "Episode N: Name" cards captioned in it.
+/// A title's dialogue words, the "Episode N: Name" cards captioned in it, and whether
+/// it is an audio commentary rather than an episode.
 type Dialogue = (
     Option<std::collections::HashMap<String, u32>>,
     Vec<dumo_identify::cards::Card>,
+    bool,
 );
 
 fn read_dialogue(path: &std::path::Path) -> Dialogue {
@@ -344,15 +346,98 @@ fn read_dialogue(path: &std::path::Path) -> Dialogue {
                      not installed — e.g. `sudo apt install tesseract-ocr`)"
                 );
             }
-            return (None, Vec::new());
+            return (None, Vec::new(), false);
         }
-        Err(_) => return (None, Vec::new()),
+        Err(_) => return (None, Vec::new(), false),
     };
     let text = dumo_backends::subtitles::dialogue_text(&srt);
     let words = dumo_backends::subtitles::count_words(&text);
     // A handful of words is a stray forced-subtitle caption, not dialogue; scoring on it
     // would be worse than admitting we have no signal.
-    ((words.len() >= 20).then_some(words), dumo_identify::cards::find(&text))
+    (
+        (words.len() >= 20).then_some(words),
+        dumo_identify::cards::find(&text),
+        dumo_identify::cards::is_commentary(&text),
+    )
+}
+
+/// The episodes of `season` already filed under `show_folder` (`Name (Year)`) on any
+/// destination that takes TV, found by the `SxxEyy` in their file names.
+///
+/// A disc's episodes follow those already on the shelf: the matcher cannot tell that a
+/// disc 2 starts where disc 1 stopped when disc 1 held eight episodes and it assumes
+/// five. The shelf can.
+fn filed_episodes(cfg: &Config, show_folder: &str, season: u32) -> std::collections::BTreeSet<u32> {
+    let tag = format!("S{season:02}E");
+    let mut found = std::collections::BTreeSet::new();
+    for dest in cfg.destinations.iter().filter(|d| d.accepts("tv")) {
+        let dir = crate::migrate::destination_path(
+            &dest.root,
+            &format!("ready/tv/{show_folder}/Season {season:02}"),
+        );
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if let Some(at) = name.find(&tag) {
+                let digits: String = name[at + tag.len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(n) = digits.parse() {
+                    found.insert(n);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Leave out of each season the episodes already on the shelf, so that a disc is matched
+/// against the ones still to come. Says so for any season it changes. Not done when
+/// that would leave too few episodes for the disc's titles, or for a job already filed,
+/// whose own episodes are the ones on the shelf. Returns whether any season changed.
+fn without_filed_episodes(
+    seasons: &mut [dumo_identify::tmdb::Season],
+    cfg: &Config,
+    show_folder: &str,
+    titles: usize,
+    job: &Job,
+) -> bool {
+    let mut changed = false;
+    if job.stage == dumo_core::job::JobStage::Migrated || job.identification.is_some() {
+        return changed;
+    }
+    for season in seasons.iter_mut() {
+        let filed = filed_episodes(cfg, show_folder, season.number);
+        if filed.is_empty() {
+            continue;
+        }
+        let rest: Vec<_> = season
+            .episodes
+            .iter()
+            .filter(|e| !filed.contains(&e.number))
+            .cloned()
+            .collect();
+        if rest.len() < titles || rest.len() == season.episodes.len() {
+            continue;
+        }
+        println!(
+            "    season {}: {} of {} episodes are already filed, so this disc is matched \
+             against the {} still to come",
+            season.number,
+            season.episodes.len() - rest.len(),
+            season.episodes.len(),
+            rest.len()
+        );
+        season.episodes = rest;
+        changed = true;
+    }
+    changed
 }
 
 /// Describe a runtime difference, or say there was nothing to compare.
@@ -1173,7 +1258,11 @@ fn analyse_video(
         let path = job_dir.join(&t.name);
         print!("  reading dialogue from {} ... ", t.name);
         std::io::stdout().flush().ok();
-        let (dialogue, cards) = read_dialogue(&path);
+        let (dialogue, cards, commentary) = read_dialogue(&path);
+        if commentary {
+            println!("an audio commentary, not an episode: set aside");
+            continue;
+        }
         match &dialogue {
             Some(w) => print!("{} words", w.len()),
             None => print!("no usable text subtitle track"),
@@ -1241,7 +1330,19 @@ fn analyse_video(
                 seasons.push(s);
             }
         }
-        let results = dumo_identify::matching::match_seasons(&titles, &seasons, disc_hint);
+        let show_folder = format!(
+            "{}{}",
+            sanitise(&c.name),
+            c.year().map(|y| format!(" ({y})")).unwrap_or_default()
+        );
+        // A disc number says where a disc sits among all of a season's episodes; with the
+        // filed ones gone, the next disc is simply the first of those left.
+        let on_shelf = without_filed_episodes(&mut seasons, cfg, &show_folder, titles.len(), job);
+        let results = dumo_identify::matching::match_seasons(
+            &titles,
+            &seasons,
+            if on_shelf { None } else { disc_hint },
+        );
         match results.first() {
             Some(b) => {
                 println!(
@@ -1913,7 +2014,11 @@ fn solve_video_set(
             let path = dir.join(&t.name);
             print!("  reading dialogue from {} ... ", t.name);
             std::io::stdout().flush().ok();
-            let (dialogue, cards) = read_dialogue(&path);
+            let (dialogue, cards, commentary) = read_dialogue(&path);
+            if commentary {
+                println!("an audio commentary, not an episode: set aside");
+                continue;
+            }
             match &dialogue {
                 Some(w) => print!("{} words", w.len()),
                 None => print!("no subtitle track"),
@@ -2420,4 +2525,36 @@ fn apply_video_set(
     println!("Filed as {}. Run `dump-o-matic migrate` to place them.", solution.confidence);
     println!("The extras and provenance stay in their job directories.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn episodes_already_on_the_shelf_are_found_by_their_names() {
+        let root = std::env::temp_dir().join(format!("dumo-shelf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("Show (2013)/Season 03");
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in [
+            "Show (2013) S03E01 - A.mkv",
+            "Show (2013) S03E02 - B.mkv",
+            ".Show (2013) S03E03 - C.mkv.dumo-partial",
+            "notes.txt",
+        ] {
+            std::fs::write(dir.join(n), b"").unwrap();
+        }
+        let cfg: Config = toml::from_str(&format!(
+            "[staging]\nroot = \"/tmp/x\"\n\n[[destination]]\nname = \"nas\"\nroot = {:?}\nmedia = [\"tv\"]\n\n\
+             [[destination]]\nname = \"games\"\nroot = \"/nonexistent\"\nmedia = [\"games\"]\n",
+            root.display().to_string()
+        ))
+        .unwrap();
+        let got: Vec<u32> = filed_episodes(&cfg, "Show (2013)", 3).into_iter().collect();
+        assert_eq!(got, vec![1, 2]);
+        assert!(filed_episodes(&cfg, "Show (2013)", 2).is_empty());
+        assert!(filed_episodes(&cfg, "Other (2020)", 3).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

@@ -157,6 +157,12 @@ Some series caption no card of their own but close with a preview that says what
 next — Attack on Titan's narrator ends each episode with `Next episode: "Children."`. A
 title without a card of its own is placed just before the episode its preview names.
 
+A disc is matched against the episodes not yet filed: ones already on a TV destination
+(found by the `SxxEyy` in their names) are left out of the season first, and the disc
+number is then not used, since "disc 2" is simply the next one. A title whose subtitles
+open with `Commentary by …` is an audio commentary and is set aside, not counted as an
+episode, though it names the episode it talks over.
+
 The consecutive runs are an assumption too, and a set authored in broadcast order breaks
 it: one season put a Christmas episode, which TMDB numbers 31st, in the middle of disc 2.
 So solving a set, a title may be placed in another disc's run of episodes, but only on

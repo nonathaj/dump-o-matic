@@ -88,6 +88,17 @@ pub fn find(text: &str) -> Vec<Card> {
     out
 }
 
+/// Whether a title is a director's or cast commentary over an episode, not an episode.
+///
+/// A commentary track captions its own credit at the start (`Commentary by: Executive
+/// Director ...`), and then talks about the episode, naming it ("Episode 9, \"Ruler of
+/// the Walls\"") in just the way a title card does, so left alone it matches that
+/// episode as well as the real one.
+pub fn is_commentary(text: &str) -> bool {
+    let head: Vec<String> = words(text).into_iter().take(40).collect();
+    head.windows(2).any(|w| w[0] == "commentary" && w[1] == "by")
+}
+
 /// The earliest card of `cards` worth reporting: the title's own, else a preview.
 pub fn first(cards: &[Card]) -> Option<&Card> {
     cards.iter().find(|c| !c.next).or_else(|| cards.first())
@@ -176,6 +187,17 @@ mod tests {
         // OCR reads "I" as "|"; TMDB adds an ellipsis the caption may not have.
         let cards = find("\"Episode 2: |t Didn't Have to Be Magic\" Fern, come here.");
         assert_eq!(own_episode(&cards, &season()).map(|e| e.number), Some(2));
+    }
+
+    #[test]
+    fn a_commentary_is_recognised_by_its_opening_credit() {
+        assert!(is_commentary(
+            "\"Commentary by: Executive Director Tetsuro Araki\" Hello. I'm Tetsuro Araki."
+        ));
+        // Dialogue that says the word later on is an episode.
+        let later = format!("{} the commentary by the cast", "word ".repeat(60));
+        assert!(!is_commentary(&later));
+        assert!(!is_commentary("Let's move! Hange? Get me a horse."));
     }
 
     #[test]
