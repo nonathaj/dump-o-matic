@@ -72,6 +72,9 @@ pub fn run(args: RunArgs) -> Result<()> {
         release: None,
         assign: Vec::new(),
         specials: false,
+        folder: false,
+        extras_disc: false,
+        extras: Vec::new(),
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {

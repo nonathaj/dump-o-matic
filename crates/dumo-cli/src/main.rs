@@ -243,6 +243,21 @@ enum Command {
         /// compilation of shorts, say. Filing still needs --apply --accept-inferred.
         #[arg(long)]
         specials: bool,
+        /// File a film in its own folder, `movies/Title (Year)/Title (Year).mkv`, the
+        /// layout Plex needs to find the film's extras. Implied by --extra.
+        #[arg(long)]
+        folder: bool,
+        /// This disc holds the extras of the film named by --show ("Title (Year)"),
+        /// not the film itself. Its titles are listed and filed with --extra.
+        #[arg(long)]
+        extras_disc: bool,
+        /// File a title as an extra of the film, in the Plex folder for its kind:
+        /// `title_t03.mkv=Featurettes/The Making of Beavers`. The kinds are Behind The
+        /// Scenes, Deleted Scenes, Featurettes, Interviews, Scenes, Shorts, Trailers and
+        /// Other. Repeatable. Names are given by hand, so filing needs
+        /// --apply --accept-inferred.
+        #[arg(long = "extra", value_name = "TITLE=Category/Name")]
+        extras: Vec<String>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -478,6 +493,9 @@ fn main() -> Result<()> {
             release,
             assign,
             specials,
+            folder,
+            extras_disc,
+            extras,
             config,
         } => {
             identify::run(identify::IdentifyArgs {
@@ -490,6 +508,9 @@ fn main() -> Result<()> {
                 release,
                 assign,
                 specials,
+                folder,
+                extras_disc,
+                extras,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {

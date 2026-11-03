@@ -205,6 +205,23 @@ result is the one candidate whose runtime fits; two same-named films that both f
 `weak` until `--show "Title (1986)"` names the year. It is filed as
 `movies/Title (Year).mkv`.
 
+A film with extras is filed the way Plex wants to find them: in a folder of its own, with
+a subfolder per kind of extra (Behind The Scenes, Deleted Scenes, Featurettes,
+Interviews, Scenes, Shorts, Trailers, Other):
+
+```text
+movies/Hundreds of Beavers (2022)/Hundreds of Beavers (2022).mkv
+movies/Hundreds of Beavers (2022)/Featurettes/The Making of Hundreds of Beavers.mkv
+```
+
+`--folder` files the film that way even before its extras are ripped, so that a second disc
+can join it. `--extra "title_t03.mkv=Featurettes/The Making of Hundreds of Beavers"` files
+a title of the disc as an extra, and a disc that holds only extras is named with
+`--extras-disc --show "Hundreds of Beavers (2022)"`. Nothing in a disc's titles says what
+an extra is, so the names are given by hand; a title left unnamed stays in the job, and
+filing needs `--apply --accept-inferred` as for any inferred match. A film filed without
+extras stays a bare file, as before.
+
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
 a whole disc, so the two can never be compared — but every block copied is checked against

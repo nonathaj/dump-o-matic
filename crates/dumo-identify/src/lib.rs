@@ -10,6 +10,7 @@ pub mod cards;
 pub mod cue;
 pub mod datfile;
 pub mod discset;
+pub mod extras;
 pub mod http;
 pub mod matching;
 pub mod movie;

@@ -37,6 +37,20 @@ pub struct IdentifyArgs {
     /// Match every title against the series' specials, as on a bonus disc, whatever
     /// the label says.
     pub specials: bool,
+    /// File a film in its own folder, as Plex wants it once it has extras.
+    pub folder: bool,
+    /// This disc holds the extras of the film named by `show`, not the film.
+    pub extras_disc: bool,
+    /// `TITLE=Category/Name` for each title that is an extra of the film.
+    pub extras: Vec<String>,
+}
+
+/// What the operator has said about a film disc beyond its name.
+#[derive(Default)]
+pub struct MovieOptions {
+    pub folder: bool,
+    pub extras_disc: bool,
+    pub extras: Vec<String>,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -106,6 +120,11 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         return solve_video_set(&dirs, &cfg, args.show.as_deref(), args.apply && args.accept_inferred);
     }
 
+    let movie = MovieOptions {
+        folder: args.folder,
+        extras_disc: args.extras_disc,
+        extras: args.extras.clone(),
+    };
     for dir in dirs {
         identify_job(
             &dir,
@@ -117,6 +136,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
             args.release.as_deref(),
             &args.assign,
             args.specials,
+            &movie,
         )?;
         println!();
     }
@@ -151,6 +171,7 @@ fn identify_job(
     release: Option<&str>,
     assign: &[String],
     specials: bool,
+    movie: &MovieOptions,
 ) -> Result<()> {
     let mut job = Job::load(job_dir)?;
     println!("Job {} ({})", job.id, job.stage);
@@ -179,6 +200,7 @@ fn identify_job(
             accept_inferred,
             assign,
             specials,
+            movie,
         );
     }
     if kind == MediaKind::AudioCd {
@@ -1085,6 +1107,7 @@ fn analyse_video(
     accept_inferred: bool,
     assign: &[String],
     specials: bool,
+    movie: &MovieOptions,
 ) -> Result<()> {
     use dumo_identify::video::{self, AnalysisParams, TitleInput};
 
@@ -1178,13 +1201,17 @@ fn analyse_video(
     // season. That one is tried as a film first and kept as one only if a film's
     // listed runtime fits its longest title; otherwise it goes on to be matched as
     // episodes, where a feature length title would fit nothing anyway.
+    if movie.extras_disc {
+        identify_film_extras(job, &analysis, &client, &query, cfg, apply, accept_inferred, movie)?;
+        return Ok(());
+    }
     match analysis.category {
         Some(video::MediaCategory::Movies) => {
-            identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, false)?;
+            identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, false, movie)?;
             return Ok(());
         }
         None => {
-            if identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, true)? {
+            if identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, true, movie)? {
                 return Ok(());
             }
         }
@@ -1611,8 +1638,9 @@ fn identify_movie(
     apply: bool,
     accept_inferred: bool,
     only_if_runtime_fits: bool,
+    opts: &MovieOptions,
 ) -> Result<bool> {
-    use dumo_identify::movie;
+    use dumo_identify::{extras, movie};
 
     // The longest main title, and the first of equals in disc order: a Blu-ray often
     // carries the feature twice, as two playlists differing only in an opening logo.
@@ -1682,8 +1710,17 @@ fn identify_movie(
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_else(|| "mkv".into());
-    let file_name = format!("{}{year_part}.{ext}", sanitise(&film.title));
-    let rel = format!("ready/movies/{file_name}");
+    let feature_name = feature.name.trim_start_matches("raw/").to_string();
+    let named = read_extras(analysis, &opts.extras, Some(&feature_name))?;
+    // A film with extras has to live in a folder for Plex to find them.
+    let in_folder = opts.folder || !named.is_empty();
+    let folder = extras::film_folder(&sanitise(&film.title), film.year());
+    let rel = if in_folder {
+        extras::feature_path(&folder, &ext)
+    } else {
+        format!("ready/movies/{folder}.{ext}")
+    };
+    let file_name = rel.trim_start_matches("ready/movies/").to_string();
 
     println!();
     println!(
@@ -1704,13 +1741,19 @@ fn identify_movie(
         println!("    - {e}");
     }
     println!();
-    println!("  Proposed name:");
+    println!("  Proposed names:");
     println!("    movies/{file_name}");
+    let mut items = vec![(feature_name.clone(), rel)];
+    for x in &named {
+        let rel = extras::extra_path(&folder, x.category, &sanitise(&x.name), &extension_of(analysis, &x.title_name));
+        println!("    movies/{}   <- {}", rel.trim_start_matches("ready/movies/"), x.title_name);
+        items.push((x.title_name.clone(), rel));
+    }
     let skipped: Vec<_> = analysis
         .titles
         .iter()
-        .filter(|t| t.name != feature.name)
         .map(|t| t.name.trim_start_matches("raw/"))
+        .filter(|n| !items.iter().any(|(t, _)| t == n))
         .collect();
     if !skipped.is_empty() {
         println!("  Left in the job directory: {}", skipped.join(", "));
@@ -1725,14 +1768,23 @@ fn identify_movie(
         return Ok(true);
     }
 
-    let title_name = feature.name.trim_start_matches("raw/").to_string();
+    // Names given by hand corroborate nothing, so they cap the whole filing.
+    let confidence = if named.is_empty() {
+        best.confidence
+    } else {
+        best.confidence.min(Confidence::Weak)
+    };
     let failures = file_titles(
         &job.id,
-        &[(title_name, rel)],
+        &items,
         &format!("{}{year_part}", film.title),
         "movies",
-        "inference (title + runtime, movie)",
-        best.confidence,
+        if named.is_empty() {
+            "inference (title + runtime, movie)"
+        } else {
+            "inference (title + runtime, movie; extras named by hand)"
+        },
+        confidence,
         &format!("tmdb movie {}", film.id),
         cfg,
     )?;
@@ -1741,11 +1793,140 @@ fn identify_movie(
         println!("The film was not filed.");
     } else {
         println!(
-            "Filed as {}. Run `dump-o-matic migrate` to place it.",
-            best.confidence
+            "Filed as {confidence}. Run `dump-o-matic migrate` to place {}.",
+            if items.len() > 1 { "them" } else { "it" }
         );
     }
     Ok(true)
+}
+
+/// The extras the operator named, checked against the titles the job holds.
+///
+/// `feature` is the title filed as the film itself, if this disc has one; it cannot also
+/// be an extra.
+fn read_extras(
+    analysis: &dumo_identify::DiscAnalysis,
+    specs: &[String],
+    feature: Option<&str>,
+) -> Result<Vec<dumo_identify::extras::Extra>> {
+    let mut named: Vec<dumo_identify::extras::Extra> = Vec::new();
+    for spec in specs {
+        let x = dumo_identify::extras::parse_spec(spec).map_err(anyhow::Error::msg)?;
+        if !analysis
+            .titles
+            .iter()
+            .any(|t| t.name.trim_start_matches("raw/") == x.title_name)
+        {
+            bail!("--extra {spec:?}: this disc has no title named {:?}", x.title_name);
+        }
+        if feature == Some(x.title_name.as_str()) {
+            bail!("--extra {spec:?}: that title is the film itself");
+        }
+        if let Some(d) = named.iter().find(|n| {
+            n.title_name == x.title_name || (n.category == x.category && n.name.eq_ignore_ascii_case(&x.name))
+        }) {
+            bail!("--extra {spec:?} clashes with {:?}; each title and each name is used once", d.title_name);
+        }
+        named.push(x);
+    }
+    Ok(named)
+}
+
+/// The file extension of a title as staged.
+fn extension_of(analysis: &dumo_identify::DiscAnalysis, title_name: &str) -> String {
+    analysis
+        .titles
+        .iter()
+        .find(|t| t.name.trim_start_matches("raw/") == title_name)
+        .and_then(|t| std::path::Path::new(&t.name).extension())
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "mkv".into())
+}
+
+/// A disc of a film's extras: the film itself is on another disc.
+///
+/// The film is found by `query` ("Title (Year)") so the extras land in its folder, and
+/// every title is listed with its length so each can be named with `--extra`. Nothing
+/// here can be inferred from the titles, which is why a title left unnamed is simply
+/// left in the job.
+#[allow(clippy::too_many_arguments)]
+fn identify_film_extras(
+    job: &Job,
+    analysis: &dumo_identify::DiscAnalysis,
+    client: &dumo_identify::tmdb::TmdbClient,
+    query: &str,
+    cfg: &Config,
+    apply: bool,
+    accept_inferred: bool,
+    opts: &MovieOptions,
+) -> Result<()> {
+    use dumo_identify::{extras, movie};
+
+    let (name, year) = movie::split_year(query);
+    println!();
+    println!("  Extras disc: searching TMDB movies for {name:?} ...");
+    let found = client.search_movie(&name).context("searching TMDB")?;
+    let Some(film) = found
+        .iter()
+        .find(|m| year.map(|y| m.year() == Some(y)).unwrap_or(true))
+    else {
+        println!("  No film matched. Name it with --show \"<title> (<year>)\".");
+        return Ok(());
+    };
+    if year.is_none() && found.iter().filter(|m| m.title == film.title).count() > 1 {
+        println!("  Several films share that name; add the year to --show, e.g. \"Title (1986)\".");
+        return Ok(());
+    }
+
+    let folder = extras::film_folder(&sanitise(&film.title), film.year());
+    println!("  Film: {folder}  [tmdb:{}]  — extras go in movies/{folder}/", film.id);
+    let named = read_extras(analysis, &opts.extras, None)?;
+    let mut items = Vec::new();
+    println!();
+    println!("  Titles:");
+    for t in &analysis.titles {
+        let n = t.name.trim_start_matches("raw/");
+        match named.iter().find(|x| x.title_name == n) {
+            Some(x) => {
+                let rel = extras::extra_path(&folder, x.category, &sanitise(&x.name), &extension_of(analysis, n));
+                println!("    {n:<16} {:>9}  -> {}", t.duration_hms(), rel.trim_start_matches("ready/movies/"));
+                items.push((n.to_string(), rel));
+            }
+            None => println!("    {n:<16} {:>9}  not named; stays in the job", t.duration_hms()),
+        }
+    }
+    println!();
+    if items.is_empty() {
+        println!("  Name each extra with --extra \"TITLE=Category/Name\", where Category is one of:");
+        println!("    {}", extras::Category::ALL.map(|c| c.folder()).join(", "));
+        return Ok(());
+    }
+    if !apply {
+        println!("  Nothing was filed. Re-run with --apply --accept-inferred to file it.");
+        return Ok(());
+    }
+    if !accept_inferred {
+        println!("  --apply given without --accept-inferred, so nothing was filed.");
+        return Ok(());
+    }
+    let year_part = film.year().map(|y| format!(" ({y})")).unwrap_or_default();
+    let failures = file_titles(
+        &job.id,
+        &items,
+        &format!("{}{year_part}", film.title),
+        "movies",
+        "inference (film named by hand; extras named by hand)",
+        Confidence::Weak,
+        &format!("tmdb movie {}", film.id),
+        cfg,
+    )?;
+    println!();
+    if failures > 0 {
+        println!("{failures} extra(s) were not filed.");
+    } else {
+        println!("Filed as weak. Run `dump-o-matic migrate` to place them.");
+    }
+    Ok(())
 }
 
 /// Match a bonus disc's titles against the specials (season 0) of the candidate series.
@@ -2556,5 +2737,47 @@ mod tests {
         assert!(filed_episodes(&cfg, "Show (2013)", 2).is_empty());
         assert!(filed_episodes(&cfg, "Other (2020)", 3).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn disc(names: &[&str]) -> dumo_identify::DiscAnalysis {
+        use dumo_identify::video::{AnalysedTitle, DiscShape, TitleRole};
+        dumo_identify::DiscAnalysis {
+            shape: DiscShape::ExtrasOnly,
+            category: None,
+            confidence: Confidence::Weak,
+            titles: names
+                .iter()
+                .map(|n| AnalysedTitle {
+                    name: format!("raw/{n}"),
+                    duration_secs: 600.0,
+                    chapters: 1,
+                    role: TitleRole::Extra,
+                    why: String::new(),
+                })
+                .collect(),
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extras_are_read_against_the_titles_the_disc_holds() {
+        let d = disc(&["t00.mkv", "t01.mkv", "t02.mkv"]);
+        let ok = read_extras(
+            &d,
+            &["t01.mkv=Featurettes/Making Of".into(), "t02.mkv=trailer/Teaser".into()],
+            Some("t00.mkv"),
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 2);
+        assert_eq!(ok[1].category, dumo_identify::extras::Category::Trailers);
+
+        let err = |specs: &[&str]| {
+            let specs: Vec<String> = specs.iter().map(|s| s.to_string()).collect();
+            read_extras(&d, &specs, Some("t00.mkv")).unwrap_err().to_string()
+        };
+        assert!(err(&["t09.mkv=Featurettes/X"]).contains("no title named"));
+        assert!(err(&["t00.mkv=Featurettes/X"]).contains("the film itself"));
+        assert!(err(&["t01.mkv=Featurettes/X", "t01.mkv=Shorts/Y"]).contains("clashes"));
+        assert!(err(&["t01.mkv=Featurettes/X", "t02.mkv=featurette/x"]).contains("clashes"));
     }
 }
