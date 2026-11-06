@@ -13,6 +13,7 @@ mod adopt;
 mod clean;
 mod devices;
 mod identify;
+mod import;
 mod languages;
 mod migrate;
 mod music;
@@ -258,6 +259,15 @@ enum Command {
         /// --apply --accept-inferred.
         #[arg(long = "extra", value_name = "TITLE=Category/Name")]
         extras: Vec<String>,
+        /// Place each title by reference subtitles alone, choosing freely among the
+        /// season's episodes (the season comes from the label).
+        ///
+        /// For a disc the episode matcher cannot follow: more titles than episodes,
+        /// copies of episodes, no usable order. Needs OpenSubtitles credentials. A title
+        /// is placed only where its dialogue clearly belongs to one episode; two titles
+        /// at one episode are left for you to choose between.
+        #[arg(long)]
+        by_reference: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -345,6 +355,23 @@ enum Command {
         /// The title to cut, by file name, e.g. `FRIEREN S1P2 D1_t07.mkv`.
         title: String,
         /// Show what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Make jobs of video rips made outside this tool, one per disc.
+    ///
+    /// For a library ripped with MakeMKV before: files named after their disc,
+    /// `Friends Season 6 Disc 1_t04.mkv`, are grouped by that name, and each disc
+    /// becomes a job that `identify` can work on. The files are hard-linked into the
+    /// job and hashed; the originals are not moved or changed, and no space is used.
+    /// They must be on the staging filesystem. Discs already imported are skipped.
+    ImportRips {
+        /// Directory of rips, searched to any depth.
+        path: PathBuf,
+        /// Show what would be imported without writing anything.
         #[arg(long)]
         dry_run: bool,
         /// Config file to use instead of the search path.
@@ -496,6 +523,7 @@ fn main() -> Result<()> {
             folder,
             extras_disc,
             extras,
+            by_reference,
             config,
         } => {
             identify::run(identify::IdentifyArgs {
@@ -511,6 +539,7 @@ fn main() -> Result<()> {
                 folder,
                 extras_disc,
                 extras,
+                by_reference,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {
@@ -541,6 +570,11 @@ fn main() -> Result<()> {
         Command::Split { job, title, dry_run, config } => split::run(split::SplitArgs {
             job,
             title,
+            dry_run,
+            config_file: config,
+        }),
+        Command::ImportRips { path, dry_run, config } => import::run(import::ImportArgs {
+            path,
             dry_run,
             config_file: config,
         }),

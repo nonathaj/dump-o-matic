@@ -43,6 +43,9 @@ pub struct IdentifyArgs {
     pub extras_disc: bool,
     /// `TITLE=Category/Name` for each title that is an extra of the film.
     pub extras: Vec<String>,
+    /// Place each title by reference subtitles alone, choosing freely among the
+    /// season's episodes.
+    pub by_reference: bool,
 }
 
 /// What the operator has said about a film disc beyond its name.
@@ -51,6 +54,9 @@ pub struct MovieOptions {
     pub folder: bool,
     pub extras_disc: bool,
     pub extras: Vec<String>,
+    /// Not a film option: place a series disc's titles by reference subtitles alone.
+    /// Carried here because it travels the same path to the video identifiers.
+    pub by_reference: bool,
 }
 
 pub fn run(args: IdentifyArgs) -> Result<()> {
@@ -124,6 +130,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         folder: args.folder,
         extras_disc: args.extras_disc,
         extras: args.extras.clone(),
+        by_reference: args.by_reference,
     };
     for dir in dirs {
         identify_job(
@@ -1205,6 +1212,10 @@ fn analyse_video(
         identify_film_extras(job, &analysis, &client, &query, cfg, apply, accept_inferred, movie)?;
         return Ok(());
     }
+    if movie.by_reference {
+        let season = dumo_identify::matching::season_number_from_label(&label);
+        return identify_by_reference(job, &analysis, &client, &query, season, cfg, apply, accept_inferred);
+    }
     match analysis.category {
         Some(video::MediaCategory::Movies) => {
             identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, false, movie)?;
@@ -1925,6 +1936,255 @@ fn identify_film_extras(
         println!("{failures} extra(s) were not filed.");
     } else {
         println!("Filed as weak. Run `dump-o-matic migrate` to place them.");
+    }
+    Ok(())
+}
+
+/// Place each title of a series disc by its dialogue alone, against reference subtitles
+/// of every episode of the season.
+///
+/// For a disc the episode matcher cannot handle: one holding more titles than the season
+/// has episodes, in no order runtime or disc position can follow. Each title goes to the
+/// episode whose reference it shares most with, and only where that clears the same bar
+/// the reference check uses to confirm a proposal. Two titles placed at one episode are
+/// two copies of it and are not filed until a person chooses; titles placed nowhere
+/// stay in the job.
+#[allow(clippy::too_many_arguments)]
+fn identify_by_reference(
+    job: &Job,
+    analysis: &dumo_identify::DiscAnalysis,
+    client: &dumo_identify::tmdb::TmdbClient,
+    query: &str,
+    season: Option<u32>,
+    cfg: &Config,
+    apply: bool,
+    accept_inferred: bool,
+) -> Result<()> {
+    use dumo_identify::transcript::{self, Verdict};
+
+    let Some(season) = season else {
+        println!("  The label names no season, which placing by reference needs.");
+        return Ok(());
+    };
+    println!();
+    println!("  Searching TMDB for {query:?} ...");
+    let shows = client.search_tv(query).context("searching TMDB")?;
+    let Some(series) = shows.first() else {
+        println!("  No series matched. Try --show \"<title>\".");
+        return Ok(());
+    };
+    let show = format!(
+        "{}{}",
+        sanitise(&series.name),
+        series.year().map(|y| format!(" ({y})")).unwrap_or_default()
+    );
+    let listing = client
+        .season(series.id, season)
+        .with_context(|| format!("fetching season {season}"))?;
+    println!(
+        "  Series: {show}  [tmdb:{}]; season {season}, {} episodes",
+        series.id,
+        listing.episodes.len()
+    );
+
+    let keys: Vec<(u32, u32)> = listing.episodes.iter().map(|e| (season, e.number)).collect();
+    println!("  Fetching reference subtitles for the season ...");
+    let Some(references) = crate::refsubs::references_for(cfg, series.id, &keys)? else {
+        println!("  Reference subtitles are not configured, so nothing can be placed this way.");
+        return Ok(());
+    };
+    let have = references.iter().filter(|r| r.is_some()).count();
+    println!("  {have} of {} episodes have a reference", keys.len());
+
+    println!();
+    println!("  Titles:");
+    let mut placed: Vec<dumo_identify::matching::TitleMatch> = Vec::new();
+    let mut dialogue: std::collections::HashMap<String, transcript::Phrases> = Default::default();
+    for t in &analysis.titles {
+        let name = t.name.trim_start_matches("raw/").to_string();
+        let phrases = crate::refsubs::title_phrases(cfg, &job.id, &name);
+        dialogue.insert(name.clone(), phrases.clone());
+        let line = match transcript::place(&phrases, &references) {
+            Some((at, Verdict::Confirmed { share, next_best })) => {
+                let e = &listing.episodes[at];
+                placed.push(dumo_identify::matching::TitleMatch {
+                    title_name: name.clone(),
+                    title_mins: t.duration_secs / 60.0,
+                    episode: e.clone(),
+                    delta_mins: e
+                        .runtime_mins
+                        .map(|rt| (t.duration_secs / 60.0 - f64::from(rt)).abs())
+                        .unwrap_or(f64::NAN),
+                });
+                format!(
+                    "-> S{season:02}E{:02} {}  ({:.0}%, next {:.0}%)",
+                    e.number,
+                    truncate(&e.name, 40),
+                    share * 100.0,
+                    next_best * 100.0
+                )
+            }
+            Some((at, Verdict::Inconclusive { share, next_best }))
+            | Some((at, Verdict::Contradicted { share, better_share: next_best, .. })) => format!(
+                "not placed: closest S{season:02}E{:02} at {:.0}%, next {:.0}%",
+                listing.episodes[at].number,
+                share * 100.0,
+                next_best * 100.0
+            ),
+            Some((_, Verdict::Unchecked)) | None => {
+                "not placed: too little dialogue to compare".to_string()
+            }
+        };
+        println!("    {name:<34} {:>9}  {line}", t.duration_hms());
+    }
+
+    // An episode found in several titles is kept once. Some are the same playlist
+    // twice, some carry commentaries, some are an extended cut in standard definition;
+    // the sharpest picture without commentaries is kept. And some are not versions but
+    // the two halves of an episode the listing counts as one, which the halves of its
+    // reference subtitle tell apart: those are kept as part 1 and part 2.
+    use dumo_identify::versions::{self, Candidate, Piece};
+    let job_dir = cfg.staging.job_dir(&job.id);
+    let candidate = |title: &str| -> Candidate {
+        let f = dumo_backends::ffprobe::probe(&title_source(&job_dir, title)).ok();
+        Candidate {
+            name: title.to_string(),
+            height: f
+                .as_ref()
+                .and_then(|f| f.streams.iter().filter(|s| s.kind == "video").filter_map(|s| s.height).max())
+                .unwrap_or(0),
+            audio_tracks: f
+                .as_ref()
+                .map(|f| f.streams.iter().filter(|s| s.kind == "audio").count())
+                .unwrap_or(0),
+            duration_secs: f.as_ref().map(|f| f.duration_secs).unwrap_or(0.0),
+        }
+    };
+    let mut by_episode: std::collections::BTreeMap<u32, Vec<&dumo_identify::matching::TitleMatch>> =
+        Default::default();
+    for m in &placed {
+        by_episode.entry(m.episode.number).or_default().push(m);
+    }
+
+    // (title, episode, part) for every title kept.
+    let mut kept: Vec<(dumo_identify::matching::TitleMatch, Option<u8>)> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for (number, matches) in &by_episode {
+        let episode = &matches[0].episode;
+        let runtime = episode.runtime_mins.map(|m| f64::from(m) * 60.0);
+        if matches.len() == 1 {
+            kept.push((matches[0].clone(), None));
+            continue;
+        }
+        let halves = crate::refsubs::reference_halves(cfg, series.id, season, *number);
+        let piece_of = |m: &dumo_identify::matching::TitleMatch| match (&halves, dialogue.get(&m.title_name)) {
+            (Some((a, b)), Some(t)) => versions::piece(t, a, b),
+            _ => Piece::Whole,
+        };
+        let mut groups: std::collections::BTreeMap<Option<u8>, Vec<&dumo_identify::matching::TitleMatch>> =
+            Default::default();
+        for m in matches {
+            let part = match piece_of(m) {
+                Piece::Whole => None,
+                Piece::Part(p) => Some(p),
+            };
+            groups.entry(part).or_default().push(m);
+        }
+        // The whole episode in one title is preferred over its halves when both exist.
+        let chosen: Vec<(Option<u8>, Vec<&dumo_identify::matching::TitleMatch>)> = match groups.remove(&None) {
+            Some(whole) => vec![(None, whole)],
+            None => groups.into_iter().collect(),
+        };
+        let mut said = Vec::new();
+        for (part, titles) in chosen {
+            let cands: Vec<Candidate> = titles.iter().map(|m| candidate(&m.title_name)).collect();
+            let target = if part.is_some() { runtime.map(|r| r / 2.0) } else { runtime };
+            let Some(i) = versions::keep(&cands, target) else { continue };
+            let c = &cands[i];
+            said.push(format!(
+                "{}{} ({}p, {} audio, {:.0} min; of {})",
+                part.map(|p| format!("pt{p} ")).unwrap_or_default(),
+                c.name.rsplit_once('_').map(|(_, t)| t).unwrap_or(&c.name),
+                c.height,
+                c.audio_tracks,
+                c.duration_secs / 60.0,
+                titles.len()
+            ));
+            kept.push((titles[i].clone(), part));
+        }
+        notes.push(format!("S{season:02}E{number:02}: kept {}", said.join(", ")));
+    }
+
+    let missing: Vec<String> = listing
+        .episodes
+        .iter()
+        .filter(|e| !by_episode.contains_key(&e.number))
+        .map(|e| format!("E{:02}", e.number))
+        .collect();
+    println!();
+    println!(
+        "  {} title(s) placed at {} episode(s); {} not placed. Keeping {} title(s):",
+        placed.len(),
+        by_episode.len(),
+        analysis.titles.len() - placed.len(),
+        kept.len()
+    );
+    for n in &notes {
+        println!("    {n}");
+    }
+    if !missing.is_empty() {
+        println!("    Not on this disc: {}", missing.join(" "));
+    }
+
+    let items: Vec<(String, String)> = kept
+        .iter()
+        .map(|(m, part)| {
+            let ext = title_source(&job_dir, &m.title_name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_else(|| "mkv".into());
+            let name = format!(
+                "{show} S{:02}E{:02} - {}{}.{ext}",
+                m.episode.season,
+                m.episode.number,
+                sanitise(&m.episode.name),
+                part.map(|p| format!(" - pt{p}")).unwrap_or_default()
+            );
+            (
+                m.title_name.clone(),
+                format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season),
+            )
+        })
+        .collect();
+    println!();
+    println!("  Proposed names:");
+    for (title, rel) in &items {
+        println!("    {:<36} {}", title, rel.trim_start_matches("ready/"));
+    }
+    println!();
+    if !apply {
+        println!("  Nothing was filed. Re-run with --apply --accept-inferred to file these.");
+        return Ok(());
+    }
+    if !accept_inferred {
+        println!("  --apply given without --accept-inferred, so nothing was filed.");
+        return Ok(());
+    }
+    let failures = file_titles(
+        &job.id,
+        &items,
+        &show,
+        "tv",
+        "reference subtitles (each title placed by its dialogue)",
+        Confidence::Strong,
+        &format!("tmdb series {}", series.id),
+        cfg,
+    )?;
+    println!();
+    if failures > 0 {
+        println!("{failures} title(s) were not filed.");
+    } else {
+        println!("Filed as strong. Run `dump-o-matic migrate` to place them.");
     }
     Ok(())
 }

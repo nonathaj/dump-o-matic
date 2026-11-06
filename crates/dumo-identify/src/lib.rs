@@ -23,6 +23,7 @@ pub mod signals;
 pub mod specials;
 pub mod tmdb;
 pub mod transcript;
+pub mod versions;
 pub mod video;
 
 pub use datfile::{Datfile, DatfileSet, Game, Rom};

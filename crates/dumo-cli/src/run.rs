@@ -75,6 +75,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         folder: false,
         extras_disc: false,
         extras: Vec::new(),
+        by_reference: false,
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {

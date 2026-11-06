@@ -177,6 +177,25 @@ pub fn check(title: &Phrases, references: &[Option<Phrases>], proposed: usize) -
     }
 }
 
+/// Which reference a title's dialogue belongs to, choosing freely among all of them.
+///
+/// For a disc whose titles follow no order the matcher can lean on, or hold more titles
+/// than the season has episodes: each title is compared with every reference, and the
+/// one it shares most with is its candidate. The verdict is [`check`]'s for that
+/// candidate, so a placement stands only when it clears the same bar a proposed episode
+/// must. Returns `None` when the title or every reference is too short to compare.
+pub fn place(title: &Phrases, references: &[Option<Phrases>]) -> Option<(usize, Verdict)> {
+    if !title.is_usable() {
+        return None;
+    }
+    let (best, _) = references
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.as_ref().filter(|r| r.is_usable()).map(|r| (i, title.shared(r))))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    Some((best, check(title, references, best)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +266,23 @@ mod tests {
         ];
         let title = Phrases::from_text(&dialogue(99, 400));
         assert!(matches!(check(&title, &refs, 0), Verdict::Inconclusive { .. }));
+    }
+
+    #[test]
+    fn a_title_is_placed_at_the_reference_it_shares_most_with() {
+        let refs: Vec<Option<Phrases>> = (1..=4)
+            .map(|seed| Some(Phrases::from_text(&dialogue(seed, 300))))
+            .collect();
+        let title = Phrases::from_text(&dialogue(3, 300));
+        let (at, verdict) = place(&title, &refs).unwrap();
+        assert_eq!(at, 2);
+        assert!(matches!(verdict, Verdict::Confirmed { .. }));
+        // An episode whose reference is missing cannot be chosen.
+        let mut gap = refs.clone();
+        gap[2] = None;
+        let (_, verdict) = place(&title, &gap).unwrap();
+        assert!(!matches!(verdict, Verdict::Confirmed { .. }));
+        // Too little dialogue to compare places nothing.
+        assert!(place(&Phrases::from_text("hello there"), &refs).is_none());
     }
 }

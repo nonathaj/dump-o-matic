@@ -57,32 +57,7 @@ pub fn check(cfg: &Config, tv_id: u64, proposals: &[(&str, &TitleMatch)]) -> Res
             episodes.push(key);
         }
     }
-    let mut quota_hit = false;
-    let mut references: Vec<Option<Phrases>> = Vec::new();
-    for &(season, number) in &episodes {
-        let text = if quota_hit {
-            cached(cfg, tv_id, season, number)
-        } else {
-            match reference(cfg, &client, tv_id, season, number) {
-                Ok(t) => t,
-                Err(OpenSubtitlesError::QuotaExhausted) => {
-                    println!(
-                        "  the download allowance ran out; episodes without a cached \
-                         reference are not checked this time"
-                    );
-                    quota_hit = true;
-                    cached(cfg, tv_id, season, number)
-                }
-                Err(e) => {
-                    println!("  S{season:02}E{number:02}: no reference ({e})");
-                    None
-                }
-            }
-        };
-        references.push(text.map(|t| {
-            Phrases::from_text(&dumo_backends::subtitles::dialogue_text(&t))
-        }));
-    }
+    let references = load_references(cfg, &client, tv_id, &episodes);
     let names: Vec<String> = episodes
         .iter()
         .map(|(s, e)| format!("S{s:02}E{e:02}"))
@@ -94,10 +69,7 @@ pub fn check(cfg: &Config, tv_id: u64, proposals: &[(&str, &TitleMatch)]) -> Res
     for (job_id, m) in proposals {
         let key = (m.episode.season, m.episode.number);
         let idx = episodes.iter().position(|e| *e == key).unwrap_or(0);
-        let path = title_path(cfg, job_id, &m.title_name);
-        let title = dumo_backends::subtitles::extract_text(&path, CAPTION_WINDOW_SECS)
-            .map(|srt| Phrases::from_text(&dumo_backends::subtitles::dialogue_text(&srt)))
-            .unwrap_or_else(|_| Phrases::from_text(""));
+        let title = title_phrases(cfg, job_id, &m.title_name);
         let verdict = transcript::check(&title, &references, idx);
         match verdict {
             Verdict::Confirmed { .. } => {
@@ -134,6 +106,74 @@ pub fn check(cfg: &Config, tv_id: u64, proposals: &[(&str, &TitleMatch)]) -> Res
             of: proposals.len(),
         }
     })
+}
+
+/// References for `episodes`, `(season, number)` each, in the same order: cached, or
+/// downloaded and cached. `None` for an episode with no reference to be had.
+fn load_references(
+    cfg: &Config,
+    client: &OpenSubtitlesClient,
+    tv_id: u64,
+    episodes: &[(u32, u32)],
+) -> Vec<Option<Phrases>> {
+    let mut quota_hit = false;
+    let mut references: Vec<Option<Phrases>> = Vec::new();
+    for &(season, number) in episodes {
+        let text = if quota_hit {
+            cached(cfg, tv_id, season, number)
+        } else {
+            match reference(cfg, client, tv_id, season, number) {
+                Ok(t) => t,
+                Err(OpenSubtitlesError::QuotaExhausted) => {
+                    println!(
+                        "  the download allowance ran out; episodes without a cached \
+                         reference are not checked this time"
+                    );
+                    quota_hit = true;
+                    cached(cfg, tv_id, season, number)
+                }
+                Err(e) => {
+                    println!("  S{season:02}E{number:02}: no reference ({e})");
+                    None
+                }
+            }
+        };
+        references.push(text.map(|t| {
+            Phrases::from_text(&dumo_backends::subtitles::dialogue_text(&t))
+        }));
+    }
+    references
+}
+
+/// References for every given episode, or `None` when no credentials are configured.
+pub fn references_for(
+    cfg: &Config,
+    tv_id: u64,
+    episodes: &[(u32, u32)],
+) -> Result<Option<Vec<Option<Phrases>>>> {
+    let client = match OpenSubtitlesClient::from_config(&cfg.api) {
+        Ok(c) => c,
+        Err(OpenSubtitlesError::NoCredential) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Some(load_references(cfg, &client, tv_id, episodes)))
+}
+
+/// The two halves of an episode's cached reference, as phrases, for telling the halves
+/// of a two-part episode apart. `None` when no reference is cached.
+pub fn reference_halves(cfg: &Config, tv_id: u64, season: u32, number: u32) -> Option<(Phrases, Phrases)> {
+    let srt = cached(cfg, tv_id, season, number)?;
+    let (a, b) = dumo_identify::versions::split_srt(&srt);
+    let phrases = |t: &str| Phrases::from_text(&dumo_backends::subtitles::dialogue_text(t));
+    Some((phrases(&a), phrases(&b)))
+}
+
+/// A title's own dialogue as phrases; empty when it has none that can be read.
+pub fn title_phrases(cfg: &Config, job_id: &str, title_name: &str) -> Phrases {
+    let path = title_path(cfg, job_id, title_name);
+    dumo_backends::subtitles::extract_text(&path, CAPTION_WINDOW_SECS)
+        .map(|srt| Phrases::from_text(&dumo_backends::subtitles::dialogue_text(&srt)))
+        .unwrap_or_else(|_| Phrases::from_text(""))
 }
 
 /// Print what an outcome means for filing, and say whether filing may go ahead.
