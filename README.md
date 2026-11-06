@@ -203,6 +203,26 @@ only at 25% or more and three times any other episode checked. A title whose dia
 belongs to another episode stops the filing. Downloads are metered per day, so each
 reference is cached under `<staging>/cache/subtitles` and fetched only once.
 
+Some discs defeat the episode matcher: a Blu-ray of a sitcom can carry each episode two or
+three times — the broadcast cut, an extended cut, a version with commentary tracks — in
+no useful order. `identify --by-reference` places each title on its own against every
+episode of the season by its dialogue alone. Of several titles at one episode it keeps
+the sharpest picture, then the one with the fewest audio tracks (commentaries add
+tracks), then the running time closest to the listing's. Two titles that each match only
+one half of the episode's reference are the halves of a two-parter the listing counts as
+one, and are filed as `S05E23 - Name - pt1.mkv` and `- pt2.mkv`, as Plex expects. The
+placement is only as good as the references' numbering: where OpenSubtitles numbers a
+season differently from TMDB, the names will be off, so read the proposal.
+
+A library ripped with MakeMKV before this tool existed can be brought in without copying
+it. `import-rips <dir>` groups files named `Disc Label_tNN.mkv` by disc and makes each
+disc a job, hard-linking the files in (they must be on the staging filesystem) and hashing
+them. Where an earlier copy of the same rips is already in permanent storage under its
+raw names, `migrate --rename-from <dir>` renames those files in place rather than copying
+over them: each is found by the name and size of the rip it came from, re-read with its
+cached pages dropped, and renamed only if its hash matches. A rename never overwrites an
+existing name, and needs no free space.
+
 A disc with one feature-length title is matched against TMDB's films instead: the name
 finds the candidates and the runtime checks them. It is `strong` only when the top search
 result is the one candidate whose runtime fits; two same-named films that both fit stay

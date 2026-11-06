@@ -264,8 +264,9 @@ enum Command {
         ///
         /// For a disc the episode matcher cannot follow: more titles than episodes,
         /// copies of episodes, no usable order. Needs OpenSubtitles credentials. A title
-        /// is placed only where its dialogue clearly belongs to one episode; two titles
-        /// at one episode are left for you to choose between.
+        /// is placed only where its dialogue clearly belongs to one episode. Of several
+        /// titles at one episode, the sharpest with the fewest audio tracks is kept; two
+        /// that each hold one half of the episode's dialogue are filed as `- pt1`/`- pt2`.
         #[arg(long)]
         by_reference: bool,
         /// Config file to use instead of the search path.
@@ -339,6 +340,12 @@ enum Command {
         /// Do not prompt for confirmation.
         #[arg(long, short = 'y')]
         yes: bool,
+        /// Rename rips already in permanent storage instead of copying: each file to be
+        /// migrated is looked for under this directory by the name of the rip it came
+        /// from, re-read and hashed there, and renamed into place only if the hash
+        /// matches. For a library ripped before, then imported with `import-rips`.
+        #[arg(long, value_name = "DIR")]
+        rename_from: Option<PathBuf>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -558,10 +565,11 @@ fn main() -> Result<()> {
                 config_file: config,
             })
         }
-        Command::Migrate { job, destination, dry_run, yes, config } => {
+        Command::Migrate { job, destination, dry_run, yes, rename_from, config } => {
             migrate::run(migrate::MigrateArgs {
                 job,
                 destination,
+                rename_from,
                 dry_run,
                 assume_yes: yes,
                 config_file: config,

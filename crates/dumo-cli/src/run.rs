@@ -103,6 +103,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         dry_run: args.dry_run,
         assume_yes: args.assume_yes,
         config_file: args.config_file.clone(),
+        rename_from: None,
     })?;
 
     if stage(&job_dir)? != JobStage::Migrated {

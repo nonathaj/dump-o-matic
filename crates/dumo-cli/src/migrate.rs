@@ -24,6 +24,9 @@ pub struct MigrateArgs {
     pub dry_run: bool,
     pub assume_yes: bool,
     pub config_file: Option<PathBuf>,
+    /// Files already in permanent storage under their rip names: each one is renamed
+    /// into place, once its hash proves it is the identified title, instead of copied.
+    pub rename_from: Option<PathBuf>,
 }
 
 pub fn run(args: MigrateArgs) -> Result<()> {
@@ -122,6 +125,15 @@ pub fn run(args: MigrateArgs) -> Result<()> {
     println!("Plan:");
     let mut total_bytes = 0u64;
     let mut planned: Vec<Plan> = Vec::new();
+    let in_place = match &args.rename_from {
+        Some(dir) => {
+            if !dir.is_dir() {
+                bail!("--rename-from {}: not a directory", dir.display());
+            }
+            Some(files_by_name(dir))
+        }
+        None => None,
+    };
 
     for (dir, job) in &eligible {
         let Some(id) = &job.identification else {
@@ -141,14 +153,32 @@ pub fn run(args: MigrateArgs) -> Result<()> {
 
             let dest = destination_path(&target.root, &f.path);
             let exists = dest.exists();
+            // Renaming in place: the rip this file came from, by its name, found in
+            // permanent storage. The hash is checked when it is renamed, not here.
+            let rename_src = in_place.as_ref().and_then(|index| {
+                let ripped = job.artifacts.iter().find(|a| a.sha256 == f.sha256)?;
+                let name = Path::new(&ripped.relative_path).file_name()?.to_string_lossy().to_string();
+                index.get(&name).filter(|p| std::fs::metadata(p).map(|m| m.len() == f.bytes).unwrap_or(false)).cloned()
+            });
+            if in_place.is_some() && rename_src.is_none() && !exists {
+                println!("  {} -> no rip of the same name and size to rename; skipped", f.path);
+                continue;
+            }
             println!(
                 "  {} -> [{}] {}{}",
                 f.path,
                 target.name,
                 dest.display(),
-                if exists { "   [BLOCKED: exists]" } else { "" }
+                if exists {
+                    "   [BLOCKED: exists]".to_string()
+                } else {
+                    rename_src
+                        .as_ref()
+                        .map(|p| format!("\n      renamed from {}", p.display()))
+                        .unwrap_or_default()
+                }
             );
-            if !exists {
+            if !exists && rename_src.is_none() {
                 total_bytes += f.bytes;
             }
             planned.push(Plan {
@@ -160,6 +190,7 @@ pub fn run(args: MigrateArgs) -> Result<()> {
                 blocked: exists,
                 staging_relative: f.path.clone(),
                 dest_root: target.root.clone(),
+                rename_src,
             });
         }
     }
@@ -243,7 +274,8 @@ pub fn run(args: MigrateArgs) -> Result<()> {
     // Space is checked per destination root, since files may be routed to different
     // shares with independent free space.
     let mut needed: std::collections::BTreeMap<PathBuf, u64> = Default::default();
-    for p in planned.iter().filter(|p| !p.blocked) {
+    // A rename in place takes no space.
+    for p in planned.iter().filter(|p| !p.blocked && p.rename_src.is_none()) {
         *needed.entry(p.dest_root.clone()).or_insert(0) += p.bytes;
     }
     for (root, bytes) in &needed {
@@ -323,6 +355,24 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         print!("  {} ... ", p.staging_relative);
         std::io::stdout().flush().ok();
         let started = std::time::Instant::now();
+
+        if let Some(from) = &p.rename_src {
+            match fsops::rename_verified(from, &p.dest, &p.sha256) {
+                Ok(()) => {
+                    println!("renamed in place (hash matched)");
+                    if !migrated_jobs.contains(&p.job_dir) {
+                        migrated_jobs.push(p.job_dir.clone());
+                    }
+                }
+                Err(e) => {
+                    failures += 1;
+                    println!("FAILED");
+                    println!("     {e}");
+                    println!("     Nothing was renamed, copied or deleted for this file.");
+                }
+            }
+            continue;
+        }
 
         let result = if reclaim {
             fsops::move_verified(&p.src, &p.dest, Some(&p.sha256)).map(|o| o.verified_sha256)
@@ -484,6 +534,30 @@ struct Plan {
     blocked: bool,
     staging_relative: String,
     dest_root: PathBuf,
+    /// The copy already in permanent storage, to rename into place instead of copying.
+    rename_src: Option<PathBuf>,
+}
+
+/// Every file under `dir`, by file name. A name found twice is left out: which of the
+/// two to rename would be a guess.
+fn files_by_name(dir: &Path) -> std::collections::HashMap<String, PathBuf> {
+    fn walk(dir: &Path, seen: &mut std::collections::HashMap<String, Vec<PathBuf>>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, seen);
+            } else if let Some(n) = p.file_name() {
+                seen.entry(n.to_string_lossy().to_string()).or_default().push(p);
+            }
+        }
+    }
+    let mut seen = Default::default();
+    walk(dir, &mut seen);
+    seen.into_iter()
+        .filter(|(_, v)| v.len() == 1)
+        .map(|(k, mut v)| (k, v.remove(0)))
+        .collect()
 }
 
 /// Map a staging-relative path onto the destination.

@@ -299,6 +299,45 @@ pub fn place_written(dest: &Path) -> Result<String> {
     Ok(actual)
 }
 
+/// Rename a file already in permanent storage to its proper name, once its content is
+/// proven to be what the caller expects.
+///
+/// For a library whose files are right but misnamed: nothing is copied, so nothing can
+/// be corrupted in transit, but a rename can still attach a name to the wrong file. So
+/// the file is re-read from storage and hashed first, and renamed only on a match.
+/// `dest` must not exist, and must be on the same filesystem; its directory is created
+/// if needed. The content is not touched.
+pub fn rename_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result<()> {
+    if !src.is_file() {
+        return Err(FsError::SourceMissing {
+            path: src.to_path_buf(),
+        });
+    }
+    if dest.exists() {
+        return Err(FsError::DestinationExists {
+            path: dest.to_path_buf(),
+        });
+    }
+    let actual = hash_evicting(src).map_err(io_err(src))?;
+    if actual != expected_sha256 {
+        return Err(FsError::VerificationFailed {
+            path: src.to_path_buf(),
+            expected: expected_sha256.to_string(),
+            actual,
+        });
+    }
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(io_err(dir))?;
+    }
+    // Checked again: the hash took a while, and the name may have been taken since.
+    if dest.exists() {
+        return Err(FsError::DestinationExists {
+            path: dest.to_path_buf(),
+        });
+    }
+    std::fs::rename(src, dest).map_err(io_err(dest))
+}
+
 /// Hash a file after evicting it from the page cache, so the read reaches storage.
 pub fn hash_evicting(path: &Path) -> std::io::Result<String> {
     {
@@ -374,6 +413,35 @@ mod tests {
             std::fs::create_dir_all(p).unwrap();
         }
         std::fs::File::create(path).unwrap().write_all(content).unwrap();
+    }
+
+    #[test]
+    fn renames_in_place_only_what_hashes_as_expected() {
+        let dir = scratch("rename-verified");
+        let src = dir.join("Show Disc 1_t04.mkv");
+        write(&src, b"episode");
+        let good = crate::hash::sha256_file(&src).unwrap().0;
+        let dest = dir.join("Season 01/Show S01E01 - Pilot.mkv");
+
+        // The wrong content is never renamed.
+        assert!(matches!(
+            rename_verified(&src, &dest, &"0".repeat(64)),
+            Err(FsError::VerificationFailed { .. })
+        ));
+        assert!(src.exists() && !dest.exists());
+
+        rename_verified(&src, &dest, &good).unwrap();
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"episode");
+
+        // Nor over a name already taken.
+        write(&src, b"episode");
+        assert!(matches!(
+            rename_verified(&src, &dest, &good),
+            Err(FsError::DestinationExists { .. })
+        ));
+        assert!(src.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
