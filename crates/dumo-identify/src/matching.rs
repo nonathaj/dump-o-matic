@@ -432,7 +432,9 @@ fn best_window_by_dialogue(
 /// Find the best contiguous run of episodes matching these titles.
 ///
 /// `titles` must already be in disc order. `disc_hint` is the disc's number within its
-/// set, used only to break ties that runtime cannot.
+/// set, used only to break ties that runtime cannot. `Some(0)` says the episodes before
+/// this disc's are already filed and gone from `season`, so the disc is the next run and
+/// starts at the first episode listed.
 ///
 /// Any tie-break that relocates the window must call [`SeasonMatch::restate_window`],
 /// since the summary evidence is built from the runtime-best window and would otherwise
@@ -554,7 +556,12 @@ pub fn match_season_with_hint(
             // A disc holding k episodes, numbered from 1, would start here if the set is
             // packed evenly. Used only to choose between alignments already tied on
             // runtime, never to override a better-scoring one.
-            let expected_start = (disc.saturating_sub(1)) * k as u32 + 1;
+            let next_run = disc == 0;
+            let expected_start = if next_run {
+                season.episodes.first().map(|e| e.number).unwrap_or(1)
+            } else {
+                (disc.saturating_sub(1)) * k as u32 + 1
+            };
             if let Some(w) = tied
                 .iter()
                 .find(|w| season.episodes[w.3].number == expected_start)
@@ -584,15 +591,24 @@ pub fn match_season_with_hint(
                     .collect();
                 m.disc_hint_used = true;
                 m.restate_window(season.number, k);
-                m.evidence.push(format!(
-                    "runtimes tie between alignments starting at episode {}; the label says \
-                     disc {disc}, and {k} episodes per disc puts this one at episode \
-                     {expected_start}",
-                    tied.iter()
-                        .map(|w| season.episodes[w.3].number.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
+                let starts = tied
+                    .iter()
+                    .map(|w| season.episodes[w.3].number.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                m.evidence.push(if next_run {
+                    format!(
+                        "runtimes tie between alignments starting at episode {starts}; the \
+                         episodes before are already filed, so this disc is the next run, \
+                         from episode {expected_start}"
+                    )
+                } else {
+                    format!(
+                        "runtimes tie between alignments starting at episode {starts}; the \
+                         label says disc {disc}, and {k} episodes per disc puts this one at \
+                         episode {expected_start}"
+                    )
+                });
             }
         }
     }
@@ -1113,6 +1129,26 @@ mod tests {
         assert!(hinted.disc_hint_used);
         assert_eq!(hinted.matches[0].episode.name, "Muhammad and Larry");
         assert_eq!(hinted.matches[2].episode.name, "The Legend of Jimmy the Greek");
+    }
+
+    /// With the earlier episodes already filed, the next disc is the next run: the same
+    /// tie as above, resolved to the first episode that is left.
+    #[test]
+    fn the_next_run_after_the_filed_episodes_breaks_a_tie() {
+        let titles = vec![
+            title("B1_t00.mkv", 52.2),
+            title("D1_t01.mkv", 51.2),
+            title("E1_t02.mkv", 51.8),
+        ];
+        let mut season = season_one();
+        let filed = |e: &Episode| e.number <= 1;
+        season.episodes.retain(|e| !filed(e));
+        let plain = match_season(&titles, &season).unwrap();
+        assert!(!plain.tied_alternatives.is_empty(), "the tie must still be there");
+        let m = match_season_with_hint(&titles, &season, Some(0)).unwrap();
+        assert_eq!(m.first_episode, 2);
+        assert!(m.disc_hint_used);
+        assert!(m.evidence.iter().any(|e| e.contains("next run")));
     }
 
     /// The hint must never override a genuinely better runtime fit.

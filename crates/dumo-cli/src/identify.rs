@@ -1368,7 +1368,7 @@ fn analyse_video(
         let results = dumo_identify::matching::match_seasons(
             &titles,
             &seasons,
-            if on_shelf { None } else { disc_hint },
+            if on_shelf { Some(0) } else { disc_hint },
         );
         match results.first() {
             Some(b) => {
@@ -1480,7 +1480,7 @@ fn analyse_video(
         println!("    - {e}");
     }
     if best.disc_hint_used {
-        println!("    - the disc number decided this, not the runtimes");
+        println!("    - the disc's place in the set decided this, not the runtimes");
     }
 
 
