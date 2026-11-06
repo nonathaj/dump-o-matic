@@ -141,7 +141,11 @@ so when there is no text track, the first non-forced PGS track is decoded and re
 Tesseract (`sudo apt install tesseract-ocr`). That costs time, so it only happens when
 no text exists; without Tesseract such a title simply has no dialogue to score, and
 `identify` says why. On a measured Blu-ray of eight 25-minute episodes, reading them all
-took 29 seconds, with near-perfect text.
+took 29 seconds, with near-perfect text. A DVD without closed captions is read the same
+way from its VobSub pictures, which `mkvextract` pulls out and the disc's palette in the
+track colours: Marvel's The Punisher on DVD has no text track at all, and one 55-minute
+episode read in 7 seconds, clean enough for reference subtitles to confirm all four
+episodes of a disc at 93–94% of their phrases.
 
 Many series caption their episode's title card — `"Episode 5: Phantoms of the Dead"` —
 which names the episode outright. A title's earliest such card, where the words after

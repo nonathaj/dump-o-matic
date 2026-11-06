@@ -15,6 +15,7 @@ pub mod ocr;
 pub mod pgs;
 pub mod redumper;
 pub mod subtitles;
+pub mod vobsub;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {

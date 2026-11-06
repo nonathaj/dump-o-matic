@@ -20,18 +20,19 @@ const PROBE_TOOL: &str = "ffprobe";
 /// carry pictures of words and cannot become SRT without OCR.
 const TEXT_SUBTITLE_CODECS: &[&str] = &["subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"];
 
-/// Bitmap subtitle codecs that can be read by OCR. Blu-ray PGS only, for now: DVD
-/// VOBSUB pictures need the disc's palette from elsewhere in the file, and every DVD
-/// met so far has had a closed-caption text track anyway.
-const OCR_SUBTITLE_CODECS: &[&str] = &["hdmv_pgs_subtitle"];
+/// Bitmap subtitle codecs that can be read by OCR: Blu-ray PGS, and DVD VobSub for the
+/// DVDs whose rips carry no closed-caption text track.
+const OCR_SUBTITLE_CODECS: &[&str] = &["hdmv_pgs_subtitle", "dvd_subtitle"];
 
 /// Which subtitle stream to read a title's dialogue from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
     /// Text, read directly. Index among the subtitle streams.
     Text(usize),
-    /// Pictures, read by OCR. Index among the subtitle streams.
+    /// Blu-ray PGS pictures, read by OCR. Index among the subtitle streams.
     Pictures(usize),
+    /// DVD VobSub pictures, read by OCR. Index among the subtitle streams.
+    DvdPictures(usize),
 }
 
 /// Each subtitle stream's codec and whether it is flagged as forced.
@@ -83,10 +84,14 @@ fn choose(streams: &[(String, bool)]) -> Option<Source> {
     {
         return Some(Source::Text(i));
     }
-    streams
+    let i = streams
         .iter()
-        .position(|(c, forced)| !forced && OCR_SUBTITLE_CODECS.contains(&c.as_str()))
-        .map(Source::Pictures)
+        .position(|(c, forced)| !forced && OCR_SUBTITLE_CODECS.contains(&c.as_str()))?;
+    Some(if streams[i].0 == "dvd_subtitle" {
+        Source::DvdPictures(i)
+    } else {
+        Source::Pictures(i)
+    })
 }
 
 fn run_ffmpeg(path: &Path, limit_secs: u32, stream: usize, output: &[&str]) -> Result<Option<Vec<u8>>> {
@@ -114,7 +119,7 @@ fn run_ffmpeg(path: &Path, limit_secs: u32, stream: usize, output: &[&str]) -> R
 
 /// Extract a title's subtitle text.
 ///
-/// From a text track this is SRT. From a Blu-ray's picture track it is the recognised
+/// From a text track this is SRT. From a picture track, Blu-ray or DVD, it is the recognised
 /// lines, without timings — the words are what matching uses. Picture subtitles need
 /// Tesseract; without it this returns [`BackendError::NotInstalled`] so the caller can
 /// say why a title has no dialogue, instead of the title quietly having none.
@@ -138,6 +143,14 @@ pub fn extract_text(path: &Path, limit_secs: u32) -> Result<String> {
                 return Ok(String::new());
             };
             crate::ocr::read_captions(&crate::pgs::decode(&sup))
+        }
+        // The whole track is read: a DVD's captions are a couple of megabytes, and the
+        // windows asked for are longer than any title anyway.
+        Source::DvdPictures(stream) => {
+            if !crate::ocr::available() {
+                return Err(BackendError::NotInstalled { tool: "tesseract" });
+            }
+            crate::ocr::read_captions(&crate::vobsub::read(path, stream)?)
         }
     }
 }
@@ -224,8 +237,14 @@ YOU KNOW EVERYTHING.
     }
 
     #[test]
+    fn a_dvd_with_only_pictures_is_read_by_ocr() {
+        // Marvel's The Punisher on DVD: VobSub and no closed captions.
+        assert_eq!(choose(&streams(&[("dvd_subtitle", false)])), Some(Source::DvdPictures(0)));
+    }
+
+    #[test]
     fn unreadable_picture_formats_are_not_chosen() {
-        assert_eq!(choose(&streams(&[("dvd_subtitle", false)])), None);
+        assert_eq!(choose(&streams(&[("dvb_subtitle", false)])), None);
         assert_eq!(choose(&[]), None);
     }
 

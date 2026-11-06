@@ -151,7 +151,7 @@ pub fn decode(sup: &[u8]) -> Vec<Caption> {
 /// The colour is composited over black, which leaves the text's fill bright and its
 /// outline and the transparent surround dark, and then inverted: the fill becomes ink
 /// and everything else paper. Hue is irrelevant to reading words, so only luma is used.
-fn paper_shade(y: u8, alpha: u8) -> u8 {
+pub(crate) fn paper_shade(y: u8, alpha: u8) -> u8 {
     let over_black = u16::from(y) * u16::from(alpha) / 255;
     255 - over_black as u8
 }
