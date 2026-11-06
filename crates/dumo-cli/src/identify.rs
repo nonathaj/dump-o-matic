@@ -812,6 +812,7 @@ fn apply_matches(
                     path: relative_to_staging(&dest, &cfg.staging.root),
                     bytes,
                     sha256,
+                    ripped_as: None,
                 }],
             );
             job.save(job_dir)?;
@@ -881,6 +882,7 @@ fn apply_matches(
                     path: relative_to_staging(&dest, &cfg.staging.root),
                     bytes,
                     sha256: sha256.clone(),
+                    ripped_as: None,
                 });
                 reference = Some(m.clone());
             }
@@ -1061,6 +1063,7 @@ fn identify_device_content(
                         path: relative_to_staging(&dest, &cfg.staging.root),
                         bytes: outcome.bytes,
                         sha256: sha256.clone(),
+                        ripped_as: None,
                     }],
                     superseded: Vec::new(),
                     trimmed: Vec::new(),
@@ -2853,6 +2856,7 @@ fn file_titles(
                             path: rel.clone(),
                             bytes,
                             sha256,
+                            ripped_as: None,
                         });
                         let original = src
                             .strip_prefix(&job_dir)
@@ -2892,6 +2896,7 @@ fn file_titles(
                     path: rel,
                     bytes: outcome.bytes,
                     sha256,
+                    ripped_as: Some(title_name.clone()),
                 });
                 moved_sources.push(title_name.clone());
             }

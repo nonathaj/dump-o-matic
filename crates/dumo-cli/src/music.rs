@@ -384,6 +384,7 @@ pub fn identify_audio(
             path: ready_rel.join(&name).to_string_lossy().to_string(),
             bytes: tagged.len() as u64,
             sha256: sha,
+            ripped_as: None,
         });
     }
     let _ = std::fs::remove_dir(&work);

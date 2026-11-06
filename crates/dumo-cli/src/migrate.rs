@@ -156,8 +156,7 @@ pub fn run(args: MigrateArgs) -> Result<()> {
             // Renaming in place: the rip this file came from, by its name, found in
             // permanent storage. The hash is checked when it is renamed, not here.
             let rename_src = in_place.as_ref().and_then(|index| {
-                let ripped = job.artifacts.iter().find(|a| a.sha256 == f.sha256)?;
-                let name = Path::new(&ripped.relative_path).file_name()?.to_string_lossy().to_string();
+                let name = ripped_name(job, f)?;
                 index.get(&name).filter(|p| std::fs::metadata(p).map(|m| m.len() == f.bytes).unwrap_or(false)).cloned()
             });
             if in_place.is_some() && rename_src.is_none() && !exists {
@@ -538,6 +537,31 @@ struct Plan {
     rename_src: Option<PathBuf>,
 }
 
+/// The name of the rip a filed file came from, to find it by in permanent storage.
+///
+/// Filing records it. A file filed before that was recorded is still traceable: filing
+/// took its rip out of the job's artifacts, so it is the one title of exactly its size
+/// that is no longer among them. Copies of one episode are the same size, but only one
+/// of them is filed. Anything less certain is `None`; the rename re-hashes in any case.
+fn ripped_name(job: &Job, f: &dumo_core::ReadyFile) -> Option<String> {
+    if let Some(name) = &f.ripped_as {
+        return Some(name.clone());
+    }
+    let remaining: std::collections::HashSet<&str> = job
+        .artifacts
+        .iter()
+        .filter_map(|a| Path::new(&a.relative_path).file_name()?.to_str())
+        .collect();
+    let mut gone = job
+        .titles
+        .iter()
+        .filter(|t| t.estimated_bytes == f.bytes && !remaining.contains(t.output_name.as_str()));
+    match (gone.next(), gone.next()) {
+        (Some(t), None) => Some(t.output_name.clone()),
+        _ => None,
+    }
+}
+
 /// Every file under `dir`, by file name. A name found twice is left out: which of the
 /// two to rename would be a guess.
 fn files_by_name(dir: &Path) -> std::collections::HashMap<String, PathBuf> {
@@ -691,5 +715,42 @@ mod tests {
     #[test]
     fn a_missing_path_is_not_a_network_filesystem() {
         assert!(!is_network_filesystem(Path::new("/nonexistent/dumo/path")));
+    }
+
+    #[test]
+    fn a_filed_file_is_traced_to_the_rip_it_came_from() {
+        // Friends Season 5 Disc 1: t24 and t25 are copies of S05E01, and t24 was filed.
+        let mut job = Job::new("j".into(), "imported".into());
+        for (index, bytes) in [(24, 2_608_141_521), (25, 2_608_141_521), (26, 2_610_129_651)] {
+            let name = format!("Disc 1_t{index}.mkv");
+            job.titles.push(dumo_core::job::TitleInfo {
+                index,
+                duration_secs: 1300,
+                estimated_bytes: bytes,
+                chapters: 6,
+                output_name: name.clone(),
+            });
+            if index != 24 {
+                job.artifacts.push(dumo_core::job::Artifact {
+                    relative_path: format!("raw/{name}"),
+                    bytes,
+                    sha256: "x".into(),
+                    hashed_at: 0,
+                });
+            }
+        }
+        let mut filed = dumo_core::ReadyFile {
+            path: "ready/tv/Friends (1994)/Season 05/S05E01.mkv".into(),
+            bytes: 2_608_141_521,
+            sha256: "y".into(),
+            ripped_as: None,
+        };
+        assert_eq!(ripped_name(&job, &filed).as_deref(), Some("Disc 1_t24.mkv"));
+        // A size no title has left the job with says nothing.
+        filed.bytes = 2_610_129_651;
+        assert_eq!(ripped_name(&job, &filed), None);
+        // What filing recorded wins.
+        filed.ripped_as = Some("Disc 1_t26.mkv".into());
+        assert_eq!(ripped_name(&job, &filed).as_deref(), Some("Disc 1_t26.mkv"));
     }
 }

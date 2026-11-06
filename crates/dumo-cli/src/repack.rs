@@ -315,6 +315,7 @@ fn repack_one(p: &Plan, cfg: &Config, set: &DatfileSet) -> Result<()> {
             path: dest_rel,
             bytes,
             sha256,
+            ripped_as: None,
         }];
     }
     // Back to Identified: there is now content that has not reached permanent storage.

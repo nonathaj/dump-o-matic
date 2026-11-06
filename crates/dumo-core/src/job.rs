@@ -114,6 +114,12 @@ pub struct ReadyFile {
     pub path: String,
     pub bytes: u64,
     pub sha256: String,
+    /// The name of the rip this file was filed from unchanged, e.g. `Disc 1_t04.mkv`.
+    ///
+    /// Filing takes the rip out of the job's artifacts, so this is what still says which
+    /// one it was — what `migrate --rename-from` looks for in permanent storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ripped_as: Option<String>,
 }
 
 /// The outcome of identifying a job's content.

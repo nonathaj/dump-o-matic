@@ -295,6 +295,7 @@ fn adopt_one(a: &Adoptable, cfg: &Config) -> Result<String> {
             path: relative,
             bytes: a.bytes,
             sha256: a.sha256.clone(),
+            ripped_as: None,
         }],
         superseded: Vec::new(),
         trimmed: Vec::new(),
