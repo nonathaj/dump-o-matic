@@ -982,7 +982,11 @@ pub fn query_from_label(label: &str) -> String {
         } else {
             String::new()
         };
-        let is_number = last.chars().all(|c| c.is_ascii_digit());
+        // "DISC ONE" as well as "DISC 1".
+        let spelled = ["ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN"];
+        let is_number = last.chars().all(|c| c.is_ascii_digit()) || spelled.contains(&last.as_str());
+        // What separated the title from a marker just dropped: "TITLE - DISC ONE".
+        let separator = !last.is_empty() && last.chars().all(|c| matches!(c, '-' | '–' | '—' | ':'));
         let glued = glued_disc_marker
             .iter()
             .filter(|m| last.len() > m.len())
@@ -990,7 +994,7 @@ pub fn query_from_label(label: &str) -> String {
         let glued_season = glued_number(&last, &["SEASON", "VOL", "VOLUME"]).is_some();
         if is_number && marker.contains(&prev.as_str()) {
             end -= 2;
-        } else if marker.contains(&last.as_str()) || glued.is_some() || glued_season {
+        } else if marker.contains(&last.as_str()) || glued.is_some() || glued_season || separator {
             end -= 1;
         } else {
             break;
@@ -1397,6 +1401,10 @@ mod tests {
         assert_eq!(query_from_label("THE_WIRE_SEASON_2"), "the wire");
         assert_eq!(query_from_label("FRIENDS_S05_DISC_3"), "friends s05");
         assert_eq!(query_from_label("MAD_MEN"), "mad men");
+        // A spelled-out disc number, set off from the title by a dash.
+        assert_eq!(query_from_label("KPOP DEMON HUNTERS - DISC ONE"), "kpop demon hunters");
+        // A dash inside a title stays.
+        assert_eq!(query_from_label("X - MEN"), "X - men");
     }
 
     /// Regression test: a glued disc marker like "D1" used to survive stripping because
