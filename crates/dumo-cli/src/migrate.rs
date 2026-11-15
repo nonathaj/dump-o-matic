@@ -152,12 +152,21 @@ pub fn run(args: MigrateArgs) -> Result<()> {
             };
 
             let dest = destination_path(&target.root, &f.path);
-            let exists = dest.exists();
+            let same_size = |p: &PathBuf| std::fs::metadata(p).map(|m| m.len() == f.bytes).unwrap_or(false);
+            // On a share that ignores case, the file already there under its name in
+            // other case makes `dest` exist. Renaming in place, that is put right like
+            // any other misnamed file.
+            let case_src = match &in_place {
+                Some(_) => fsops::case_variant_of(&dest).filter(same_size),
+                None => None,
+            };
+            let exists = dest.exists() && case_src.is_none();
             // Renaming in place: the rip this file came from, by its name, found in
             // permanent storage. The hash is checked when it is renamed, not here.
-            let rename_src = in_place.as_ref().and_then(|index| {
+            let rename_src = case_src.or_else(|| {
+                let index = in_place.as_ref()?;
                 let name = ripped_name(job, f)?;
-                index.get(&name).filter(|p| std::fs::metadata(p).map(|m| m.len() == f.bytes).unwrap_or(false)).cloned()
+                index.get(&name).filter(|p| same_size(p)).cloned()
             });
             if in_place.is_some() && rename_src.is_none() && !exists {
                 println!("  {} -> no rip of the same name and size to rename; skipped", f.path);

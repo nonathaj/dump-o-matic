@@ -307,13 +307,18 @@ pub fn place_written(dest: &Path) -> Result<String> {
 /// the file is re-read from storage and hashed first, and renamed only on a match.
 /// `dest` must not exist, and must be on the same filesystem; its directory is created
 /// if needed. The content is not touched.
+///
+/// The one exception to `dest` not existing: on a filesystem that ignores case, a name
+/// differing from `src`'s only in case resolves to `src` itself. That rename only changes
+/// the case of the name, and is carried out by `rename_case`.
 pub fn rename_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result<()> {
     if !src.is_file() {
         return Err(FsError::SourceMissing {
             path: src.to_path_buf(),
         });
     }
-    if dest.exists() {
+    let case_only = is_case_only_rename(src, dest);
+    if dest.exists() && !case_only {
         return Err(FsError::DestinationExists {
             path: dest.to_path_buf(),
         });
@@ -330,12 +335,119 @@ pub fn rename_verified(src: &Path, dest: &Path, expected_sha256: &str) -> Result
         std::fs::create_dir_all(dir).map_err(io_err(dir))?;
     }
     // Checked again: the hash took a while, and the name may have been taken since.
+    if case_only {
+        if !is_case_only_rename(src, dest) {
+            return Err(FsError::DestinationExists {
+                path: dest.to_path_buf(),
+            });
+        }
+        return rename_case(src, dest);
+    }
     if dest.exists() {
         return Err(FsError::DestinationExists {
             path: dest.to_path_buf(),
         });
     }
     std::fs::rename(src, dest).map_err(io_err(dest))
+}
+
+/// On a filesystem that ignores case (an SMB share, typically), the file that makes
+/// `dest` exist under a name differing from it only in case. None where `dest` does not
+/// exist, or exists under exactly its own name.
+pub fn case_variant_of(dest: &Path) -> Option<PathBuf> {
+    if !dest.exists() {
+        return None;
+    }
+    let dir = dest.parent()?;
+    let want = dest.file_name()?.to_str()?;
+    let mut found = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == want {
+            return None;
+        }
+        if found.is_none() && name.to_lowercase() == want.to_lowercase() {
+            found = Some(dir.join(name));
+        }
+    }
+    found
+}
+
+/// Whether renaming `src` to `dest` only changes the case of its name, on a filesystem
+/// where `dest` already resolves to `src` itself.
+fn is_case_only_rename(src: &Path, dest: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Some(a), Some(b)) = (
+        src.file_name().and_then(|n| n.to_str()),
+        dest.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return false;
+    };
+    if a == b || a.to_lowercase() != b.to_lowercase() || src.parent() != dest.parent() {
+        return false;
+    }
+    match (std::fs::metadata(src), std::fs::metadata(dest)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// How long `rename_case` keeps retrying, a second at a time, while the filesystem still
+/// shows the old name.
+const CASE_RENAME_ATTEMPTS: u32 = 30;
+
+/// Change only the case of a file's name, on a filesystem that ignores case.
+///
+/// A direct rename does nothing there: the new name already resolves to the file, so the
+/// kernel sees a rename onto itself and returns success with nothing changed. So it is
+/// done in two steps, through a temporary name. Even then a network client can for a
+/// moment keep resolving the new name to the file from a cached lookup, and the second
+/// step is again a silent no-op; so each attempt is confirmed in the directory listing,
+/// and retried until the cache lapses. If it never takes, the file gets its old name back.
+fn rename_case(src: &Path, dest: &Path) -> Result<()> {
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
+    let tmp = dest.with_file_name(format!(".{name}.dumo-case"));
+    if tmp.exists() {
+        return Err(FsError::DestinationExists { path: tmp });
+    }
+    std::fs::rename(src, &tmp).map_err(io_err(&tmp))?;
+    for attempt in 0..CASE_RENAME_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        if let Err(e) = std::fs::rename(&tmp, dest) {
+            let _ = std::fs::rename(&tmp, src);
+            return Err(FsError::Io {
+                path: dest.to_path_buf(),
+                source: e,
+            });
+        }
+        if is_listed(dest) && !is_listed(&tmp) {
+            return Ok(());
+        }
+    }
+    let _ = std::fs::rename(&tmp, src);
+    Err(FsError::Io {
+        path: dest.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "the filesystem kept showing the old name; the file was left under it",
+        ),
+    })
+}
+
+/// Whether `path`'s directory lists an entry of exactly its name, case included.
+fn is_listed(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().any(|e| e.file_name() == name))
+        .unwrap_or(false)
 }
 
 /// Hash a file after evicting it from the page cache, so the read reaches storage.
@@ -441,6 +553,40 @@ mod tests {
             Err(FsError::DestinationExists { .. })
         ));
         assert!(src.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_name_differing_only_in_case_is_renamed_through_a_temporary_name() {
+        let dir = scratch("rename-case");
+        let src = dir.join("Show S01E08 - The One where Nana Dies.mkv");
+        let dest = dir.join("Show S01E08 - The One Where Nana Dies.mkv");
+        write(&src, b"episode");
+
+        // The two steps, as on a share that ignores case; here the filesystem keeps case,
+        // so each step takes at once and the listing confirms it.
+        rename_case(&src, &dest).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, vec![dest.file_name().unwrap().to_owned()]);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"episode");
+
+        // A different file under the other case is another file, never renamed over.
+        write(&src, b"other");
+        assert!(!is_case_only_rename(&src, &dest));
+        let good = crate::hash::sha256_file(&src).unwrap().0;
+        assert!(matches!(
+            rename_verified(&src, &dest, &good),
+            Err(FsError::DestinationExists { .. })
+        ));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"episode");
+
+        // Where the filesystem keeps case, no other name stands in for the exact one.
+        assert_eq!(case_variant_of(&dest), None);
+        assert_eq!(case_variant_of(&dir.join("Show S01E09.mkv")), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

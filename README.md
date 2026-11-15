@@ -221,7 +221,11 @@ them. Where an earlier copy of the same rips is already in permanent storage und
 raw names, `migrate --rename-from <dir>` renames those files in place rather than copying
 over them: each is found by the name and size of the rip it came from, re-read with its
 cached pages dropped, and renamed only if its hash matches. A rename never overwrites an
-existing name, and needs no free space.
+existing name, and needs no free space. On a share that ignores case (SMB, typically), a
+file already at its destination name in other case ("The One where…" for "The One
+Where…") is renamed to the exact case the same way. A direct rename silently does
+nothing there, so it goes through a temporary name, and each step is confirmed in the
+directory listing.
 
 A disc with one feature-length title is matched against TMDB's films instead: the name
 finds the candidates and the runtime checks them. It is `strong` only when the top search

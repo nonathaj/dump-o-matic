@@ -344,6 +344,8 @@ enum Command {
         /// migrated is looked for under this directory by the name of the rip it came
         /// from, re-read and hashed there, and renamed into place only if the hash
         /// matches. For a library ripped before, then imported with `import-rips`.
+        /// On a share that ignores case, a file already at its name in other case is
+        /// renamed to the exact case the same way.
         #[arg(long, value_name = "DIR")]
         rename_from: Option<PathBuf>,
         /// Config file to use instead of the search path.
