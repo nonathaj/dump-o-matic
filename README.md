@@ -135,6 +135,12 @@ and a track that does not say its language is kept. The rip stays in the job unt
 `clean` has re-hashed the trimmed copy at the destination, since it alone holds what was
 dropped. With no `[video]` section, every track is kept, as before.
 
+A disc with a weak spot can lose a title at the scan: MakeMKV leaves out a title whose
+navigation it cannot read, and whether a marginal read succeeds varies from one try to
+the next. So when the scan meets a read error or skips a title for navigation, `rip`
+scans again, up to three times in all, and keeps whichever scan found the most titles.
+If every scan was troubled, it says so, since a title may still be missing.
+
 Dialogue comes from a title's text subtitle track where it has one — on a DVD,
 MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
 so when there is no text track, the first non-forced PGS track is decoded and read with

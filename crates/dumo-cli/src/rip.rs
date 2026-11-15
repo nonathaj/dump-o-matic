@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 /// transition stingers rather than content.
 const DEFAULT_MIN_LENGTH_SECS: u32 = 300;
 
+/// How many times a disc is scanned, at most, while its scans meet read errors.
+const SCAN_ATTEMPTS: u32 = 3;
+
 pub struct RipArgs {
     pub device: Option<String>,
     pub title: Option<u32>,
@@ -119,7 +122,28 @@ pub fn run(args: RipArgs) -> Result<Option<String>> {
         .with_context(|| format!("locating {device} in MakeMKV"))?;
 
     println!("Scanning titles (this reads the whole disc structure) ...");
-    let scan = makemkv::scan(disc_index, args.min_length).context("scanning disc")?;
+    let mut scan = makemkv::scan(disc_index, args.min_length).context("scanning disc")?;
+    // A read error during the scan can make MakeMKV leave out a title it cannot follow,
+    // and whether it does varies from one read to the next. So a troubled scan is
+    // repeated, keeping whichever found the most titles.
+    let mut attempts = 1;
+    while scan.read_trouble && attempts < SCAN_ATTEMPTS {
+        attempts += 1;
+        println!(
+            "  the scan met read errors, which can hide a title; scanning again \
+             ({attempts} of {SCAN_ATTEMPTS}) ..."
+        );
+        let again = makemkv::scan(disc_index, args.min_length).context("scanning disc")?;
+        if again.titles.len() >= scan.titles.len() {
+            scan = again;
+        }
+    }
+    if scan.read_trouble {
+        println!(
+            "  WARNING: every scan met read errors, so a title may be missing below.\n  \
+             Cleaning the disc and ripping again may recover it."
+        );
+    }
 
     if scan.titles.is_empty() {
         bail!(

@@ -25,6 +25,10 @@ const MSG_FAILED_TO_OPEN: u32 = 5010;
 const MSG_COPY_COMPLETE: u32 = 5036;
 /// Message codes that indicate outright failure.
 const FAILURE_CODES: &[u32] = &[MSG_FAILED_TO_OPEN, 5003, 5004];
+/// Message code for a read error ("Error '…MEDIUM ERROR…' occurred while reading …").
+const MSG_READ_ERROR: u32 = 2003;
+/// Message code for a title left out because its navigation could not be followed.
+const MSG_TITLE_SKIPPED_NAVIGATION: u32 = 3015;
 
 /// A parsed line of robot-mode output.
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +150,9 @@ pub struct DiscScan {
     pub titles: Vec<TitleInfo>,
     /// Messages worth surfacing to the operator.
     pub messages: Vec<String>,
+    /// The scan met a read error, or left a title out for navigation it could not
+    /// follow. Either can hide a title, and whether it does varies between reads.
+    pub read_trouble: bool,
 }
 
 /// Build titles from a stream of robot-mode lines.
@@ -167,6 +174,9 @@ pub fn parse_scan<I: IntoIterator<Item = String>>(lines: I) -> Result<DiscScan> 
                 }
                 if FAILURE_CODES.contains(&code) {
                     failure = Some(text.clone());
+                }
+                if code == MSG_READ_ERROR || code == MSG_TITLE_SKIPPED_NAVIGATION {
+                    scan.read_trouble = true;
                 }
                 scan.messages.push(text);
             }
@@ -496,6 +506,27 @@ mod tests {
         assert_eq!(t.estimated_bytes, 4_000_000_000);
         assert_eq!(t.chapters, 4);
         assert_eq!(t.output_name, "C5_t01.mkv");
+        assert!(!scan.read_trouble);
+    }
+
+    #[test]
+    fn a_title_skipped_for_navigation_marks_the_scan_as_troubled() {
+        // Captured from a scan of The Punisher S2D2, which lost an episode this way.
+        let mut lines = real_scan_output();
+        lines.insert(
+            3,
+            r#"MSG:3015,0,2,"Title #4 (0:48:50) was skipped due to navigation error","Title #%1 (%2) was skipped due to navigation error","4","0:48:50""#
+                .to_string(),
+        );
+        assert!(parse_scan(lines).unwrap().read_trouble);
+
+        let mut lines = real_scan_output();
+        lines.insert(
+            3,
+            r#"MSG:2003,0,3,"Error 'Scsi error - MEDIUM ERROR:L-EC UNCORRECTABLE ERROR' occurred while reading '/dev/sr0' at offset '15009792'","Error '%1' occurred while reading '%2' at offset '%3'","Scsi error - MEDIUM ERROR:L-EC UNCORRECTABLE ERROR","/dev/sr0","15009792""#
+                .to_string(),
+        );
+        assert!(parse_scan(lines).unwrap().read_trouble);
     }
 
     /// The critical case: makemkvcon exits 0 while reporting failure, so a scan that
