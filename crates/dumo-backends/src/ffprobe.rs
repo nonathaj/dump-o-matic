@@ -34,6 +34,9 @@ pub struct Stream {
     pub title: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// The shape the picture is shown at, width over height: 16:9 is 1.78 whatever the
+    /// stored frame, since a DVD stores both 4:3 and anamorphic 16:9 as 720×480.
+    pub display_aspect: Option<f64>,
 }
 
 /// Technical features of a media file.
@@ -69,6 +72,14 @@ impl MediaFeatures {
             .iter()
             .find(|s| s.kind == "video")
             .and_then(|s| Some((s.width?, s.height?)))
+    }
+
+    /// The display aspect ratio of the first video stream.
+    pub fn display_aspect(&self) -> Option<f64> {
+        self.streams
+            .iter()
+            .find(|s| s.kind == "video")
+            .and_then(|s| s.display_aspect)
     }
 
     pub fn duration_mins(&self) -> f64 {
@@ -112,6 +123,13 @@ pub fn probe(path: &Path) -> Result<MediaFeatures> {
         tool: TOOL,
         detail: "could not parse ffprobe output".into(),
     })
+}
+
+/// A ratio as ffprobe writes it, `853:480`; None for `0:1` or anything unreadable.
+fn parse_ratio(s: &str) -> Option<f64> {
+    let (w, h) = s.split_once(':')?;
+    let (w, h): (f64, f64) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (w > 0.0 && h > 0.0).then(|| w / h)
 }
 
 /// Parse ffprobe's JSON. Split out so it can be tested against captured output.
@@ -181,6 +199,10 @@ pub fn parse_json(text: &str) -> Option<MediaFeatures> {
                     title: tag(s, "title"),
                     width: s.get("width").and_then(|w| w.as_u64()).map(|w| w as u32),
                     height: s.get("height").and_then(|h| h.as_u64()).map(|h| h as u32),
+                    display_aspect: s
+                        .get("display_aspect_ratio")
+                        .and_then(|r| r.as_str())
+                        .and_then(parse_ratio),
                 })
                 .collect()
         })
@@ -203,7 +225,7 @@ mod tests {
     const SAMPLE: &str = r#"{
         "streams": [
             {"index":0,"codec_name":"mpeg2video","codec_type":"video","width":720,"height":480,
-             "tags":{"language":"eng"}},
+             "display_aspect_ratio":"853:480","tags":{"language":"eng"}},
             {"index":1,"codec_name":"ac3","codec_type":"audio","tags":{"language":"eng","title":"Stereo"}},
             {"index":2,"codec_name":"subrip","codec_type":"subtitle","tags":{"language":"eng"}}
         ],
@@ -226,6 +248,10 @@ mod tests {
         assert_eq!(f.audio_streams(), 1);
         assert_eq!(f.subtitle_streams(), 1);
         assert_eq!(f.resolution(), Some((720, 480)));
+        // An anamorphic 16:9 DVD: stored 720×480, shown 853:480.
+        assert!((f.display_aspect().unwrap() - 16.0 / 9.0).abs() < 0.01);
+        assert_eq!(parse_ratio("0:1"), None);
+        assert_eq!(parse_ratio("4:3"), Some(4.0 / 3.0));
     }
 
     #[test]

@@ -81,6 +81,40 @@ pub fn choose(tracks: &[Track], languages: &[String]) -> Selection {
     sel
 }
 
+/// Every audio and subtitle track: the selection where no language is configured.
+pub fn keep_all(tracks: &[Track]) -> Selection {
+    let ids = |kind: TrackKind| tracks.iter().filter(|t| t.kind == kind).map(|t| t.id).collect();
+    Selection {
+        audio: ids(TrackKind::Audio),
+        subtitles: ids(TrackKind::Subtitles),
+        dropped: Vec::new(),
+        kept_whole: Vec::new(),
+    }
+}
+
+/// Leave out tracks named by hand (`--drop-track`), on top of what `selection` drops.
+///
+/// Only audio and subtitle tracks can be named: a title without its picture is not the
+/// title. A track that does not exist is an error rather than ignored, since the number
+/// was most likely mistyped and something else was meant to go.
+pub fn drop_by_hand(selection: &mut Selection, tracks: &[Track], ids: &[u32]) -> Result<(), String> {
+    for &id in ids {
+        let Some(t) = tracks.iter().find(|t| t.id == id) else {
+            return Err(format!("there is no track {id}"));
+        };
+        let list = match t.kind {
+            TrackKind::Audio => &mut selection.audio,
+            TrackKind::Subtitles => &mut selection.subtitles,
+            _ => return Err(format!("track {id} is {}, not audio or subtitles", describe(t))),
+        };
+        if let Some(i) = list.iter().position(|&k| k == id) {
+            list.remove(i);
+            selection.dropped.push(format!("{} as track {id}, by hand", describe(t)));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +173,28 @@ mod tests {
         let s = choose(&tracks, &eng());
         assert_eq!(s.audio, vec![1, 2, 3]);
         assert_eq!(s.dropped, vec!["audio fra (X)"]);
+    }
+
+    /// Sleeping Beauty's widescreen version: the film's 5.1 and a commentary, both
+    /// English, so no language setting can tell them apart.
+    #[test]
+    fn a_track_named_by_hand_is_dropped_whatever_its_language() {
+        let tracks = vec![
+            t(0, TrackKind::Video, "eng"),
+            t(1, TrackKind::Audio, "eng"),
+            t(2, TrackKind::Audio, "eng"),
+            t(3, TrackKind::Subtitles, "eng"),
+        ];
+        let mut s = keep_all(&tracks);
+        assert!(!s.trims());
+        drop_by_hand(&mut s, &tracks, &[2]).unwrap();
+        assert_eq!((&s.audio[..], &s.subtitles[..]), (&[1][..], &[3][..]));
+        assert_eq!(s.dropped, vec!["audio eng (X) as track 2, by hand"]);
+        assert!(s.trims());
+
+        // The picture cannot go, and a mistyped number is an error, not ignored.
+        assert!(drop_by_hand(&mut s, &tracks, &[0]).is_err());
+        assert!(drop_by_hand(&mut s, &tracks, &[9]).is_err());
     }
 
     #[test]

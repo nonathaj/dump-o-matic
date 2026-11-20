@@ -239,6 +239,13 @@ result is the one candidate whose runtime fits; two same-named films that both f
 `weak` until `--show "Title (1986)"` names the year. It is filed as
 `movies/Title (Year).mkv`.
 
+A disc can carry the film more than once — a DVD's widescreen and full-screen versions,
+say. Feature-length titles within ten seconds of one another, with the same chapters,
+are taken as versions of one film rather than as episodes, and the widest picture is
+kept; the others stay in the job. A track nothing marks as a commentary can be left out
+by hand as the film is filed: `--drop-track N1_t00.mkv=2`, by mkvmerge's track number.
+The preview checks the number and names the track before anything is filed.
+
 A film with extras is filed the way Plex wants to find them: in a folder of its own, with
 a subfolder per kind of extra (Behind The Scenes, Deleted Scenes, Featurettes,
 Interviews, Scenes, Shorts, Trailers, Other):

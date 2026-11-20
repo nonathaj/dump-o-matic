@@ -154,7 +154,14 @@ pub struct TitleInput {
     pub name: String,
     pub duration_secs: f64,
     pub chapters: usize,
+    /// Display aspect ratio of its picture, width over height, when known.
+    pub display_aspect: Option<f64>,
 }
+
+/// Feature-length titles this close in running time, with the same chapters, are one
+/// film more than once. A DVD's widescreen and full-screen versions differ by a second
+/// or two; no two episodes of a series match that closely.
+const VERSION_TOLERANCE_SECS: f64 = 10.0;
 
 fn median(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
@@ -243,6 +250,26 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     let spread = if hi > 0.0 { (hi - lo) / hi } else { 0.0 };
     let uniform = mains.len() > 1 && spread <= params.episode_tolerance;
 
+    // The same film more than once: a DVD with widescreen and full-screen versions, or
+    // a Blu-ray with the feature on two playlists. Read as two episodes, it was matched
+    // against a series and filed as nonsense. Of the versions the widest picture is
+    // kept, since full screen crops the sides off; the first on the disc among equals.
+    let versions = mains.len() > 1
+        && lo >= params.feature_secs
+        && hi - lo <= VERSION_TOLERANCE_SECS
+        && mains.iter().all(|t| t.chapters == mains[0].chapters);
+    let aspect = |t: &TitleInput| t.display_aspect.unwrap_or(0.0);
+    let kept_version: Option<&TitleInput> = if versions {
+        mains
+            .iter()
+            .copied()
+            .reduce(|best, t| if aspect(t) > aspect(best) + 0.01 { t } else { best })
+    } else {
+        None
+    };
+    let is_other_version =
+        |t: &TitleInput| kept_version.map(|k| !std::ptr::eq(k, t)).unwrap_or(false) && is_content(t);
+
     let (shape, category, confidence) = match mains.len() {
         0 => (DiscShape::ExtrasOnly, None, Confidence::Weak),
         1 => {
@@ -254,12 +281,25 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
                 (DiscShape::Mixed, None, Confidence::Weak)
             }
         }
+        _ if versions => (DiscShape::Movie, Some(MediaCategory::Movies), Confidence::Strong),
         _ if uniform => (DiscShape::Series, Some(MediaCategory::Tv), Confidence::Strong),
         _ => (DiscShape::Mixed, None, Confidence::Weak),
     };
 
+    // Named as a person would, without the staging directory.
+    let short_name = |t: &TitleInput| -> String {
+        std::path::Path::new(&t.name)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| t.name.clone())
+    };
+    let ratio = |t: &TitleInput| {
+        t.display_aspect
+            .map(|a| format!("{a:.2}:1"))
+            .unwrap_or_else(|| "unknown".into())
+    };
     for t in titles {
-        let is_extra = !is_content(t);
+        let is_extra = !is_content(t) || is_other_version(t);
         let short = t.duration_secs < params.min_main_secs;
         let role = if is_extra {
             TitleRole::Extra
@@ -283,6 +323,17 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
                 } else {
                     "differing"
                 }
+            )
+        } else if is_other_version(t) {
+            let k = kept_version.expect("another version implies a kept one");
+            format!(
+                "the same {:.0} min and {} chapter(s) as {}: another version of the film, \
+                 its picture {} against {}",
+                t.duration_secs / 60.0,
+                t.chapters,
+                short_name(k),
+                ratio(t),
+                ratio(k)
             )
         } else if is_extra && !short {
             format!(
@@ -344,6 +395,21 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
                 params.episode_tolerance * 100.0
             ));
         }
+        DiscShape::Movie if versions => {
+            let k = kept_version.expect("versions have a kept one");
+            evidence.push(format!(
+                "{} main titles of the same length ({:.0} min, within {:.0} s) and the same \
+                 chapters — versions of one film, not episodes",
+                mains.len(),
+                med / 60.0,
+                VERSION_TOLERANCE_SECS
+            ));
+            evidence.push(format!(
+                "keeping the widest picture: {} at {}",
+                short_name(k),
+                ratio(k)
+            ));
+        }
         DiscShape::Movie => evidence.push(format!(
             "a single {:.0} min title, past the {:.0} min feature threshold",
             med / 60.0,
@@ -401,6 +467,7 @@ mod tests {
             name: name.into(),
             duration_secs: mins * 60.0,
             chapters,
+            display_aspect: None,
         }
     }
 
@@ -419,6 +486,7 @@ mod tests {
             name: format!("FRIEREN_t{i:02}.mkv"),
             duration_secs: secs as f64,
             chapters,
+            display_aspect: None,
         })
         .collect();
         let a = analyse(&titles, AnalysisParams::default());
@@ -492,6 +560,54 @@ mod tests {
         assert_eq!(a.shape, DiscShape::Movie);
         assert_eq!(a.category, Some(MediaCategory::Movies));
         assert_eq!(a.main_titles().count(), 1);
+    }
+
+    /// Sleeping Beauty's 2003 DVD: the film in full screen and in widescreen, each
+    /// 1:15:27 with 30 chapters, plus previews. Read as two episodes, it was matched to a
+    /// TV series.
+    #[test]
+    fn two_versions_of_a_film_are_one_film_keeping_the_widest_picture() {
+        let mut titles = vec![
+            t("N1_t00.mkv", 75.45, 30),
+            t("A1_t01.mkv", 8.47, 8),
+            t("N2_t02.mkv", 75.46, 30),
+        ];
+        titles[0].display_aspect = Some(4.0 / 3.0);
+        titles[2].display_aspect = Some(853.0 / 480.0);
+        let a = analyse(&titles, AnalysisParams::default());
+        assert_eq!(a.shape, DiscShape::Movie);
+        assert_eq!(a.category, Some(MediaCategory::Movies));
+        let mains: Vec<_> = a.main_titles().map(|t| t.name.as_str()).collect();
+        assert_eq!(mains, vec!["N2_t02.mkv"], "the widescreen one");
+        let other = a.titles.iter().find(|t| t.name == "N1_t00.mkv").unwrap();
+        assert_eq!(other.role, TitleRole::Extra);
+        assert!(other.why.contains("another version"), "{}", other.why);
+
+        // Equal pictures: the first on the disc.
+        titles[0].display_aspect = titles[2].display_aspect;
+        let a = analyse(&titles, AnalysisParams::default());
+        assert_eq!(a.main_titles().next().unwrap().name, "N1_t00.mkv");
+    }
+
+    /// Episodes that happen to run long are still episodes: they differ by more than
+    /// seconds, or are not of feature length, or are chaptered differently.
+    #[test]
+    fn long_episodes_are_not_mistaken_for_versions_of_a_film() {
+        let a = analyse(
+            &[t("e1.mkv", 88.5, 6), t("e2.mkv", 89.7, 6)],
+            AnalysisParams::default(),
+        );
+        assert_eq!(a.shape, DiscShape::Series);
+        let a = analyse(
+            &[t("e1.mkv", 52.0, 4), t("e2.mkv", 52.05, 4)],
+            AnalysisParams::default(),
+        );
+        assert_eq!(a.shape, DiscShape::Series);
+        let a = analyse(
+            &[t("e1.mkv", 80.0, 6), t("e2.mkv", 80.05, 7)],
+            AnalysisParams::default(),
+        );
+        assert_eq!(a.shape, DiscShape::Series);
     }
 
     /// A lone 45 minute title is more likely one episode than a film, so it must not be

@@ -43,6 +43,8 @@ pub struct IdentifyArgs {
     pub extras_disc: bool,
     /// `TITLE=Category/Name` for each title that is an extra of the film.
     pub extras: Vec<String>,
+    /// `TITLE=TRACK[,TRACK]`: tracks of a film's titles to leave out, by hand.
+    pub drop_tracks: Vec<String>,
     /// Place each title by reference subtitles alone, choosing freely among the
     /// season's episodes.
     pub by_reference: bool,
@@ -54,13 +56,47 @@ pub struct MovieOptions {
     pub folder: bool,
     pub extras_disc: bool,
     pub extras: Vec<String>,
+    /// Tracks to leave out of a title as it is filed, by mkvmerge track id.
+    pub drop_tracks: Vec<TrackDrop>,
     /// Not a film option: place a series disc's titles by reference subtitles alone.
     /// Carried here because it travels the same path to the video identifiers.
     pub by_reference: bool,
 }
 
+/// Tracks to leave out of one title, named by hand with `--drop-track`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackDrop {
+    pub title: String,
+    pub tracks: Vec<u32>,
+}
+
+/// Parse `TITLE=TRACK[,TRACK]`.
+fn parse_track_drop(spec: &str) -> Result<TrackDrop> {
+    let Some((title, ids)) = spec.split_once('=') else {
+        bail!("--drop-track {spec:?}: expected TITLE=TRACK, e.g. N1_t00.mkv=2");
+    };
+    let tracks = ids
+        .split(',')
+        .map(|n| n.trim().parse::<u32>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("--drop-track {spec:?}: tracks are numbers, e.g. 2 or 2,4"))?;
+    let title = title.trim().trim_start_matches("raw/").to_string();
+    if title.is_empty() || tracks.is_empty() {
+        bail!("--drop-track {spec:?}: expected TITLE=TRACK, e.g. N1_t00.mkv=2");
+    }
+    Ok(TrackDrop { title, tracks })
+}
+
 pub fn run(args: IdentifyArgs) -> Result<()> {
     let cfg = Config::load(args.config_file.as_deref())?;
+    let drop_tracks = args
+        .drop_tracks
+        .iter()
+        .map(|s| parse_track_drop(s))
+        .collect::<Result<Vec<_>>>()?;
+    if !drop_tracks.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
+        bail!("--drop-track is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
+    }
 
     let Some(dat_dir) = cfg.datfiles.redump_dir.clone() else {
         bail!(
@@ -130,6 +166,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         folder: args.folder,
         extras_disc: args.extras_disc,
         extras: args.extras.clone(),
+        drop_tracks: drop_tracks.clone(),
         by_reference: args.by_reference,
     };
     for dir in dirs {
@@ -1148,6 +1185,7 @@ fn analyse_video(
             name: a.relative_path.clone(),
             duration_secs: f.duration_secs,
             chapters: f.chapter_count(),
+            display_aspect: f.display_aspect(),
         });
     }
 
@@ -1772,6 +1810,7 @@ fn identify_movie(
     if !skipped.is_empty() {
         println!("  Left in the job directory: {}", skipped.join(", "));
     }
+    show_track_drops(job, cfg, &items, &opts.drop_tracks)?;
     println!();
     if !apply {
         println!("  Nothing was filed. Re-run with --apply --accept-inferred to file it.");
@@ -1800,6 +1839,7 @@ fn identify_movie(
         },
         confidence,
         &format!("tmdb movie {}", film.id),
+        &opts.drop_tracks,
         cfg,
     )?;
     println!();
@@ -1844,6 +1884,25 @@ fn read_extras(
         named.push(x);
     }
     Ok(named)
+}
+
+/// Check each `--drop-track` against the titles being filed and their tracks, and say
+/// what will be left out, so a mistyped number fails before anything is filed.
+fn show_track_drops(job: &Job, cfg: &Config, items: &[(String, String)], drops: &[TrackDrop]) -> Result<()> {
+    let job_dir = cfg.staging.job_dir(&job.id);
+    for d in drops {
+        if !items.iter().any(|(t, _)| t.trim_start_matches("raw/") == d.title) {
+            bail!("--drop-track: {:?} is not among the titles being filed", d.title);
+        }
+        let src = title_source(&job_dir, &d.title);
+        let tracks = dumo_backends::mkvmerge::tracks(&src)
+            .with_context(|| format!("reading the tracks of {}", d.title))?;
+        let mut selection = crate::languages::keep_all(&tracks);
+        crate::languages::drop_by_hand(&mut selection, &tracks, &d.tracks)
+            .map_err(|e| anyhow::anyhow!("--drop-track {}: {e}", d.title))?;
+        println!("  Leaving out of {}: {}", d.title, selection.dropped.join(", "));
+    }
+    Ok(())
 }
 
 /// The file extension of a title as staged.
@@ -1910,6 +1969,9 @@ fn identify_film_extras(
         }
     }
     println!();
+    if !items.is_empty() {
+        show_track_drops(job, cfg, &items, &opts.drop_tracks)?;
+    }
     if items.is_empty() {
         println!("  Name each extra with --extra \"TITLE=Category/Name\", where Category is one of:");
         println!("    {}", extras::Category::ALL.map(|c| c.folder()).join(", "));
@@ -1932,6 +1994,7 @@ fn identify_film_extras(
         "inference (film named by hand; extras named by hand)",
         Confidence::Weak,
         &format!("tmdb movie {}", film.id),
+        &opts.drop_tracks,
         cfg,
     )?;
     println!();
@@ -2181,6 +2244,7 @@ fn identify_by_reference(
         "reference subtitles (each title placed by its dialogue)",
         Confidence::Strong,
         &format!("tmdb series {}", series.id),
+        &[],
         cfg,
     )?;
     println!();
@@ -2442,6 +2506,7 @@ fn solve_video_set(
                 name: a.relative_path.clone(),
                 duration_secs: f.duration_secs,
                 chapters: f.chapter_count(),
+                display_aspect: f.display_aspect(),
             });
         }
         if title_inputs.is_empty() {
@@ -2755,6 +2820,7 @@ fn file_episodes(
         matched_on,
         confidence,
         &format!("tmdb series {series}"),
+        &[],
         cfg,
     )
 }
@@ -2780,6 +2846,7 @@ fn file_titles(
     matched_on: &str,
     confidence: dumo_core::Confidence,
     source: &str,
+    drops: &[TrackDrop],
     cfg: &Config,
 ) -> Result<usize> {
     let job_dir = cfg.staging.job_dir(job_id);
@@ -2810,12 +2877,15 @@ fn file_titles(
             .find(|a| src.ends_with(&a.relative_path))
             .map(|a| a.sha256.clone());
 
-        // Tracks in languages nobody asked for are dropped by filing a remuxed copy;
-        // the rip itself stays in the job until that copy is verified at the
-        // destination, because it is the only one holding what was dropped.
-        if let Some(langs) = &languages {
-            let selection = match dumo_backends::mkvmerge::tracks(&src) {
-                Ok(tracks) => crate::languages::choose(&tracks, langs),
+        // Tracks in languages nobody asked for, or named by hand, are dropped by filing
+        // a remuxed copy; the rip itself stays in the job until that copy is verified
+        // at the destination, because it is the only one holding what was dropped.
+        let by_hand = drops
+            .iter()
+            .find(|d| d.title == title_name.trim_start_matches("raw/"));
+        if languages.is_some() || by_hand.is_some() {
+            let tracks = match dumo_backends::mkvmerge::tracks(&src) {
+                Ok(tracks) => tracks,
                 Err(e) => {
                     println!("FAILED");
                     println!("     could not read its tracks: {e}");
@@ -2824,6 +2894,19 @@ fn file_titles(
                     continue;
                 }
             };
+            let mut selection = match &languages {
+                Some(langs) => crate::languages::choose(&tracks, langs),
+                None => crate::languages::keep_all(&tracks),
+            };
+            if let Some(d) = by_hand {
+                if let Err(e) = crate::languages::drop_by_hand(&mut selection, &tracks, &d.tracks) {
+                    println!("FAILED");
+                    println!("     --drop-track: {e}");
+                    println!("     Nothing was moved or deleted for this title.");
+                    failures += 1;
+                    continue;
+                }
+            }
             for note in &selection.kept_whole {
                 print!("[{note}] ");
             }

@@ -259,6 +259,12 @@ enum Command {
         /// --apply --accept-inferred.
         #[arg(long = "extra", value_name = "TITLE=Category/Name")]
         extras: Vec<String>,
+        /// Leave an audio or subtitle track out of a film as it is filed:
+        /// `N1_t00.mkv=2`, by mkvmerge's track number (`mkvmerge -J` lists them), or
+        /// `N1_t00.mkv=2,4` for several. For a commentary, which nothing in the file
+        /// marks as one. Repeatable. The rip keeps every track until `clean`.
+        #[arg(long = "drop-track", value_name = "TITLE=TRACK")]
+        drop_tracks: Vec<String>,
         /// Place each title by reference subtitles alone, choosing freely among the
         /// season's episodes (the season comes from the label).
         ///
@@ -532,6 +538,7 @@ fn main() -> Result<()> {
             folder,
             extras_disc,
             extras,
+            drop_tracks,
             by_reference,
             config,
         } => {
@@ -548,6 +555,7 @@ fn main() -> Result<()> {
                 folder,
                 extras_disc,
                 extras,
+                drop_tracks,
                 by_reference,
             })
         }
