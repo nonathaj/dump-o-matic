@@ -42,7 +42,10 @@ know the drive — a pure audio CD has no data track to measure it from.
 `identify` looks the disc ID up in MusicBrainz and checks every track against
 AccurateRip; a track that matches no other submitter's rip stops filing. If several
 releases share the disc ID, it lists them and files nothing until you pick one with
-`--release <id>`. With `--apply`, each track is encoded with LAME `-V 2` and tagged as
+`--release <id>`. A disc MusicBrainz has no ID for, whose release it does have, can be
+named the same way: the release's medium is chosen by its tracks (the same number, each
+within five seconds of the disc's), and since track lengths suggest a pressing rather than
+prove it, that is filed only with `--apply --accept-inferred`. With `--apply`, each track is encoded with LAME `-V 2` and tagged as
 MusicBrainz Picard would (ID3v2.4, MusicBrainz IDs, artist names translated to English,
 titles in their own script):
 

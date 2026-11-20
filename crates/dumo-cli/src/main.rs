@@ -226,6 +226,10 @@ enum Command {
         accept_inferred: bool,
         /// For an audio CD whose disc ID several MusicBrainz releases share, the
         /// release to file it as (its MusicBrainz ID, as listed by identify).
+        ///
+        /// Also for a disc whose own ID MusicBrainz does not hold: name a release that
+        /// does exist, and its medium is picked by the track count and lengths. That is
+        /// a judgement, not a match, so filing it needs --apply --accept-inferred.
         #[arg(long)]
         release: Option<String>,
         /// File a title as a given episode: `B3_t01.mkv=S02E04`, or on a bonus disc a

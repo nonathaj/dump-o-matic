@@ -162,11 +162,17 @@ fn track_bins(job: &Job, job_dir: &Path) -> Vec<PathBuf> {
     bins.into_iter().map(|(_, p)| p).collect()
 }
 
+/// How far each track's length on a hand-named release may be from the disc's. Two
+/// pressings of one album, or one master with a different pause, differ by a second or
+/// two; another edition's tracks are generally further off.
+const HAND_NAMED_TOLERANCE_MS: u64 = 5_000;
+
 pub fn identify_audio(
     job: &mut Job,
     job_dir: &Path,
     cfg: &Config,
     apply: bool,
+    accept_inferred: bool,
     release_choice: Option<&str>,
 ) -> Result<()> {
     let Some(toc) = job.probe.as_ref().and_then(|p| p.toc.clone()) else {
@@ -187,18 +193,34 @@ pub fn identify_audio(
     // --- Which release is this? ---
     println!("  Looking up disc ID {disc_id} in MusicBrainz ...");
     let releases = musicbrainz::lookup_disc_id(&disc_id).context("querying MusicBrainz")?;
-    if releases.is_empty() {
+    // A release named by hand that does not carry this disc ID: the disc is on no
+    // release yet, or on another pressing's. It is identified by its tracks instead.
+    let named_by_hand = match release_choice {
+        Some(id) if !releases.iter().any(|r| r.id == id) => {
+            println!("  Release {id} does not carry this disc ID; reading it from MusicBrainz ...");
+            let r = musicbrainz::lookup_release(id).context("querying MusicBrainz")?;
+            match r {
+                Some(r) => Some(r),
+                None => bail!("MusicBrainz has no release {id}"),
+            }
+        }
+        _ => None,
+    };
+    if releases.is_empty() && named_by_hand.is_none() {
         println!("  Not in MusicBrainz. Nothing was filed.");
         println!("  The disc can be added at https://musicbrainz.org/cdtoc/attach?id={disc_id}");
+        println!("  Or, if its release is there, name it with --release <id> and it is matched by");
+        println!("  its track lengths instead.");
         return Ok(());
     }
-    let release = match (release_choice, releases.len()) {
-        (Some(id), _) => match releases.iter().find(|r| r.id == id) {
+    let release = match (&named_by_hand, release_choice, releases.len()) {
+        (Some(r), _, _) => r,
+        (None, Some(id), _) => match releases.iter().find(|r| r.id == id) {
             Some(r) => r,
             None => bail!("release {id} does not carry this disc ID"),
         },
-        (None, 1) => &releases[0],
-        (None, n) => {
+        (None, None, 1) => &releases[0],
+        (None, None, n) => {
             println!("  {n} releases share this disc ID; choose one with --release <id>:");
             for r in &releases {
                 println!(
@@ -215,17 +237,43 @@ pub fn identify_audio(
             return Ok(());
         }
     };
-    let Some(medium) = release.medium_for(&disc_id) else {
-        bail!("MusicBrainz returned release {} without the medium for this disc", release.id);
+    let medium = if named_by_hand.is_some() {
+        // From the layout, as the tracks are cut: each runs to the next one's start, the
+        // last to the lead-out.
+        let ends = audio_tracks
+            .iter()
+            .skip(1)
+            .map(|t| t.start_lba)
+            .chain(std::iter::once(toc.leadout_lba));
+        let lengths: Vec<u64> = audio_tracks
+            .iter()
+            .zip(ends)
+            .map(|(t, end)| u64::from(end.saturating_sub(t.start_lba)) * 1000 / 75)
+            .collect();
+        match release.medium_by_lengths(&lengths, HAND_NAMED_TOLERANCE_MS) {
+            Some(m) => m,
+            None => bail!(
+                "no medium of release {} has {} tracks each within {} s of this disc's; \
+                 refusing to guess that it is the same pressing",
+                release.id,
+                audio_tracks.len(),
+                HAND_NAMED_TOLERANCE_MS / 1000
+            ),
+        }
+    } else {
+        let Some(medium) = release.medium_for(&disc_id) else {
+            bail!("MusicBrainz returned release {} without the medium for this disc", release.id);
+        };
+        if medium.tracks.len() != audio_tracks.len() {
+            bail!(
+                "MusicBrainz lists {} tracks on this medium, the disc has {}; refusing to guess \
+                 which is which",
+                medium.tracks.len(),
+                audio_tracks.len()
+            );
+        }
+        medium
     };
-    if medium.tracks.len() != audio_tracks.len() {
-        bail!(
-            "MusicBrainz lists {} tracks on this medium, the disc has {}; refusing to guess \
-             which is which",
-            medium.tracks.len(),
-            audio_tracks.len()
-        );
-    }
 
     println!();
     println!("  {} - {}", release.artist.name, release.title);
@@ -242,14 +290,23 @@ pub fn identify_audio(
             .unwrap_or_default()
     );
     println!("  https://musicbrainz.org/release/{}", release.id);
-    println!(
-        "  matched on: MusicBrainz disc ID (a hash of this disc's table of contents){}",
-        if releases.len() == 1 {
-            ", the only release carrying it"
-        } else {
-            ", release chosen with --release"
-        }
-    );
+    if named_by_hand.is_some() {
+        println!(
+            "  matched on: the release you named, whose medium has this disc's {} tracks, each \
+             within {} s of its length — not a disc ID, so not proof",
+            audio_tracks.len(),
+            HAND_NAMED_TOLERANCE_MS / 1000
+        );
+    } else {
+        println!(
+            "  matched on: MusicBrainz disc ID (a hash of this disc's table of contents){}",
+            if releases.len() == 1 {
+                ", the only release carrying it"
+            } else {
+                ", release chosen with --release"
+            }
+        );
+    }
 
     // --- Is the rip right? ---
     let bins = track_bins(job, job_dir);
@@ -330,10 +387,20 @@ pub fn identify_audio(
         return Ok(());
     }
 
-    let confidence = Confidence::Exact;
+    // The AccurateRip check above vouches for the rip, not for which release this is.
+    // A disc ID names the pressing; track lengths only suggest it, so a release named by
+    // hand is a judgement the operator has to accept.
+    let confidence = if named_by_hand.is_some() { Confidence::Strong } else { Confidence::Exact };
     println!("  Confidence: {confidence}");
     if !apply {
-        println!("  Nothing was filed. Re-run with --apply to encode and file it.");
+        println!(
+            "  Nothing was filed. Re-run with --apply{} to encode and file it.",
+            if named_by_hand.is_some() { " --accept-inferred" } else { "" }
+        );
+        return Ok(());
+    }
+    if named_by_hand.is_some() && !accept_inferred {
+        println!("  --apply given without --accept-inferred, so nothing was filed.");
         return Ok(());
     }
 
@@ -393,7 +460,11 @@ pub fn identify_audio(
         title: format!("{} - {}", release.artist.name, release.title),
         platform: "Audio CD".into(),
         platform_slug: CATEGORY.into(),
-        matched_on: format!("MusicBrainz disc ID {disc_id} (release {})", release.id),
+        matched_on: if named_by_hand.is_some() {
+            format!("release {} named by hand, matched on track lengths", release.id)
+        } else {
+            format!("MusicBrainz disc ID {disc_id} (release {})", release.id)
+        },
         confidence,
         source: "redumper .bin/.cue".into(),
         files,

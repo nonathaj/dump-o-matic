@@ -95,6 +95,21 @@ impl Release {
             .find(|m| m.disc_ids.iter().any(|d| d == disc_id))
     }
 
+    /// The one medium that is this disc, judged by its tracks alone: the same number of
+    /// them, each within `tolerance_ms` of the length measured off the disc. For a disc
+    /// MusicBrainz has no ID for, where `medium_for` has nothing to go on. None when no
+    /// medium fits, or several do and nothing says which.
+    pub fn medium_by_lengths(&self, lengths_ms: &[u64], tolerance_ms: u64) -> Option<&Medium> {
+        let mut fits = self.media.iter().filter(|m| {
+            m.tracks.len() == lengths_ms.len()
+                && m.tracks.iter().zip(lengths_ms).all(|(t, &want)| {
+                    t.length_ms.map(|l| l.abs_diff(want) <= tolerance_ms).unwrap_or(false)
+                })
+        });
+        let first = fits.next()?;
+        fits.next().is_none().then_some(first)
+    }
+
     /// Year for folder names: the release's own date, as Picard's `%date%` uses.
     pub fn year(&self) -> Option<&str> {
         self.date.as_deref().and_then(|d| d.get(..4))
@@ -125,6 +140,28 @@ pub fn lookup_disc_id(disc_id: &str) -> Result<Vec<Release>> {
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| MusicBrainzError::Malformed(e.to_string()))?;
     Ok(parse_releases(&v))
+}
+
+/// Look up one release by its MusicBrainz ID, with the same detail as a disc-ID lookup
+/// and the disc IDs of its media. An unknown ID is `None`, not an error.
+///
+/// For a disc whose own ID MusicBrainz does not hold yet, but whose release it does: the
+/// release is named by hand, and `medium_by_lengths` says which of its media is the disc.
+pub fn lookup_release(id: &str) -> Result<Option<Release>> {
+    let url = format!(
+        "{API_BASE}/release/{}?inc=artist-credits+aliases+recordings+release-groups+labels+isrcs+genres+discids&fmt=json",
+        http::urlencode(id)
+    );
+    let headers = [("User-Agent", USER_AGENT.to_string())];
+    let body = match http::get(&url, &headers, TIMEOUT_SECS) {
+        Ok(b) => b,
+        Err(http::HttpError::Status { status: 404, .. }) => return Ok(None),
+        Err(http::HttpError::Status { status: 400, .. }) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| MusicBrainzError::Malformed(e.to_string()))?;
+    Ok(parse_release(&v))
 }
 
 /// Parse a `/discid` response's `releases` array.
@@ -327,6 +364,50 @@ mod tests {
         }]}"#,
         )
         .unwrap()
+    }
+
+    fn medium_of(lengths_ms: &[Option<u64>]) -> Medium {
+        Medium {
+            position: 1,
+            format: Some("CD".into()),
+            disc_ids: Vec::new(),
+            tracks: lengths_ms
+                .iter()
+                .enumerate()
+                .map(|(i, &l)| Track {
+                    id: format!("t{i}"),
+                    recording_id: format!("r{i}"),
+                    position: i as u32 + 1,
+                    title: format!("Track {}", i + 1),
+                    length_ms: l,
+                    artist: Credit::default(),
+                    isrc: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// A disc MusicBrainz has no ID for is told apart by its tracks: how many, and how
+    /// long each runs. A release that is the same album with other lengths is not it.
+    #[test]
+    fn a_medium_is_picked_by_its_track_lengths() {
+        let mut r = parse_releases(&sample()).remove(0);
+        r.media = vec![
+            medium_of(&[Some(180_000), Some(240_000), Some(200_000)]),
+            medium_of(&[Some(180_000), Some(240_000)]),
+        ];
+        let disc = [181_500, 238_000, 203_000];
+        assert_eq!(r.medium_by_lengths(&disc, 5_000).map(|m| m.tracks.len()), Some(3));
+        // One track off by more than the tolerance, or a different count: not this disc.
+        assert!(r.medium_by_lengths(&[181_500, 238_000, 210_000], 5_000).is_none());
+        assert!(r.medium_by_lengths(&[181_500], 5_000).is_none());
+        // A track with no length listed cannot confirm anything.
+        r.media = vec![medium_of(&[Some(180_000), None, Some(200_000)])];
+        assert!(r.medium_by_lengths(&disc, 5_000).is_none());
+        // Two media that both fit leave the choice open rather than picking one.
+        let twin = medium_of(&[Some(180_000), Some(240_000), Some(200_000)]);
+        r.media = vec![twin.clone(), twin];
+        assert!(r.medium_by_lengths(&disc, 5_000).is_none());
     }
 
     #[test]

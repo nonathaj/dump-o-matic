@@ -248,7 +248,7 @@ fn identify_job(
         );
     }
     if kind == MediaKind::AudioCd {
-        return crate::music::identify_audio(&mut job, job_dir, cfg, apply, release);
+        return crate::music::identify_audio(&mut job, job_dir, cfg, apply, accept_inferred, release);
     }
     if !matches!(kind, MediaKind::GameDisc | MediaKind::Data) {
         println!("  {kind} — no identification path for this media type yet.");
