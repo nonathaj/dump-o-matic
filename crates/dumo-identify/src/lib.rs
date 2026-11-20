@@ -15,6 +15,7 @@ pub mod http;
 pub mod matching;
 pub mod movie;
 pub mod musicbrainz;
+pub mod numbering;
 pub mod opensubtitles;
 pub mod ordering;
 pub mod platform;

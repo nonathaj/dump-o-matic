@@ -159,6 +159,68 @@ pub fn references_for(
     Ok(Some(load_references(cfg, &client, tv_id, episodes)))
 }
 
+/// A season's references read by the subtitle site's numbering rather than TMDB's, one
+/// entry per TMDB episode in the listing's order.
+pub struct MappedReferences {
+    /// What each episode's reference says: for an entry the site numbers as two episodes,
+    /// both of them.
+    pub references: Vec<Option<Phrases>>,
+    /// Each episode's reference as two halves, for telling a two-part episode's halves
+    /// apart: the site's two episodes where it numbers them so (`true`), else its one
+    /// subtitle cut in the middle (`false`).
+    pub halves: Vec<Option<(Phrases, Phrases, bool)>>,
+}
+
+/// References for a season's episodes at the site's `numbers` (see
+/// `dumo_identify::numbering`), one list of episode numbers per TMDB entry. `None` when
+/// no credentials are configured.
+pub fn references_mapped(
+    cfg: &Config,
+    tv_id: u64,
+    season: u32,
+    numbers: &[Vec<u32>],
+) -> Result<Option<MappedReferences>> {
+    let client = match OpenSubtitlesClient::from_config(&cfg.api) {
+        Ok(c) => c,
+        Err(OpenSubtitlesError::NoCredential) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut wanted: Vec<u32> = numbers.iter().flatten().copied().collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let keys: Vec<(u32, u32)> = wanted.iter().map(|&n| (season, n)).collect();
+    let loaded = load_references(cfg, &client, tv_id, &keys);
+    let at = |n: u32| {
+        wanted
+            .iter()
+            .position(|&w| w == n)
+            .and_then(|i| loaded[i].clone())
+    };
+    let mut out = MappedReferences { references: Vec::new(), halves: Vec::new() };
+    for ns in numbers {
+        match ns.as_slice() {
+            [a, b] => {
+                let (first, second) = (at(*a), at(*b));
+                out.references.push(match (&first, &second) {
+                    (Some(x), Some(y)) => Some(x.union(y)),
+                    // One half missing: the other alone still says which episode it is.
+                    (x, y) => x.clone().or_else(|| y.clone()),
+                });
+                out.halves.push(first.zip(second).map(|(x, y)| (x, y, true)));
+            }
+            [n] => {
+                out.references.push(at(*n));
+                out.halves.push(reference_halves(cfg, tv_id, season, *n).map(|(x, y)| (x, y, false)));
+            }
+            _ => {
+                out.references.push(None);
+                out.halves.push(None);
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 /// The two halves of an episode's cached reference, as phrases, for telling the halves
 /// of a two-part episode apart. `None` when no reference is cached.
 pub fn reference_halves(cfg: &Config, tv_id: u64, season: u32, number: u32) -> Option<(Phrases, Phrases)> {

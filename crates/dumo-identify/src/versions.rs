@@ -41,6 +41,30 @@ pub enum Piece {
     Part(u8),
 }
 
+/// How far ahead of the other half a title's overlap with one half has to be for
+/// `piece_of_separate` to call it that half.
+const SEPARATE_MARGIN: f64 = 0.15;
+
+/// Whether a title is the whole episode or one half of it, where the two halves come from
+/// two references that are separate episodes at the subtitle site.
+///
+/// `piece` can say a title is one half only when the other half's overlap is a third of
+/// it or less, which holds for the two halves of a single subtitle, cut in the middle.
+/// Two subtitles of a two-parter's parts can overlap one another, because one of them may
+/// hold more than its own part; a title that is the second half then overlaps both. So
+/// the half it overlaps clearly more is the one it is, and one that overlaps both about
+/// equally is the whole episode.
+pub fn piece_of_separate(title: &Phrases, first: &Phrases, second: &Phrases) -> Piece {
+    let (a, b) = (title.shared(first), title.shared(second));
+    if a >= MIN_SAME_SHARE && a >= b + SEPARATE_MARGIN {
+        Piece::Part(1)
+    } else if b >= MIN_SAME_SHARE && b >= a + SEPARATE_MARGIN {
+        Piece::Part(2)
+    } else {
+        Piece::Whole
+    }
+}
+
 /// Whether a title is the whole episode or one half of it, from its dialogue against the
 /// two halves of the episode's reference subtitle.
 ///
@@ -133,6 +157,27 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// Friends S06E15 on OpenSubtitles: the reference for the first part holds more than
+    /// its own part, so the second part overlaps it too (71%), and its own reference more
+    /// (92%). `piece` would call that second part a whole episode.
+    #[test]
+    fn a_second_half_that_overlaps_a_roomy_first_reference_is_still_the_second_half() {
+        let (one, two) = (words(1, 2000), words(2, 2000));
+        // The "first part" reference runs on into most of the second part.
+        let roomy_first = Phrases::from_text(&format!(
+            "{one} {}",
+            two.split(' ').take(1500).collect::<Vec<_>>().join(" ")
+        ));
+        let second = Phrases::from_text(&two);
+        let part_one = Phrases::from_text(&one);
+        let part_two = Phrases::from_text(&two);
+        assert_eq!(piece(&part_two, &roomy_first, &second), Piece::Whole, "the case that failed");
+        assert_eq!(piece_of_separate(&part_one, &roomy_first, &second), Piece::Part(1));
+        assert_eq!(piece_of_separate(&part_two, &roomy_first, &second), Piece::Part(2));
+        let whole = Phrases::from_text(&format!("{one} {two}"));
+        assert_eq!(piece_of_separate(&whole, &roomy_first, &second), Piece::Whole);
     }
 
     #[test]

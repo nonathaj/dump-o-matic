@@ -219,9 +219,15 @@ episode of the season by its dialogue alone. Of several titles at one episode it
 the sharpest picture, then the one with the fewest audio tracks (commentaries add
 tracks), then the running time closest to the listing's. Two titles that each match only
 one half of the episode's reference are the halves of a two-parter the listing counts as
-one, and are filed as `S05E23 - Name - pt1.mkv` and `- pt2.mkv`, as Plex expects. The
-placement is only as good as the references' numbering: where OpenSubtitles numbers a
-season differently from TMDB, the names will be off, so read the proposal.
+one, and are filed as `S05E23 - Name - pt1.mkv` and `- pt2.mkv`, as Plex expects.
+
+OpenSubtitles numbers a two-parter's halves as two episodes where TMDB lists one entry of
+double length, which puts every later episode a number higher there (Friends season 6 has
+one at E15, and every episode after it was placed one early). When the season has such an
+entry before its last, the references are also read by that shifted numbering, and the one
+that confirms more of the disc's titles is used; the preview says which. A season whose
+two-parter comes last is unaffected. Where the references disagree with TMDB in some other
+way, the names will be off, so read the proposal.
 
 A library ripped with MakeMKV before this tool existed can be brought in without copying
 it. `import-rips <dir>` groups files named `Disc Label_tNN.mkv` by disc and makes each

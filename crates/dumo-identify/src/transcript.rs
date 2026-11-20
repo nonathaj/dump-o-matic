@@ -69,6 +69,11 @@ impl Phrases {
         self.0.len()
     }
 
+    /// Everything either transcript says: two halves of an episode as one.
+    pub fn union(&self, other: &Phrases) -> Phrases {
+        Phrases(self.0.union(&other.0).copied().collect())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

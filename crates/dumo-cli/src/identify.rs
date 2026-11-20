@@ -2055,21 +2055,63 @@ fn identify_by_reference(
 
     let keys: Vec<(u32, u32)> = listing.episodes.iter().map(|e| (season, e.number)).collect();
     println!("  Fetching reference subtitles for the season ...");
-    let Some(references) = crate::refsubs::references_for(cfg, series.id, &keys)? else {
+    let Some(mut references) = crate::refsubs::references_for(cfg, series.id, &keys)? else {
         println!("  Reference subtitles are not configured, so nothing can be placed this way.");
         return Ok(());
     };
     let have = references.iter().filter(|r| r.is_some()).count();
     println!("  {have} of {} episodes have a reference", keys.len());
 
-    println!();
-    println!("  Titles:");
-    let mut placed: Vec<dumo_identify::matching::TitleMatch> = Vec::new();
     let mut dialogue: std::collections::HashMap<String, transcript::Phrases> = Default::default();
     for t in &analysis.titles {
         let name = t.name.trim_start_matches("raw/").to_string();
         let phrases = crate::refsubs::title_phrases(cfg, &job.id, &name);
-        dialogue.insert(name.clone(), phrases.clone());
+        dialogue.insert(name, phrases);
+    }
+
+    // A two-part episode TMDB lists as one is two on OpenSubtitles, which puts every
+    // later episode a number higher there. The listing suggests it; the titles decide,
+    // by which numbering confirms more of them.
+    let mut mapped_halves: Option<Vec<Option<(transcript::Phrases, transcript::Phrases, bool)>>> = None;
+    let entries: Vec<(u32, Option<u32>)> =
+        listing.episodes.iter().map(|e| (e.number, e.runtime_mins)).collect();
+    if let Some(numbers) = dumo_identify::numbering::subtitle_numbers(&entries) {
+        let doubles: Vec<String> = numbers
+            .iter()
+            .zip(&listing.episodes)
+            .filter(|(n, _)| n.len() == 2)
+            .map(|(_, e)| format!("E{:02}", e.number))
+            .collect();
+        println!(
+            "  TMDB lists {} as one episode of double length; OpenSubtitles numbers a two-parter's \
+             halves apart, which would put the episodes after it one number higher there.",
+            doubles.join(" and ")
+        );
+        if let Some(m) = crate::refsubs::references_mapped(cfg, series.id, season, &numbers)? {
+            let confirmed = |refs: &[Option<transcript::Phrases>]| {
+                dialogue
+                    .values()
+                    .filter(|p| matches!(transcript::place(p, refs), Some((_, Verdict::Confirmed { .. }))))
+                    .count()
+            };
+            let (plain, shifted) = (confirmed(&references), confirmed(&m.references));
+            println!("  Titles confirmed by TMDB's numbering: {plain}; by the shifted numbering: {shifted}");
+            if shifted > plain {
+                println!("  Placing by the shifted numbering.");
+                references = m.references;
+                mapped_halves = Some(m.halves);
+            } else {
+                println!("  Keeping TMDB's numbering.");
+            }
+        }
+    }
+
+    println!();
+    println!("  Titles:");
+    let mut placed: Vec<dumo_identify::matching::TitleMatch> = Vec::new();
+    for t in &analysis.titles {
+        let name = t.name.trim_start_matches("raw/").to_string();
+        let phrases = dialogue.get(&name).cloned().unwrap_or_else(|| transcript::Phrases::from_text(""));
         let line = match transcript::place(&phrases, &references) {
             Some((at, Verdict::Confirmed { share, next_best })) => {
                 let e = &listing.episodes[at];
@@ -2142,9 +2184,15 @@ fn identify_by_reference(
             kept.push((matches[0].clone(), None));
             continue;
         }
-        let halves = crate::refsubs::reference_halves(cfg, series.id, season, *number);
+        let at = listing.episodes.iter().position(|e| e.number == *number);
+        let halves = match (&mapped_halves, at) {
+            (Some(h), Some(i)) => h[i].clone(),
+            _ => crate::refsubs::reference_halves(cfg, series.id, season, *number)
+                .map(|(a, b)| (a, b, false)),
+        };
         let piece_of = |m: &dumo_identify::matching::TitleMatch| match (&halves, dialogue.get(&m.title_name)) {
-            (Some((a, b)), Some(t)) => versions::piece(t, a, b),
+            (Some((a, b, true)), Some(t)) => versions::piece_of_separate(t, a, b),
+            (Some((a, b, false)), Some(t)) => versions::piece(t, a, b),
             _ => Piece::Whole,
         };
         let mut groups: std::collections::BTreeMap<Option<u8>, Vec<&dumo_identify::matching::TitleMatch>> =
