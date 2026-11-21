@@ -171,6 +171,7 @@ pub fn match_specials(titles: &[DiscTitle], specials: &Season) -> SpecialsMatch 
                 .map(|rt| (mins - f64::from(rt)).abs())
                 .unwrap_or(f64::NAN);
             TitleMatch {
+                through: None,
                 title_name: title.name.clone(),
                 title_mins: mins,
                 episode,

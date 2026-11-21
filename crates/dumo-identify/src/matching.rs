@@ -23,6 +23,22 @@ pub struct TitleMatch {
     pub episode: Episode,
     /// Absolute runtime difference, in minutes.
     pub delta_mins: f64,
+    /// The last episode, when one title holds a run of them (`--assign T=S01E01-E03`):
+    /// a miniseries whose acts the disc does not separate.
+    pub through: Option<u32>,
+}
+
+impl TitleMatch {
+    /// The episode code for a file name: `S01E04`, or `S01E01-E03` for a title holding a
+    /// run of episodes, the form Plex reads as several episodes in one file.
+    pub fn code(&self) -> String {
+        match self.through {
+            Some(last) if last > self.episode.number => {
+                format!("S{:02}E{:02}-E{last:02}", self.episode.season, self.episode.number)
+            }
+            _ => format!("S{:02}E{:02}", self.episode.season, self.episode.number),
+        }
+    }
 }
 
 /// A proposed alignment of a disc's titles onto a run of episodes.
@@ -495,6 +511,7 @@ pub fn match_season_with_hint(
                 .iter()
                 .zip(window.iter())
                 .map(|(t, e)| TitleMatch {
+                    through: None,
                     title_name: t.name.clone(),
                     title_mins: t.mins(),
                     episode: e.clone(),
@@ -529,6 +546,7 @@ pub fn match_season_with_hint(
                 .iter()
                 .zip(window.iter())
                 .map(|(t, e)| TitleMatch {
+                    through: None,
                     title_name: t.name.clone(),
                     title_mins: t.mins(),
                     episode: e.clone(),
@@ -575,6 +593,7 @@ pub fn match_season_with_hint(
                     .iter()
                     .zip(window.iter())
                     .map(|(t, e)| TitleMatch {
+                        through: None,
                         title_name: t.name.clone(),
                         title_mins: t.mins(),
                         episode: e.clone(),
@@ -658,6 +677,7 @@ fn place_titles(m: &mut SeasonMatch, titles: &[DiscTitle], season: &Season) {
         .iter()
         .zip(placed.order.iter().map(|&e| window[e]))
         .map(|(t, e)| TitleMatch {
+            through: None,
             title_name: t.name.clone(),
             title_mins: t.mins(),
             episode: e.clone(),
@@ -800,6 +820,7 @@ pub fn match_season(titles: &[DiscTitle], season: &Season) -> Option<SeasonMatch
         .iter()
         .zip(window.iter())
         .map(|(t, e)| TitleMatch {
+            through: None,
             title_name: t.name.clone(),
             title_mins: t.mins(),
             episode: e.clone(),
@@ -1028,6 +1049,24 @@ mod tests {
             air_date: None,
             overview: None,
         }
+    }
+
+    /// Dr. Horrible's Sing-Along Blog: three acts on a disc as one 42-minute title.
+    #[test]
+    fn a_title_holding_a_run_of_episodes_is_named_for_the_run() {
+        let mut m = TitleMatch {
+            title_name: "D1_t00.mkv".into(),
+            title_mins: 42.0,
+            episode: ep(1, Some(14), "Act 1"),
+            delta_mins: 0.0,
+            through: None,
+        };
+        assert_eq!(m.code(), "S01E01");
+        m.through = Some(3);
+        assert_eq!(m.code(), "S01E01-E03");
+        // A run that ends where it starts is just the episode.
+        m.through = Some(1);
+        assert_eq!(m.code(), "S01E01");
     }
 
     fn title(name: &str, mins: f64) -> DiscTitle {

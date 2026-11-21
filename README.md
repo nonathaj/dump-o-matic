@@ -190,7 +190,9 @@ better than any other whose runtime is plausible; the rest are listed with their
 candidate and stay in the job directory. A pairing you have confirmed yourself can be
 filed with `--assign B3_t01.mkv=S00E14`, and is recorded as assigned by hand.
 `identify --specials` does the same for any job, whatever its label. `--assign` works for episodes
-too (`B3_t01.mkv=S02E04`), and `--assign B3_t07.mkv=extra` takes out of the proposal a
+too (`B3_t01.mkv=S02E04`); a title holding several in a row, such as a miniseries whose
+acts the disc does not separate, takes the run (`D1_t00.mkv=S01E01-E03`) and is filed as one
+file, `S01E01-E03`, the form Plex reads as several episodes. `--assign B3_t07.mkv=extra` takes out of the proposal a
 title the match counted as an episode, such as an interview that runs nearly as long;
 it stays in the job, unfiled.
 

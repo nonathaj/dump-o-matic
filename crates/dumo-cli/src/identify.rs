@@ -1507,11 +1507,10 @@ fn analyse_video(
     );
     for m in &best.matches {
         println!(
-            "    {:<16} {:>5.0} min  ->  S{:02}E{:02} {:<44} ({})",
+            "    {:<16} {:>5.0} min  ->  {} {:<44} ({})",
             m.title_name,
             m.title_mins,
-            m.episode.season,
-            m.episode.number,
+            m.code(),
             truncate(&m.episode.name, 44),
             delta_note(m.delta_mins)
         );
@@ -1544,14 +1543,13 @@ fn analyse_video(
         .unwrap_or_default();
     for m in &best.matches {
         println!(
-            "    tv/{}{}/Season {:02}/{}{} S{:02}E{:02} - {}.mkv",
+            "    tv/{}{}/Season {:02}/{}{} {} - {}.mkv",
             sanitise(&candidate.name),
             year,
             m.episode.season,
             sanitise(&candidate.name),
             year,
-            m.episode.season,
-            m.episode.number,
+            m.code(),
             sanitise(&m.episode.name)
         );
     }
@@ -1628,6 +1626,17 @@ fn assign_episodes(
             }
             continue;
         }
+        // `S01E01-E03`: one title holding a run of episodes.
+        let (code, last) = match code.split_once('-') {
+            Some((first, last)) => {
+                let last = last
+                    .trim_start_matches('E')
+                    .parse::<u32>()
+                    .with_context(|| format!("--assign {a:?}: expected a run like S01E01-E03"))?;
+                (first.to_string(), Some(last))
+            }
+            None => (code, None),
+        };
         let (season, number) = code
             .strip_prefix('S')
             .and_then(|r| r.split_once('E'))
@@ -1650,22 +1659,46 @@ fn assign_episodes(
             anyhow::bail!("--assign {a:?}: season {season} lists no episode {number}");
         };
         m.episode = episode.clone();
+        m.through = None;
         m.delta_mins = episode
             .runtime_mins
             .map(|rt| (m.title_mins - f64::from(rt)).abs())
             .unwrap_or(f64::NAN);
+        if let Some(last) = last {
+            if last <= number {
+                anyhow::bail!("--assign {a:?}: the run must end after episode {number}");
+            }
+            let run: Vec<_> = seasons[&season]
+                .episodes
+                .iter()
+                .filter(|e| (number..=last).contains(&e.number))
+                .collect();
+            if run.len() as u32 != last - number + 1 {
+                anyhow::bail!("--assign {a:?}: season {season} does not list episodes {number} to {last}");
+            }
+            // One file, so its title is the run's own: "Act 1, Act 2, Act 3".
+            m.episode.name = run.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ");
+            m.episode.runtime_mins = Some(run.iter().filter_map(|e| e.runtime_mins).sum());
+            m.through = Some(last);
+            m.delta_mins = m
+                .episode
+                .runtime_mins
+                .map(|rt| (m.title_mins - f64::from(rt)).abs())
+                .unwrap_or(f64::NAN);
+        }
     }
     if assign.is_empty() {
         return Ok(0);
     }
     let mut seen = std::collections::HashSet::new();
     for m in &best.matches {
-        if !seen.insert((m.episode.season, m.episode.number)) {
-            anyhow::bail!(
-                "--assign leaves two titles as S{:02}E{:02}; assign the other one too",
-                m.episode.season,
-                m.episode.number
-            );
+        for number in m.episode.number..=m.through.unwrap_or(m.episode.number) {
+            if !seen.insert((m.episode.season, number)) {
+                anyhow::bail!(
+                    "--assign leaves two titles as S{:02}E{number:02}; assign the other one too",
+                    m.episode.season
+                );
+            }
         }
     }
     best.evidence.push(format!(
@@ -2116,6 +2149,7 @@ fn identify_by_reference(
             Some((at, Verdict::Confirmed { share, next_best })) => {
                 let e = &listing.episodes[at];
                 placed.push(dumo_identify::matching::TitleMatch {
+                    through: None,
                     title_name: name.clone(),
                     title_mins: t.duration_secs / 60.0,
                     episode: e.clone(),
@@ -2374,6 +2408,7 @@ fn identify_bonus_disc(
         let mins = title.duration_secs / 60.0;
         result.matched.push((
             dumo_identify::matching::TitleMatch {
+                through: None,
                 title_name: title.name.clone(),
                 title_mins: mins,
                 episode: episode.clone(),
@@ -2851,9 +2886,8 @@ fn file_episodes(
                 .map(|e| e.to_string_lossy().to_string())
                 .unwrap_or_else(|| "mkv".into());
             let name = format!(
-                "{show} S{:02}E{:02} - {}.{ext}",
-                m.episode.season,
-                m.episode.number,
+                "{show} {} - {}.{ext}",
+                m.code(),
                 sanitise(&m.episode.name)
             );
             let rel = format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season);

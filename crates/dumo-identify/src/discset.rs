@@ -509,6 +509,7 @@ pub fn solve(discs: &[SetDisc], seasons: &[Season]) -> Option<SetSolution> {
             .iter()
             .zip(disc_episodes.iter().copied())
             .map(|(t, e)| TitleMatch {
+                through: None,
                 title_name: t.name.clone(),
                 title_mins: t.duration_secs / 60.0,
                 episode: e.clone(),
