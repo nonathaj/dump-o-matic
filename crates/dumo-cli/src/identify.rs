@@ -36,6 +36,8 @@ pub struct IdentifyArgs {
     pub assign: Vec<String>,
     /// File the episodes as a show of their own, under this name.
     pub as_show: Option<String>,
+    /// Languages to keep for this run, on top of the configured ones (ISO 639-2).
+    pub keep_languages: Vec<String>,
     /// Match every title against the series' specials, as on a bonus disc, whatever
     /// the label says.
     pub specials: bool,
@@ -65,6 +67,9 @@ pub struct MovieOptions {
     pub by_reference: bool,
     /// Not a film option either: file a series disc's episodes as a show of their own.
     pub own_show: Option<String>,
+    /// Languages to keep on top of the configured ones, for a film whose original
+    /// language is not among them.
+    pub keep_languages: Vec<String>,
 }
 
 /// Tracks to leave out of one title, named by hand with `--drop-track`.
@@ -98,6 +103,9 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         .iter()
         .map(|s| parse_track_drop(s))
         .collect::<Result<Vec<_>>>()?;
+    if !args.keep_languages.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
+        bail!("--keep-language is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
+    }
     if !drop_tracks.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
         bail!("--drop-track is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
     }
@@ -173,6 +181,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         drop_tracks: drop_tracks.clone(),
         by_reference: args.by_reference,
         own_show: args.as_show.clone(),
+        keep_languages: args.keep_languages.iter().map(|l| l.trim().to_ascii_lowercase()).collect(),
     };
     for dir in dirs {
         identify_job(
@@ -1909,6 +1918,7 @@ fn identify_movie(
         confidence,
         &format!("tmdb movie {}", film.id),
         &opts.drop_tracks,
+        &opts.keep_languages,
         cfg,
     )?;
     println!();
@@ -2064,6 +2074,7 @@ fn identify_film_extras(
         Confidence::Weak,
         &format!("tmdb movie {}", film.id),
         &opts.drop_tracks,
+        &opts.keep_languages,
         cfg,
     )?;
     println!();
@@ -2362,6 +2373,7 @@ fn identify_by_reference(
         "reference subtitles (each title placed by its dialogue)",
         Confidence::Strong,
         &format!("tmdb series {}", series.id),
+        &[],
         &[],
         cfg,
     )?;
@@ -2939,6 +2951,7 @@ fn file_episodes(
         confidence,
         &format!("tmdb series {series}"),
         &[],
+        &[],
         cfg,
     )
 }
@@ -2953,6 +2966,18 @@ fn title_source(job_dir: &std::path::Path, title_name: &str) -> std::path::PathB
     }
 }
 
+/// The wanted languages once `--keep-language` adds to them. With none configured every
+/// track is kept already, so there is nothing to add to.
+fn with_languages_kept(configured: Option<Vec<String>>, keep: &[String]) -> Option<Vec<String>> {
+    let mut all = configured?;
+    for l in keep {
+        if !all.iter().any(|a| a.eq_ignore_ascii_case(l)) {
+            all.push(l.clone());
+        }
+    }
+    Some(all)
+}
+
 /// Move each `(title name, staging-relative destination)` into `ready/` and record the
 /// identification on the job. Returns how many titles failed to move.
 #[allow(clippy::too_many_arguments)]
@@ -2965,6 +2990,7 @@ fn file_titles(
     confidence: dumo_core::Confidence,
     source: &str,
     drops: &[TrackDrop],
+    keep_languages: &[String],
     cfg: &Config,
 ) -> Result<usize> {
     let job_dir = cfg.staging.job_dir(job_id);
@@ -2973,7 +2999,7 @@ fn file_titles(
     let mut moved_sources: Vec<String> = Vec::new();
     let mut trimmed: Vec<dumo_core::Trimmed> = Vec::new();
     let mut failures = 0usize;
-    let languages = cfg.video.languages_for(title);
+    let languages = with_languages_kept(cfg.video.languages_for(title), keep_languages);
 
     for (title_name, rel) in items {
         // The solver reports the title by its staging-relative name.
@@ -3224,6 +3250,20 @@ fn apply_video_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// House of Flying Daggers: Mandarin original, English dub; the setting keeps English.
+    #[test]
+    fn keep_language_adds_to_the_configured_languages() {
+        let eng = Some(vec!["eng".to_string()]);
+        assert_eq!(
+            with_languages_kept(eng.clone(), &["chi".into()]),
+            Some(vec!["eng".to_string(), "chi".to_string()])
+        );
+        // Already wanted: not listed twice. None configured: everything is kept anyway.
+        assert_eq!(with_languages_kept(eng.clone(), &["ENG".into()]), eng);
+        assert_eq!(with_languages_kept(None, &["chi".into()]), None);
+        assert_eq!(with_languages_kept(eng.clone(), &[]), eng);
+    }
 
     fn placed(season: u32, number: u32, name: &str) -> dumo_identify::matching::TitleMatch {
         dumo_identify::matching::TitleMatch {

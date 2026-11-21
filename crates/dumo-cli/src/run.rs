@@ -72,6 +72,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         release: None,
         assign: Vec::new(),
         as_show: None,
+        keep_languages: Vec::new(),
         specials: false,
         folder: false,
         extras_disc: false,

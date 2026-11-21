@@ -206,6 +206,10 @@ file is already there — put there by hand, say — is taken as migrated, but o
 is re-read and hashed against what was filed, and found under exactly its filed name; one that
 differs leaves the job as it is.
 
+A film whose original language is not among the configured `video.languages` takes
+`--keep-language chi` (repeatable): that language's audio and subtitles are kept for this film
+as well, instead of leaving only the dub.
+
 A disc can be filed in more than one `identify` run — its episodes, then its specials —
 and each run adds to the job's record rather than replacing it, so `migrate` carries all
 of it. Filing more of a job already migrated returns it to `identified`, with only the new

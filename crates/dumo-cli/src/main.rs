@@ -251,6 +251,14 @@ enum Command {
         /// way, and only the names and numbers filed change.
         #[arg(long, value_name = "NAME")]
         as_show: Option<String>,
+        /// Keep audio and subtitles in this language as well as the configured ones
+        /// (ISO 639-2, e.g. `chi`, `jpn`), for this film only.
+        ///
+        /// For a film whose original language is not among the configured ones: with
+        /// `languages = ["eng"]`, a Mandarin film would be filed with only its English
+        /// dub. Repeatable. A film disc only.
+        #[arg(long = "keep-language", value_name = "LANG")]
+        keep_languages: Vec<String>,
         /// Match every title against the series' specials (season 0), as on a bonus
         /// disc, whatever the volume label says.
         ///
@@ -549,6 +557,7 @@ fn main() -> Result<()> {
             release,
             assign,
             as_show,
+            keep_languages,
             specials,
             folder,
             extras_disc,
@@ -567,6 +576,7 @@ fn main() -> Result<()> {
                 release,
                 assign,
                 as_show,
+                keep_languages,
                 specials,
                 folder,
                 extras_disc,
