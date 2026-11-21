@@ -216,7 +216,12 @@ pub fn run(args: MigrateArgs) -> Result<()> {
     let to_move: Vec<&Plan> = planned.iter().filter(|p| !p.blocked).collect();
     if to_move.is_empty() {
         println!();
-        println!("Nothing left to do.");
+        if args.dry_run {
+            println!("Nothing left to do.");
+        } else {
+            adopt_existing(&planned, &eligible, &cfg, &candidates)?;
+            println!("Nothing left to copy.");
+        }
         return Ok(());
     }
 
@@ -445,6 +450,9 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         }
     }
 
+    // A job whose files were all there already is not among those that moved anything.
+    adopt_existing(&planned, &eligible, &cfg, &candidates)?;
+
     println!();
     if failures > 0 {
         println!("{failures} file(s) failed; nothing was deleted for those.");
@@ -458,6 +466,76 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Take a job as migrated when everything it filed is already at its destination — put
+/// there by hand, or by an earlier run — and each copy there is what was filed.
+///
+/// `migrate` never overwrites, so a file already at its destination is skipped, which
+/// left such a job `identified` for good although its content was safe, and out of
+/// `clean`'s reach. Claiming migration asks for more than the file being there: every
+/// copy is re-read and hashed against the manifest, and under exactly its filed name
+/// (the share ignores case). One that differs leaves the job as it is, and nothing is
+/// written or removed either way.
+fn adopt_existing(
+    planned: &[Plan],
+    eligible: &[(PathBuf, Job)],
+    cfg: &Config,
+    candidates: &[&DestinationConfig],
+) -> Result<()> {
+    for (dir, job) in eligible {
+        let mine: Vec<&Plan> = planned.iter().filter(|p| &p.job_dir == dir).collect();
+        let filed = job.identification.as_ref().map(|i| i.files.len()).unwrap_or(0);
+        if mine.is_empty() || mine.len() != filed || !mine.iter().all(|p| p.blocked) {
+            continue;
+        }
+        println!();
+        println!(
+            "{} — all {} file(s) are already at their destination; checking each against the manifest ...",
+            job.id,
+            mine.len()
+        );
+        let problems = copies_not_as_filed(&mine);
+        for problem in &problems {
+            println!("  {problem}");
+        }
+        if !problems.is_empty() {
+            println!(
+                "  {} file(s) not as filed, so the job is left as it is; nothing was changed.",
+                problems.len()
+            );
+            continue;
+        }
+        let mut job = Job::load(dir)?;
+        retire_superseded(&mut job, cfg, candidates);
+        job.stage = JobStage::Migrated;
+        job.save(dir)?;
+        println!("{} — migrated (copies already there, each verified against the manifest)", job.id);
+    }
+    Ok(())
+}
+
+/// What is wrong with the copies already at their destinations, one line each: empty when
+/// every one is there under exactly its filed name and hashes to what was filed.
+fn copies_not_as_filed(plans: &[&Plan]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for p in plans {
+        let problem = if fsops::case_variant_of(&p.dest).is_some() {
+            Some("is there under a name differing in case")
+        } else {
+            None
+        };
+        let problem = match (problem, fsops::hash_evicting(&p.dest)) {
+            (Some(why), _) => Some(why.to_string()),
+            (None, Ok(h)) if h == p.sha256 => None,
+            (None, Ok(_)) => Some("differs from what was filed".to_string()),
+            (None, Err(e)) => Some(format!("could not be read: {e}")),
+        };
+        if let Some(why) = problem {
+            problems.push(format!("{} {why}", p.dest.display()));
+        }
+    }
+    problems
 }
 
 /// Remove files a repack replaced, from permanent storage and from staging.
@@ -693,6 +771,45 @@ pub fn confirm(prompt: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_for(dest: &Path, sha256: &str) -> Plan {
+        Plan {
+            job_dir: PathBuf::from("/job"),
+            src: PathBuf::from("/job/ready/tv/e.mkv"),
+            dest: dest.to_path_buf(),
+            sha256: sha256.into(),
+            bytes: 0,
+            blocked: true,
+            staging_relative: "ready/tv/e.mkv".into(),
+            dest_root: dest.parent().unwrap().to_path_buf(),
+            rename_src: None,
+        }
+    }
+
+    /// Friends Season 5 Disc 1: every file was on the share already, so migrate skipped
+    /// them all and the job stayed `identified`.
+    #[test]
+    fn copies_already_at_the_destination_are_adopted_only_if_they_are_what_was_filed() {
+        let dir = std::env::temp_dir().join(format!("dumo-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.mkv");
+        let stale = dir.join("stale.mkv");
+        std::fs::write(&good, b"the episode").unwrap();
+        std::fs::write(&stale, b"a different cut").unwrap();
+        let sha = dumo_core::hash::sha256_of(b"the episode");
+
+        let plans = [plan_for(&good, &sha)];
+        assert!(copies_not_as_filed(&plans.iter().collect::<Vec<_>>()).is_empty());
+
+        // A copy that differs, and one that is not there at all, each count against it.
+        let plans = [plan_for(&good, &sha), plan_for(&stale, &sha), plan_for(&dir.join("gone.mkv"), &sha)];
+        let problems = copies_not_as_filed(&plans.iter().collect::<Vec<_>>());
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("stale.mkv") && problems[0].contains("differs"));
+        assert!(problems[1].contains("gone.mkv") && problems[1].contains("could not be read"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn destination_path_drops_ready_and_category() {
