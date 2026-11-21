@@ -71,6 +71,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         // stops here until a person picks one.
         release: None,
         assign: Vec::new(),
+        as_show: None,
         specials: false,
         folder: false,
         extras_disc: false,

@@ -196,6 +196,11 @@ file, `S01E01-E03`, the form Plex reads as several episodes. `--assign B3_t07.mk
 title the match counted as an episode, such as an interview that runs nearly as long;
 it stays in the job, unfiled.
 
+A series TMDB lists only as episodes of another — the Legend of Zelda cartoon is every fifth
+episode of The Super Mario Bros. Super Show! — can be filed as a show of its own with
+`--as-show "The Legend of Zelda (1989)"`: place the titles with `--assign` as TMDB numbers them
+(`S01E05`, `S01E10`, …), and they are filed under the new name, numbered from 1 in that order.
+
 A disc can be filed in more than one `identify` run — its episodes, then its specials —
 and each run adds to the job's record rather than replacing it, so `migrate` carries all
 of it. Filing more of a job already migrated returns it to `identified`, with only the new

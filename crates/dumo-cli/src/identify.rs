@@ -34,6 +34,8 @@ pub struct IdentifyArgs {
     pub release: Option<String>,
     /// Hand-confirmed `TITLE=S00Enn` pairings for a bonus disc.
     pub assign: Vec<String>,
+    /// File the episodes as a show of their own, under this name.
+    pub as_show: Option<String>,
     /// Match every title against the series' specials, as on a bonus disc, whatever
     /// the label says.
     pub specials: bool,
@@ -61,6 +63,8 @@ pub struct MovieOptions {
     /// Not a film option: place a series disc's titles by reference subtitles alone.
     /// Carried here because it travels the same path to the video identifiers.
     pub by_reference: bool,
+    /// Not a film option either: file a series disc's episodes as a show of their own.
+    pub own_show: Option<String>,
 }
 
 /// Tracks to leave out of one title, named by hand with `--drop-track`.
@@ -168,6 +172,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         extras: args.extras.clone(),
         drop_tracks: drop_tracks.clone(),
         by_reference: args.by_reference,
+        own_show: args.as_show.clone(),
     };
     for dir in dirs {
         identify_job(
@@ -1541,14 +1546,16 @@ fn analyse_video(
         .year()
         .map(|y| format!(" ({y})"))
         .unwrap_or_default();
-    for m in &best.matches {
+    // Named and numbered for the shelf. The reference check below still reads the
+    // episodes as TMDB lists them, so a show of its own is numbered only after it.
+    let (shelf, show) = match movie.own_show.as_deref() {
+        Some(name) => (renumbered_as_own_show(&best.matches)?, sanitise(name)),
+        None => (best.matches.clone(), format!("{}{}", sanitise(&candidate.name), year)),
+    };
+    for m in &shelf {
         println!(
-            "    tv/{}{}/Season {:02}/{}{} {} - {}.mkv",
-            sanitise(&candidate.name),
-            year,
+            "    tv/{show}/Season {:02}/{show} {} - {}.mkv",
             m.episode.season,
-            sanitise(&candidate.name),
-            year,
             m.code(),
             sanitise(&m.episode.name)
         );
@@ -1572,17 +1579,22 @@ fn analyse_video(
         return Ok(());
     }
 
-    let show = format!("{}{}", sanitise(&candidate.name), year);
-    println!("Filing {} title(s) as an inferred match.", best.matches.len());
+    println!("Filing {} title(s) as an inferred match.", shelf.len());
     let failures = file_episodes(
         &job.id,
-        &best.matches,
+        &shelf,
         &show,
-        &candidate.name,
-        &if by_hand > 0 {
-            format!("inference (runtime + dialogue, single disc; {by_hand} assigned by hand)")
-        } else {
-            "inference (runtime + dialogue, single disc)".to_string()
+        movie.own_show.as_deref().unwrap_or(&candidate.name),
+        &{
+            let how = if by_hand > 0 {
+                format!("inference (runtime + dialogue, single disc; {by_hand} assigned by hand)")
+            } else {
+                "inference (runtime + dialogue, single disc)".to_string()
+            };
+            match movie.own_show {
+                Some(_) => format!("{how}; filed as a show of its own, listed by TMDB under {}", candidate.name),
+                None => how,
+            }
         },
         best.confidence,
         cfg,
@@ -1596,6 +1608,30 @@ fn analyse_video(
         best.confidence
     );
     Ok(())
+}
+
+/// The episodes numbered from 1, in the order TMDB lists them, for filing as a show of
+/// their own (`--as-show`): a series TMDB lists only as episodes of another, such as the
+/// Legend of Zelda cartoon inside The Super Mario Bros. Super Show!. They must be from
+/// one season, and none a run, or the numbering would mean nothing.
+fn renumbered_as_own_show(
+    matches: &[dumo_identify::matching::TitleMatch],
+) -> Result<Vec<dumo_identify::matching::TitleMatch>> {
+    let Some(first) = matches.first() else {
+        anyhow::bail!("--as-show: there are no episodes to file");
+    };
+    if matches.iter().any(|m| m.episode.season != first.episode.season) {
+        anyhow::bail!("--as-show needs every episode from one season");
+    }
+    if matches.iter().any(|m| m.through.is_some()) {
+        anyhow::bail!("--as-show cannot be combined with an episode run");
+    }
+    let mut own = matches.to_vec();
+    own.sort_by_key(|m| m.episode.number);
+    for (i, m) in own.iter_mut().enumerate() {
+        m.episode.number = i as u32 + 1;
+    }
+    Ok(own)
 }
 
 /// Apply `--assign TITLE=SxxEyy` pairings to a proposal, returning how many there were.
@@ -3188,6 +3224,41 @@ fn apply_video_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn placed(season: u32, number: u32, name: &str) -> dumo_identify::matching::TitleMatch {
+        dumo_identify::matching::TitleMatch {
+            title_name: format!("t{number:02}.mkv"),
+            title_mins: 17.0,
+            episode: dumo_identify::tmdb::Episode {
+                season,
+                number,
+                name: name.into(),
+                runtime_mins: Some(22),
+                air_date: None,
+                overview: None,
+            },
+            delta_mins: 5.0,
+            through: None,
+        }
+    }
+
+    /// The Legend of Zelda cartoon, which TMDB lists as every fifth episode of the
+    /// Super Mario Bros. Super Show.
+    #[test]
+    fn episodes_filed_as_a_show_of_their_own_are_numbered_from_one_in_tmdb_order() {
+        let listed = [placed(1, 15, "The White Knight"), placed(1, 5, "The Ringer"), placed(1, 10, "Cold Spells")];
+        let own = renumbered_as_own_show(&listed).unwrap();
+        let names: Vec<_> = own.iter().map(|m| (m.episode.number, m.episode.name.as_str())).collect();
+        assert_eq!(names, [(1, "The Ringer"), (2, "Cold Spells"), (3, "The White Knight")]);
+        // Each keeps its own title file.
+        assert_eq!(own[0].title_name, "t05.mkv");
+
+        assert!(renumbered_as_own_show(&[placed(1, 5, "A"), placed(2, 5, "B")]).is_err());
+        assert!(renumbered_as_own_show(&[]).is_err());
+        let mut run = placed(1, 5, "A");
+        run.through = Some(6);
+        assert!(renumbered_as_own_show(&[run]).is_err());
+    }
 
     fn record(
         title: &str,

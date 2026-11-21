@@ -242,6 +242,15 @@ enum Command {
         /// --apply --accept-inferred to file, and is recorded as assigned by hand.
         #[arg(long, value_name = "TITLE=SxxEyy")]
         assign: Vec<String>,
+        /// File the episodes as a show of their own, `"Title (Year)"`, numbered from 1 in
+        /// the order TMDB lists them.
+        ///
+        /// For a series TMDB knows only as episodes of another: the Legend of Zelda
+        /// cartoon is every fifth episode of The Super Mario Bros. Super Show!. Place the
+        /// titles with --assign as TMDB numbers them; the reference check reads them that
+        /// way, and only the names and numbers filed change.
+        #[arg(long, value_name = "NAME")]
+        as_show: Option<String>,
         /// Match every title against the series' specials (season 0), as on a bonus
         /// disc, whatever the volume label says.
         ///
@@ -539,6 +548,7 @@ fn main() -> Result<()> {
             accept_inferred,
             release,
             assign,
+            as_show,
             specials,
             folder,
             extras_disc,
@@ -556,6 +566,7 @@ fn main() -> Result<()> {
                 accept_inferred,
                 release,
                 assign,
+                as_show,
                 specials,
                 folder,
                 extras_disc,
