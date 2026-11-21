@@ -3084,7 +3084,7 @@ fn file_titles(
     job.artifacts
         .retain(|a| !moved_sources.iter().any(|src| a.relative_path.ends_with(src)));
 
-    job.identification = Some(dumo_core::Identification {
+    let now = dumo_core::Identification {
         title: title.to_string(),
         platform: "TMDB".into(),
         platform_slug: slug.into(),
@@ -3100,10 +3100,57 @@ fn file_titles(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-    });
+    };
+    job.identification = Some(merged_identification(job.identification.take(), now));
+    // Filing more of a job that was already migrated leaves it with files still to place.
     job.stage = dumo_core::JobStage::Identified;
     job.save(&job_dir)?;
     Ok(failures)
+}
+
+/// The job's record once more of its titles are filed: what an earlier filing of the same
+/// title recorded, with the new files added.
+///
+/// A disc can be filed in more than one go — a series' episodes, then its specials, each
+/// with its own `identify`. Recording only the latest left the first go's files in
+/// `ready/` but out of the manifest, so `migrate` never carried them to the NAS. A record
+/// of a different title is not merged: that is a re-identification, which replaces.
+/// The merged record claims no more than its weakest part.
+fn merged_identification(
+    earlier: Option<dumo_core::Identification>,
+    mut now: dumo_core::Identification,
+) -> dumo_core::Identification {
+    let Some(earlier) =
+        earlier.filter(|e| e.title == now.title && e.platform_slug == now.platform_slug)
+    else {
+        return now;
+    };
+    let mut files: Vec<_> = earlier
+        .files
+        .into_iter()
+        .filter(|f| !now.files.iter().any(|n| n.path == f.path))
+        .collect();
+    files.append(&mut now.files);
+    let mut trimmed: Vec<_> = earlier
+        .trimmed
+        .into_iter()
+        .filter(|t| !now.trimmed.iter().any(|n| n.filed == t.filed))
+        .collect();
+    trimmed.append(&mut now.trimmed);
+    let mut superseded = earlier.superseded;
+    for path in std::mem::take(&mut now.superseded) {
+        if !superseded.contains(&path) {
+            superseded.push(path);
+        }
+    }
+    if earlier.matched_on != now.matched_on {
+        now.matched_on = format!("{}; {}", earlier.matched_on, now.matched_on);
+    }
+    now.confidence = earlier.confidence.min(now.confidence);
+    now.files = files;
+    now.trimmed = trimmed;
+    now.superseded = superseded;
+    now
 }
 
 fn apply_video_set(
@@ -3141,6 +3188,77 @@ fn apply_video_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record(
+        title: &str,
+        files: &[&str],
+        confidence: dumo_core::Confidence,
+    ) -> dumo_core::Identification {
+        dumo_core::Identification {
+            title: title.into(),
+            platform: "TMDB".into(),
+            platform_slug: "tv".into(),
+            matched_on: "inference".into(),
+            confidence,
+            source: "tmdb".into(),
+            files: files
+                .iter()
+                .map(|f| dumo_core::ReadyFile {
+                    path: (*f).into(),
+                    bytes: 1,
+                    sha256: "x".into(),
+                    ripped_as: None,
+                })
+                .collect(),
+            superseded: Vec::new(),
+            trimmed: files
+                .iter()
+                .map(|f| dumo_core::Trimmed {
+                    original: "raw/a.mkv".into(),
+                    filed: (*f).into(),
+                })
+                .collect(),
+            identified_at: 0,
+        }
+    }
+
+    /// Dr. Horrible's disc: the series' episode, then a special, each an `identify` run.
+    #[test]
+    fn a_second_filing_of_the_same_title_adds_to_the_first() {
+        use dumo_core::Confidence::{Strong, Weak};
+        let first = record("Show (2008)", &["ready/tv/Show/Season 01/S01E01-E03.mkv"], Strong);
+        let second = record("Show (2008)", &["ready/tv/Show/Season 00/S00E06.mkv"], Weak);
+        let merged = merged_identification(Some(first), second);
+        let paths: Vec<_> = merged.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["ready/tv/Show/Season 01/S01E01-E03.mkv", "ready/tv/Show/Season 00/S00E06.mkv"]
+        );
+        assert_eq!(merged.trimmed.len(), 2);
+        // No more sure than its weakest part, whichever came first.
+        assert_eq!(merged.confidence, Weak);
+        let first = record("Show (2008)", &["a"], Weak);
+        let second = record("Show (2008)", &["b"], Strong);
+        assert_eq!(merged_identification(Some(first), second).confidence, Weak);
+    }
+
+    #[test]
+    fn a_file_filed_again_is_recorded_once_and_another_title_replaces() {
+        use dumo_core::Confidence::Strong;
+        let first = record("Show (2008)", &["a", "b"], Strong);
+        let again = record("Show (2008)", &["b", "c"], Strong);
+        let merged = merged_identification(Some(first), again);
+        let paths: Vec<_> = merged.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a", "b", "c"]);
+        assert_eq!(merged.trimmed.len(), 3);
+
+        // A different title is a re-identification: nothing of the old record is kept.
+        let first = record("Other (1999)", &["old"], Strong);
+        let merged = merged_identification(Some(first), record("Show (2008)", &["new"], Strong));
+        assert_eq!(merged.files.len(), 1);
+        assert_eq!(merged.files[0].path, "new");
+        assert!(merged_identification(None, record("Show (2008)", &["new"], Strong)).files.len() == 1);
+    }
 
     #[test]
     fn episodes_already_on_the_shelf_are_found_by_their_names() {

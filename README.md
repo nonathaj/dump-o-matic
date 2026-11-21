@@ -196,6 +196,11 @@ file, `S01E01-E03`, the form Plex reads as several episodes. `--assign B3_t07.mk
 title the match counted as an episode, such as an interview that runs nearly as long;
 it stays in the job, unfiled.
 
+A disc can be filed in more than one `identify` run — its episodes, then its specials —
+and each run adds to the job's record rather than replacing it, so `migrate` carries all
+of it. Filing more of a job already migrated returns it to `identified`, with only the new
+files left to place.
+
 Some extras are compilations of specials in one title, a chapter each — Frieren's
 eleven "OO Magic" mini-anime shorts are one 14-minute title. `split <job> <title>` cuts
 such a title at its chapter marks with mkvmerge, without re-encoding, into a new job
