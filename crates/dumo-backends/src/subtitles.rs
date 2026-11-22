@@ -35,14 +35,25 @@ enum Source {
     DvdPictures(usize),
 }
 
-/// Each subtitle stream's codec and whether it is flagged as forced.
-fn subtitle_streams(path: &Path) -> Vec<(String, bool)> {
+/// One subtitle stream, as ffprobe lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubStream {
+    codec: String,
+    forced: bool,
+    /// How many captions the track holds, from the statistics tags MakeMKV and mkvmerge
+    /// write; `None` when the file does not say.
+    captions: Option<u64>,
+}
+
+/// Each subtitle stream's codec, whether it is flagged as forced, and its caption count.
+fn subtitle_streams(path: &Path) -> Vec<SubStream> {
     let Ok(out) = Command::new(PROBE_TOOL)
         .args([
             "-v", "error",
             "-select_streams", "s",
-            "-show_entries", "stream=codec_name:stream_disposition=forced",
-            "-of", "csv=p=0",
+            "-show_entries",
+            "stream=codec_name:stream_disposition=forced:stream_tags=NUMBER_OF_FRAMES",
+            "-of", "compact",
         ])
         .arg(path)
         .output()
@@ -55,39 +66,61 @@ fn subtitle_streams(path: &Path) -> Vec<(String, bool)> {
     parse_streams(&String::from_utf8_lossy(&out.stdout))
 }
 
-fn parse_streams(csv: &str) -> Vec<(String, bool)> {
-    csv.lines()
-        .map(|l| l.trim().trim_end_matches(','))
-        .filter(|l| !l.is_empty())
+/// Parse ffprobe's compact listing: `stream|codec_name=…|disposition:forced=0|tag:…=…`.
+fn parse_streams(listing: &str) -> Vec<SubStream> {
+    listing
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("stream|"))
         .map(|l| {
-            let mut parts = l.split(',');
-            let codec = parts.next().unwrap_or("").to_ascii_lowercase();
-            let forced = parts.next().map(|f| f.trim() == "1").unwrap_or(false);
-            (codec, forced)
+            let mut stream = SubStream { codec: String::new(), forced: false, captions: None };
+            for field in l.split('|').skip(1) {
+                let Some((key, value)) = field.split_once('=') else { continue };
+                match key {
+                    "codec_name" => stream.codec = value.trim().to_ascii_lowercase(),
+                    "disposition:forced" => stream.forced = value.trim() == "1",
+                    "tag:NUMBER_OF_FRAMES" => stream.captions = value.trim().parse().ok(),
+                    _ => {}
+                }
+            }
+            stream
         })
         .collect()
 }
 
+/// A picture track with under this share of the busiest one's captions holds only signs
+/// and songs, even when nothing flags it as forced.
+const SIGNS_ONLY_SHARE: u64 = 4;
+
 /// Choose the stream to read: the first text stream, and only failing that the first
-/// picture stream that is not a forced track.
+/// picture stream that is neither a forced track nor a signs-only one.
 ///
 /// Selecting `0:s:0` is wrong on a ripped DVD: MakeMKV emits the original VOBSUB track
 /// first and the closed-caption-derived text track second, so mapping the first
 /// subtitle stream hands ffmpeg a bitmap format, the conversion fails, and the title
 /// silently reports no dialogue at all. Text always wins because it is exact and free;
 /// OCR is the costly fallback. A forced track holds only the lines in another language
-/// or on a sign, too few to identify anything by.
-fn choose(streams: &[(String, bool)]) -> Option<Source> {
+/// or on a sign, too few to identify anything by. Not every disc flags it: the Neon
+/// Genesis Evangelion Blu-rays put an unflagged signs track of 50 captions ahead of
+/// dialogue tracks of 600 to 900, so a track far quieter than the busiest is passed
+/// over too, when the file records the counts.
+fn choose(streams: &[SubStream]) -> Option<Source> {
     if let Some(i) = streams
         .iter()
-        .position(|(c, _)| TEXT_SUBTITLE_CODECS.contains(&c.as_str()))
+        .position(|s| TEXT_SUBTITLE_CODECS.contains(&s.codec.as_str()))
     {
         return Some(Source::Text(i));
     }
-    let i = streams
-        .iter()
-        .position(|(c, forced)| !forced && OCR_SUBTITLE_CODECS.contains(&c.as_str()))?;
-    Some(if streams[i].0 == "dvd_subtitle" {
+    let readable = |s: &SubStream| !s.forced && OCR_SUBTITLE_CODECS.contains(&s.codec.as_str());
+    let busiest = streams.iter().filter(|s| readable(s)).filter_map(|s| s.captions).max();
+    let i = streams.iter().position(|s| {
+        readable(s)
+            && match (s.captions, busiest) {
+                (Some(n), Some(max)) => n * SIGNS_ONLY_SHARE >= max,
+                _ => true,
+            }
+    })?;
+    Some(if streams[i].codec == "dvd_subtitle" {
         Source::DvdPictures(i)
     } else {
         Source::Pictures(i)
@@ -216,8 +249,16 @@ mod tests {
 YOU KNOW EVERYTHING.
 "#;
 
-    fn streams(s: &[(&str, bool)]) -> Vec<(String, bool)> {
-        s.iter().map(|(c, f)| (c.to_string(), *f)).collect()
+    fn streams(s: &[(&str, bool)]) -> Vec<SubStream> {
+        s.iter()
+            .map(|(c, f)| SubStream { codec: c.to_string(), forced: *f, captions: None })
+            .collect()
+    }
+
+    fn counted(s: &[(&str, u64)]) -> Vec<SubStream> {
+        s.iter()
+            .map(|(c, n)| SubStream { codec: c.to_string(), forced: false, captions: Some(*n) })
+            .collect()
     }
 
     #[test]
@@ -237,6 +278,17 @@ YOU KNOW EVERYTHING.
     }
 
     #[test]
+    fn an_unflagged_signs_track_is_passed_over_for_the_dialogue() {
+        // Neon Genesis Evangelion on Blu-ray: signs first, three dialogue tracks after.
+        let pgs = "hdmv_pgs_subtitle";
+        let bd = counted(&[(pgs, 50), (pgs, 651), (pgs, 610), (pgs, 945)]);
+        assert_eq!(choose(&bd), Some(Source::Pictures(1)));
+        // Tracks of like size keep the first, and a lone quiet track is still read.
+        assert_eq!(choose(&counted(&[(pgs, 400), (pgs, 650)])), Some(Source::Pictures(0)));
+        assert_eq!(choose(&counted(&[(pgs, 50)])), Some(Source::Pictures(0)));
+    }
+
+    #[test]
     fn a_dvd_with_only_pictures_is_read_by_ocr() {
         // Marvel's The Punisher on DVD: VobSub and no closed captions.
         assert_eq!(choose(&streams(&[("dvd_subtitle", false)])), Some(Source::DvdPictures(0)));
@@ -250,11 +302,15 @@ YOU KNOW EVERYTHING.
 
     #[test]
     fn parses_ffprobe_stream_listing() {
-        let s = parse_streams("hdmv_pgs_subtitle,0\nhdmv_pgs_subtitle,1\nsubrip,\n\n");
-        assert_eq!(
-            s,
-            streams(&[("hdmv_pgs_subtitle", false), ("hdmv_pgs_subtitle", true), ("subrip", false)])
+        let s = parse_streams(
+            "stream|codec_name=hdmv_pgs_subtitle|disposition:forced=0|tag:NUMBER_OF_FRAMES=50\n\
+             stream|codec_name=hdmv_pgs_subtitle|disposition:forced=1\n\
+             stream|codec_name=subrip|disposition:forced=0\n\n",
         );
+        let mut want =
+            streams(&[("hdmv_pgs_subtitle", false), ("hdmv_pgs_subtitle", true), ("subrip", false)]);
+        want[0].captions = Some(50);
+        assert_eq!(s, want);
     }
 
     #[test]
