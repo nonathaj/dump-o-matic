@@ -387,11 +387,18 @@ enum Command {
     /// each a special. The pieces are cut without re-encoding and hashed into a new job
     /// that carries the source disc's probe; the source job and its title are not
     /// changed, and nothing is deleted. Follow with `identify <new job> --specials`.
+    ///
+    /// With `--at`, the title is cut only where the given chapters begin, for a disc that
+    /// holds a run of episodes as one title of several chapters each.
     Split {
         /// Job id or a fragment of one.
         job: String,
         /// The title to cut, by file name, e.g. `FRIEREN S1P2 D1_t07.mkv`.
         title: String,
+        /// Cut only where these chapters begin (numbered from 1), e.g. `--at 6,11,16`,
+        /// instead of at every chapter.
+        #[arg(long, value_delimiter = ',')]
+        at: Vec<usize>,
         /// Show what would happen without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -612,9 +619,10 @@ fn main() -> Result<()> {
                 config_file: config,
             })
         }
-        Command::Split { job, title, dry_run, config } => split::run(split::SplitArgs {
+        Command::Split { job, title, at, dry_run, config } => split::run(split::SplitArgs {
             job,
             title,
+            at,
             dry_run,
             config_file: config,
         }),

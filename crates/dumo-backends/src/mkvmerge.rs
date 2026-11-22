@@ -30,22 +30,36 @@ fn not_installed(e: std::io::Error) -> BackendError {
     }
 }
 
-/// Cut `src` at every chapter mark into `out_dir/<stem>-001.mkv`, `-002`, and so on,
-/// and return the pieces in order.
+/// Cut `src` into `out_dir/<stem>-001.mkv`, `-002`, and so on, and return the pieces in
+/// order: at every chapter mark, or, given `at`, only where those chapters (numbered
+/// from 1) begin.
 ///
 /// `out_dir` must hold no pieces of that name already, so that what is returned is
 /// exactly what this run wrote. The source is only read.
-pub fn split_chapters(src: &Path, out_dir: &Path, stem: &str) -> Result<Vec<PathBuf>> {
+pub fn split_chapters(
+    src: &Path,
+    out_dir: &Path,
+    stem: &str,
+    at: Option<&[usize]>,
+) -> Result<Vec<PathBuf>> {
     if !pieces(out_dir, stem).is_empty() {
         return Err(BackendError::Failed {
             tool: TOOL,
             detail: format!("{} already holds pieces named {stem}-NNN.mkv", out_dir.display()),
         });
     }
+    let spec = match at {
+        Some(at) => format!(
+            "chapters:{}",
+            at.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+        ),
+        None => "chapters:all".to_string(),
+    };
     let out = Command::new(TOOL)
         .arg("--output")
         .arg(out_dir.join(format!("{stem}.mkv")))
-        .args(["--split", "chapters:all"])
+        .arg("--split")
+        .arg(&spec)
         .arg(src)
         .output()
         .map_err(not_installed)?;
@@ -229,7 +243,7 @@ mod tests {
     fn refuses_a_directory_already_holding_pieces() {
         let dir = scratch("refuse");
         std::fs::write(dir.join("t07-001.mkv"), b"").unwrap();
-        assert!(split_chapters(&dir.join("src.mkv"), &dir, "t07").is_err());
+        assert!(split_chapters(&dir.join("src.mkv"), &dir, "t07", None).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -263,9 +277,16 @@ mod tests {
         assert!(made.success());
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
-        let got = split_chapters(&src, &out, "src").unwrap();
+        let got = split_chapters(&src, &out, "src", None).unwrap();
         assert_eq!(got.len(), 3, "{got:?}");
         assert!(got.iter().all(|p| p.metadata().unwrap().len() > 0));
+
+        // Only where chapter 3 begins: two pieces, the first holding chapters 1 and 2.
+        let grouped = dir.join("grouped");
+        std::fs::create_dir_all(&grouped).unwrap();
+        let got = split_chapters(&src, &grouped, "src", Some(&[3])).unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].metadata().unwrap().len() > got[1].metadata().unwrap().len());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

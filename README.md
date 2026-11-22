@@ -223,6 +223,12 @@ were. `identify <new job> --specials` then files each piece as its special. On t
 the dialogue placed ten of the eleven, and the eleventh was assigned by hand from the
 spell its subtitles name.
 
+Some series discs hold their episodes as one seamless title, several chapters to an
+episode — each Neon Genesis Evangelion Blu-ray is one 169-minute title of opening, two
+halves, ending and preview, seven times over. `split <job> <title> --at 6,11,16` cuts only
+where those chapters begin, so each piece is an episode, and `identify <new job>` matches
+them like any series disc. `--dry-run` lists the pieces and their lengths first.
+
 With OpenSubtitles credentials configured (`api.opensubtitles_api_key`,
 `api.opensubtitles_username`, `api.opensubtitles_password`, or the matching
 `DUMO_OPENSUBTITLES_*` variables), every proposed episode is then checked against a

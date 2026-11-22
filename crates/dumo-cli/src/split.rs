@@ -5,6 +5,9 @@
 //! job they came from, which may well be migrated already, is not touched; the title
 //! stays there as it was. The new job carries the source disc's probe, so identify
 //! searches for the same series, and its pieces are hashed like any rip.
+//!
+//! With `--at`, the title is cut only where the given chapters begin: for a disc that
+//! holds a run of episodes as one seamless title, each several chapters long.
 
 use anyhow::{bail, Context, Result};
 use dumo_core::job::{new_job_id, Artifact, Job, JobStage, TitleInfo};
@@ -17,6 +20,8 @@ pub struct SplitArgs {
     pub job: String,
     /// The title to cut, by file name, as listed in the job.
     pub title: String,
+    /// Chapters (numbered from 1) at which a new piece begins; empty for every chapter.
+    pub at: Vec<usize>,
     pub dry_run: bool,
     pub config_file: Option<PathBuf>,
 }
@@ -84,14 +89,34 @@ pub fn run(args: SplitArgs) -> Result<()> {
         bail!("{} has {chapters} chapter(s): nothing to cut", artifact.relative_path);
     }
 
+    check_cut_points(&args.at, chapters)?;
+    let expected = if args.at.is_empty() { chapters } else { args.at.len() + 1 };
+
     let stem = std::path::Path::new(&artifact.relative_path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "title".into());
-    println!(
-        "{} ({}) has {chapters} chapters; each becomes a title of a new job.",
-        artifact.relative_path, source_job.id
-    );
+    if args.at.is_empty() {
+        println!(
+            "{} ({}) has {chapters} chapters; each becomes a title of a new job.",
+            artifact.relative_path, source_job.id
+        );
+    } else {
+        let starts: Vec<usize> = std::iter::once(1).chain(args.at.iter().copied()).collect();
+        println!(
+            "{} ({}) has {chapters} chapters; it is cut into {expected} titles of a new job:",
+            artifact.relative_path, source_job.id
+        );
+        for (i, start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).map(|n| n - 1).unwrap_or(chapters);
+            let (from, to) = (&probe.chapters[start - 1], &probe.chapters[end - 1]);
+            println!(
+                "  piece {:>2}: chapters {start:>2}-{end:<2}  {:>6.1} s",
+                i + 1,
+                to.end_secs - from.start_secs
+            );
+        }
+    }
     if args.dry_run {
         println!("Dry run: nothing was written.");
         return Ok(());
@@ -141,13 +166,14 @@ pub fn run(args: SplitArgs) -> Result<()> {
 
     print!("Cutting at the chapters ... ");
     std::io::stdout().flush().ok();
-    let pieces = dumo_backends::mkvmerge::split_chapters(&src, &raw, &stem)?;
+    let at = (!args.at.is_empty()).then_some(args.at.as_slice());
+    let pieces = dumo_backends::mkvmerge::split_chapters(&src, &raw, &stem, at)?;
     println!("{} piece(s)", pieces.len());
-    if pieces.len() != chapters {
+    if pieces.len() != expected {
         job.stage = JobStage::Failed;
-        job.error = Some(format!("{} pieces from {chapters} chapters", pieces.len()));
+        job.error = Some(format!("{} pieces where {expected} were expected", pieces.len()));
         job.save(&new_dir)?;
-        bail!("expected {chapters} pieces, got {}; the job is marked failed", pieces.len());
+        bail!("expected {expected} pieces, got {}; the job is marked failed", pieces.len());
     }
 
     let mut total = 0.0;
@@ -201,6 +227,38 @@ pub fn run(args: SplitArgs) -> Result<()> {
         "The source title is unchanged and still in {}; nothing was deleted.",
         source_job.id
     );
-    println!("Next:   dump-o-matic identify {id} --specials");
+    if args.at.is_empty() {
+        println!("Next:   dump-o-matic identify {id} --specials");
+    } else {
+        println!("Next:   dump-o-matic identify {id}");
+    }
     Ok(())
+}
+
+/// `--at` must name chapters that exist, past the first, each once and in order.
+fn check_cut_points(at: &[usize], chapters: usize) -> Result<()> {
+    for (i, &c) in at.iter().enumerate() {
+        if c < 2 || c > chapters {
+            bail!("--at {c}: a piece can begin only at chapter 2 to {chapters}");
+        }
+        if i > 0 && c <= at[i - 1] {
+            bail!("--at must list chapters in increasing order, each once; {c} follows {}", at[i - 1]);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cut_points_must_be_chapters_after_the_first_in_order() {
+        assert!(check_cut_points(&[], 5).is_ok());
+        assert!(check_cut_points(&[2, 4, 5], 5).is_ok());
+        assert!(check_cut_points(&[1, 3], 5).is_err());
+        assert!(check_cut_points(&[3, 6], 5).is_err());
+        assert!(check_cut_points(&[4, 3], 5).is_err());
+        assert!(check_cut_points(&[3, 3], 5).is_err());
+    }
 }
