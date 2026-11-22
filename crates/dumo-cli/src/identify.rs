@@ -67,8 +67,8 @@ pub struct MovieOptions {
     pub by_reference: bool,
     /// Not a film option either: file a series disc's episodes as a show of their own.
     pub own_show: Option<String>,
-    /// Languages to keep on top of the configured ones, for a film whose original
-    /// language is not among them.
+    /// Languages to keep on top of the configured ones, for a film or series whose
+    /// original language is not among them.
     pub keep_languages: Vec<String>,
 }
 
@@ -104,7 +104,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         .map(|s| parse_track_drop(s))
         .collect::<Result<Vec<_>>>()?;
     if !args.keep_languages.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
-        bail!("--keep-language is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
+        bail!("--keep-language is for a film or a single series disc; it cannot be combined with --set, --by-reference, --specials or --assign");
     }
     if !drop_tracks.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
         bail!("--drop-track is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
@@ -1606,6 +1606,7 @@ fn analyse_video(
             }
         },
         best.confidence,
+        &movie.keep_languages,
         cfg,
     )?;
     println!();
@@ -2556,6 +2557,7 @@ fn identify_bonus_disc(
             "inference (dialogue, bonus disc against specials)".to_string()
         },
         result.confidence,
+        &[],
         cfg,
     )?;
     println!();
@@ -2923,6 +2925,7 @@ fn file_episodes(
     series: &str,
     matched_on: &str,
     confidence: dumo_core::Confidence,
+    keep_languages: &[String],
     cfg: &Config,
 ) -> Result<usize> {
     let job_dir = cfg.staging.job_dir(job_id);
@@ -2951,7 +2954,7 @@ fn file_episodes(
         confidence,
         &format!("tmdb series {series}"),
         &[],
-        &[],
+        keep_languages,
         cfg,
     )
 }
@@ -3235,6 +3238,7 @@ fn apply_video_set(
             series,
             "inference (runtime + dialogue, joint set solve)",
             solution.confidence,
+            &[],
             cfg,
         )?;
     }
