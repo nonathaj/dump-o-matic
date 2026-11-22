@@ -1277,7 +1277,10 @@ fn analyse_video(
             return Ok(());
         }
         None => {
-            if identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, true, movie)? {
+            // Episodes named by hand say what the disc is; it is not a film to try first.
+            if assign.is_empty()
+                && identify_movie(job, &analysis, &client, &query, cfg, apply, accept_inferred, true, movie)?
+            {
                 return Ok(());
             }
         }

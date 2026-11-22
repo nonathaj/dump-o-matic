@@ -31,6 +31,15 @@ const DURATION_TOLERANCE: f64 = 0.005;
 /// its commentary track and means nothing.
 const MIN_CONSTITUENTS: usize = 2;
 
+/// Fewest titles in a *run* of the others that may account for a play-all.
+///
+/// Matching a run instead of every title is easy to do by chance, and two titles are too
+/// few to rule chance out: cut at its chapters, one Neon Genesis Evangelion disc's
+/// 29:23 first episode equalled its last 23:09 episode plus a 6:14 credits piece to the
+/// second, with the chapters agreeing, and the video showed they had nothing in common.
+/// Every real play-all seen has had three or more episodes.
+const MIN_RUN_CONSTITUENTS: usize = 3;
+
 /// One title's length and chapter count: all that detection looks at.
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
@@ -97,7 +106,7 @@ pub fn find(spans: &[Span]) -> Option<Found> {
         return None;
     }
     for start in 0..others.len() {
-        for end in start + MIN_CONSTITUENTS..=others.len() {
+        for end in start + MIN_RUN_CONSTITUENTS..=others.len() {
             let run = &others[start..end];
             let (secs, chapters) = total(run);
             if secs > longest.secs + longest.secs / 100 {
@@ -274,6 +283,19 @@ mod tests {
         // Two more is not a closing chapter.
         let mut titles = titles;
         titles[5].chapters = 31;
+        assert_eq!(detect(&titles), None);
+    }
+
+    #[test]
+    fn two_titles_adding_up_to_another_by_chance_are_not_a_play_all() {
+        // Neon Genesis Evangelion disc 4, its one title cut at the episodes: the first
+        // piece is as long as the last two together, with a closing chapter to spare.
+        let d = [(1763, 6), (1726, 5), (1531, 5), (1577, 5), (1404, 5), (1389, 4), (374, 1)];
+        let titles: Vec<TitleInfo> = d
+            .iter()
+            .enumerate()
+            .map(|(i, &(secs, chapters))| t(i as u32, secs, chapters))
+            .collect();
         assert_eq!(detect(&titles), None);
     }
 
