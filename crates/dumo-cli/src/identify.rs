@@ -103,8 +103,8 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         .iter()
         .map(|s| parse_track_drop(s))
         .collect::<Result<Vec<_>>>()?;
-    if !args.keep_languages.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
-        bail!("--keep-language is for a film or a single series disc; it cannot be combined with --set, --by-reference, --specials or --assign");
+    if !args.keep_languages.is_empty() && (args.set || args.by_reference) {
+        bail!("--keep-language is for a film or a single disc; it cannot be combined with --set or --by-reference");
     }
     if !drop_tracks.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
         bail!("--drop-track is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
@@ -1394,6 +1394,7 @@ fn analyse_video(
             apply,
             accept_inferred,
             assign,
+            &movie.keep_languages,
         );
     }
 
@@ -2400,6 +2401,7 @@ fn identify_bonus_disc(
     apply: bool,
     accept_inferred: bool,
     assign: &[String],
+    keep_languages: &[String],
 ) -> Result<()> {
     const MAX_CANDIDATES: usize = 4;
     let mut best: Option<(
@@ -2557,7 +2559,7 @@ fn identify_bonus_disc(
             "inference (dialogue, bonus disc against specials)".to_string()
         },
         result.confidence,
-        &[],
+        keep_languages,
         cfg,
     )?;
     println!();

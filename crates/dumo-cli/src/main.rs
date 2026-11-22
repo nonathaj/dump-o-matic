@@ -256,8 +256,8 @@ enum Command {
         ///
         /// For a film or series whose original language is not among the configured
         /// ones: with `languages = ["eng"]`, a Mandarin film or a Japanese anime would be
-        /// filed with only its English dub. Repeatable. A film or a single series disc;
-        /// not with --set, --by-reference, --specials or --assign.
+        /// filed with only its English dub. Repeatable. A film or a single disc; not
+        /// with --set or --by-reference.
         #[arg(long = "keep-language", value_name = "LANG")]
         keep_languages: Vec<String>,
         /// Match every title against the series' specials (season 0), as on a bonus
