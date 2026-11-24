@@ -212,7 +212,10 @@ filed with `--assign B3_t01.mkv=S00E14`, and is recorded as assigned by hand.
 `identify --specials` does the same for any job, whatever its label. `--assign` works for episodes
 too (`B3_t01.mkv=S02E04`); a title holding several in a row, such as a miniseries whose
 acts the disc does not separate, takes the run (`D1_t00.mkv=S01E01-E03`) and is filed as one
-file, `S01E01-E03`, the form Plex reads as several episodes. `--assign B3_t07.mkv=extra` takes out of the proposal a
+file, `S01E01-E03`, the form Plex reads as several episodes. A two-part episode TMDB lists as one,
+which a disc holds as two titles, takes `B1_t04.mkv=S02E04pt1` and `B1_t00.mkv=S02E04pt2` and is
+filed as `… S02E04 - Reign Storm - pt1.mkv` and `- pt2`, as the halves are named when the dialogue
+tells them apart. `--assign B3_t07.mkv=extra` takes out of the proposal a
 title the match counted as an episode, such as an interview that runs nearly as long;
 it stays in the job, unfiled.
 

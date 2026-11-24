@@ -1728,6 +1728,8 @@ fn assign_episodes(
 ) -> Result<usize> {
     let mut seasons: std::collections::HashMap<u32, dumo_identify::tmdb::Season> =
         Default::default();
+    // The half of a two-part episode each such title was assigned.
+    let mut parts: std::collections::HashMap<String, u8> = Default::default();
     for a in assign {
         let Some((title_name, code)) = a.split_once('=') else {
             anyhow::bail!("--assign {a:?}: expected TITLE=SxxEyy");
@@ -1740,6 +1742,11 @@ fn assign_episodes(
                 anyhow::bail!("--assign {a:?}: this disc has no title named {title_name:?}");
             }
             continue;
+        }
+        // `S02E04PT1`: one half of a two-part episode TMDB lists as one.
+        let (code, part) = split_part(&code);
+        if let Some(p) = part {
+            parts.insert(title_name.trim().to_string(), p);
         }
         // `S01E01-E03`: one title holding a run of episodes.
         let (code, last) = match code.split_once('-') {
@@ -1775,7 +1782,14 @@ fn assign_episodes(
         };
         m.episode = episode.clone();
         m.through = None;
-        m.delta_mins = episode
+        // A half runs half the listed time, and is named as the shelf names halves:
+        // "Name - pt1", as the Friends two-parters are.
+        if let Some(p) = part {
+            m.episode.runtime_mins = episode.runtime_mins.map(|rt| rt / 2);
+            m.episode.name = format!("{} - pt{p}", episode.name);
+        }
+        m.delta_mins = m
+            .episode
             .runtime_mins
             .map(|rt| (m.title_mins - f64::from(rt)).abs())
             .unwrap_or(f64::NAN);
@@ -1808,7 +1822,9 @@ fn assign_episodes(
     let mut seen = std::collections::HashSet::new();
     for m in &best.matches {
         for number in m.episode.number..=m.through.unwrap_or(m.episode.number) {
-            if !seen.insert((m.episode.season, number)) {
+            // Two titles may share an episode only as its two different halves.
+            let half = parts.get(&m.title_name).copied();
+            if !seen.insert((m.episode.season, number, half)) {
                 anyhow::bail!(
                     "--assign leaves two titles as S{:02}E{number:02}; assign the other one too",
                     m.episode.season
@@ -1821,6 +1837,20 @@ fn assign_episodes(
         assign.len()
     ));
     Ok(assign.len())
+}
+
+/// Split an `--assign` episode code into the code and the half it names, if any:
+/// `S02E04PT1` is `("S02E04", Some(1))`. Only halves 1 and 2 exist.
+fn split_part(code: &str) -> (String, Option<u8>) {
+    let code = code.trim().to_ascii_uppercase();
+    for p in [1u8, 2] {
+        for suffix in [format!("-PT{p}"), format!("PT{p}")] {
+            if let Some(rest) = code.strip_suffix(&suffix) {
+                return (rest.to_string(), Some(p));
+            }
+        }
+    }
+    (code, None)
 }
 
 /// Name a feature film disc: its longest main title, matched to a TMDB movie by name
@@ -3328,6 +3358,16 @@ fn apply_video_set(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_half_of_a_two_parter_is_named_in_an_assign_code() {
+        assert_eq!(split_part("S02E04PT1"), ("S02E04".to_string(), Some(1)));
+        assert_eq!(split_part("s02e04-pt2"), ("S02E04".to_string(), Some(2)));
+        assert_eq!(split_part("S02E04"), ("S02E04".to_string(), None));
+        // A run is not a half, and only two halves exist.
+        assert_eq!(split_part("S01E01-E03"), ("S01E01-E03".to_string(), None));
+        assert_eq!(split_part("S02E04PT3"), ("S02E04PT3".to_string(), None));
+    }
+
     use super::*;
 
     /// House of Flying Daggers: Mandarin original, English dub; the setting keeps English.
