@@ -172,12 +172,10 @@ const MIN_NAME_WORD: usize = 4;
 /// seconds, so its words come back frame after frame; a misreading rarely repeats.
 const MIN_FRAMES: usize = 2;
 
-/// The share of an episode name's letters that must be read for the card to name it.
-/// Poster lettering comes back in fragments: "BONDING" alone, for "Parental Bonding".
-const MIN_SHARE: f64 = 0.4;
-
-/// Letters of a name that must be read, however short the name.
-const MIN_LETTERS: usize = 4;
+/// Letters a name must have, in the words looked for, to be read from the picture at
+/// all. A single short word ("Kind", of "One of a Kind") turns up in set dressing and
+/// taglines as easily as on its own card.
+const MIN_LETTERS: usize = 6;
 
 /// The words found in the opening frames of every one of a disc's titles: the series'
 /// own logo, its creator's credit, the set dressing of its opening. Read on every
@@ -218,10 +216,11 @@ pub fn from_picture(frames: &[String], recurring: &HashSet<String>) -> Option<Ca
 
 /// The episode whose name a card read from the picture shows, if one clearly does.
 ///
-/// Each name is scored by the share of its letters read, word by word, allowing for a
-/// letter misread or lost at an edge. The best must cover enough of its name and score
-/// at least twice the next, or nothing is claimed: a wrong card would outweigh every
-/// other signal, so a miss is far the cheaper mistake.
+/// Every word of the name must be read, allowing for a letter misread or lost at an
+/// edge, and no other name may be read as fully. Part of a name is not enough: a card
+/// carries a tagline as well as its name, and Danny Phantom's "Teacher of the Year"
+/// says "A lesson in fear!", which is half of "Life Lessons". A wrong card outweighs
+/// every other signal, so a card missed is far the cheaper mistake.
 fn read_on_screen<'a>(card: &Card, episodes: &'a [Episode]) -> Option<&'a Episode> {
     let mut frames: HashMap<&str, usize> = HashMap::new();
     for w in card.following.split(' ').filter(|w| !w.is_empty()) {
@@ -232,26 +231,24 @@ fn read_on_screen<'a>(card: &Card, episodes: &'a [Episode]) -> Option<&'a Episod
         .filter(|&(_, n)| n >= MIN_FRAMES)
         .map(|(w, _)| w)
         .collect();
-    let mut scored: Vec<(f64, usize, &Episode)> = episodes
+    let read: Vec<(HashSet<String>, &Episode)> = episodes
         .iter()
         .filter_map(|e| {
-            let key: Vec<String> = words(&e.name)
+            let key: HashSet<String> = words(&e.name)
                 .into_iter()
                 .filter(|w| w.chars().count() >= MIN_NAME_WORD && !COMMON.contains(&w.as_str()))
                 .collect();
-            let total: usize = key.iter().map(|w| w.chars().count()).sum();
-            let found: usize = key
-                .iter()
-                .filter(|k| steady.iter().any(|w| close(w, k)))
-                .map(|k| k.chars().count())
-                .sum();
-            (total > 0).then(|| (found as f64 / total as f64, found, e))
+            let letters: usize = key.iter().map(|w| w.chars().count()).sum();
+            (letters >= MIN_LETTERS && key.iter().all(|k| steady.iter().any(|w| close(w, k))))
+                .then_some((key, e))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let &(best, found, episode) = scored.first()?;
-    let second = scored.get(1).map(|s| s.0).unwrap_or(0.0);
-    (best >= MIN_SHARE && found >= MIN_LETTERS && second * 2.0 <= best).then_some(episode)
+    // Where one name holds another ("Reign Storm", and a "Reign Storm Returns"),
+    // reading the longer reads the shorter too, and the longer is the card.
+    // Two names read that do not hold one another are two cards' words: neither.
+    read.iter()
+        .find(|(key, _)| read.iter().all(|(other, _)| other.is_subset(key)))
+        .map(|(_, e)| *e)
 }
 
 /// Whether OCR's `read` is the name word `name`: exactly, with one letter wrong, added
@@ -387,8 +384,10 @@ mod tests {
             "One of a Kind",
             "Attack of the Killer Garage Sale",
             "Splitting Images",
-            "What You Want",
+            "Teacher of the Year",
+            "Fright Night",
             "13",
+            "Life Lessons",
         ]
         .iter()
         .enumerate()
@@ -421,49 +420,72 @@ mod tests {
     }
 
     #[test]
-    fn a_card_read_in_fragments_names_its_episode() {
+    fn a_card_read_whole_names_its_episode_through_misread_letters() {
         let disc = vec![
-            title(&["Vi I} aha MYSTERY", "LA MYSTERY Wola", "MYSTERY MEAT VISION"]),
-            title(&["*arentaly, wo 5, BONDING ne", "DANNY PHANTOM ; Pre BONDING", "Grentall BONDING"]),
-            title(&["ocKER {MAGE NG", "ookeR AGE MAGE"]),
+            title(&["Vi I} aha MYSTERY", "LA MYSTERY MEAT", "MYSTERY MEAT VISION"]),
+            title(&["Grentall BONDING", "PARENTAL BONDING ne", "PARENTAL BONDING"]),
+            // A letter misread, and "Images" with its edge lost: still the whole name.
+            title(&["ocKER {MAGE NG SPLITTINQ", "SPLITTINQ AGE MAGE"]),
             title(&["pA wy W) Wh aM", "TA lm"]),
         ];
         assert_eq!(read(&disc, 0), Some(1));
         assert_eq!(read(&disc, 1), Some(2));
-        // "MAGE", twice: what was read of "Splitting Images".
         assert_eq!(read(&disc, 2), Some(5));
         // Nothing legible: no card, rather than a guess.
         assert_eq!(read(&disc, 3), None);
     }
 
     #[test]
+    fn part_of_a_name_is_not_its_card() {
+        // Danny Phantom's "Teacher of the Year" card says "A lesson in fear!": half of
+        // "Life Lessons", read clearly, while the name itself was not.
+        let disc = vec![
+            title(&["A LESSON IN FEAR!", "A LESSON IN FEAR!", "A LESSON IN FEAR!"]),
+            title(&["BONDING", "BONDING", "BONDING"]),
+        ];
+        assert_eq!(read(&disc, 0), None);
+        assert_eq!(read(&disc, 1), None);
+    }
+
+    #[test]
     fn words_on_every_title_are_the_series_not_the_episode() {
-        // "Phantom" is on every title's logo; left in, "Phantom Planet" would be half read
-        // on every title of the series.
+        // "Phantom" is on every title's logo; left in, it would be half of "Phantom
+        // Planet" on every title of the series.
         let disc = vec![title(&["nothing legible"]), title(&["nor here"])];
         assert!(recurring_words(&disc).contains("phantom"));
-        assert_eq!(read(&disc, 0), None);
         assert!(!recurring_words(&disc).contains("legible"));
+        let planet = vec![title(&["PLANET", "PLANET"]), title(&["other"])];
+        assert_eq!(read(&planet, 0), None);
     }
 
     #[test]
     fn a_word_read_from_a_single_frame_is_not_enough() {
         // A card stays up for seconds; one frame's misreading is not a card.
-        let disc = vec![title(&["KIND"]), title(&["other"])];
+        let disc = vec![title(&["FRIGHT NIGHT"]), title(&["other"])];
         assert_eq!(read(&disc, 0), None);
-        let held = vec![title(&["KIND", "ONE OF A KIND!"]), title(&["other"])];
-        assert_eq!(read(&held, 0), Some(3));
+        let held = vec![title(&["FRIGHT NIGHT", "FRIGHT NIGHT!"]), title(&["other"])];
+        assert_eq!(read(&held, 0), Some(7));
     }
 
     #[test]
-    fn two_names_read_equally_well_name_neither() {
-        let disc = vec![title(&["MYSTERY BONDING", "MYSTERY BONDING"]), title(&["other"])];
+    fn a_short_name_is_not_read_from_the_picture() {
+        // "Kind" is the whole of "One of a Kind" once the small words go; one short word
+        // turns up anywhere.
+        let disc = vec![title(&["ONE OF A KIND!", "ONE OF A KIND!"]), title(&["other"])];
+        assert_eq!(read(&disc, 0), None);
+    }
+
+    #[test]
+    fn two_names_read_name_neither() {
+        let both = &["MYSTERY MEAT PARENTAL BONDING", "MYSTERY MEAT PARENTAL BONDING"];
+        let disc = vec![title(both), title(&["other"])];
         assert_eq!(read(&disc, 0), None);
     }
 
     #[test]
     fn a_caption_outranks_a_card_read_from_the_picture() {
-        let picture = from_picture(&["MYSTERY".into(), "MYSTERY".into()], &HashSet::new()).unwrap();
+        let picture =
+            from_picture(&["MYSTERY MEAT".into(), "MYSTERY MEAT".into()], &HashSet::new()).unwrap();
         assert!(picture.picture);
         assert_eq!(picture.describe(), "words read from the opening frames");
         let caption = find("\"Episode 2: Parental Bonding\"");

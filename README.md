@@ -179,12 +179,14 @@ episode opens on a poster reading "Danny Phantom starring in … Parental Bondin
 its DVDs hold the episodes out of broadcast order with nothing else to tell them apart.
 When two or more titles have no subtitles, their first eight minutes are read by OCR,
 a frame a second (Tesseract, as for Blu-ray subtitles), and the words are looked for
-among the season's episode names. Poster lettering comes back in fragments, so a name
-counts as read when enough of its letters are, in at least two frames, and it scores at
-least twice any other name; words read on every title are the series' own logo and
-credits and are left out first. A card read this way is used like a captioned one. On
-Danny Phantom it reads two or three cards in five; the rest are missed rather than
-guessed. For those, a contact sheet of each title's opening minutes is written to
+among the season's episode names. A name counts as read only when every word of it is,
+each in at least two frames (a letter misread or lost at an edge is allowed), and no
+other name is read as fully; words read on every title are the series' own logo and
+credits and are left out first. Part of a name is not enough: a card carries a tagline
+too, and "Teacher of the Year" says "A lesson in fear!", half of "Life Lessons". A card
+read this way is used like a captioned one. Poster lettering defeats OCR more often than
+not — on Danny Phantom it reads about one card in five — and the rest are missed rather
+than guessed. For those, a contact sheet of each title's opening minutes is written to
 `cards/` in the job directory, a frame every ten seconds with its time, so a card can be
 read by eye and the title placed with `--assign`.
 
