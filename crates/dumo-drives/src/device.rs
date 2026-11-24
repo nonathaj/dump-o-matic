@@ -181,6 +181,12 @@ pub(crate) fn medium_is_readable(path: &str, medium: Option<String>) -> Result<(
     }
 }
 
+/// Open the tray of the drive at `path`.
+pub fn eject(path: &str) -> Result<()> {
+    let f = open_device(path)?;
+    ioctl::eject(f.as_raw_fd(), path)
+}
+
 /// Current tray/media state for a drive.
 pub fn open_drive_status(drive: &Drive) -> Result<DriveStatus> {
     let f = open_device(&drive.path)?;

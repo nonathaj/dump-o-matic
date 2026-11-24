@@ -154,6 +154,12 @@ enum Command {
         /// skipped by default when detected.
         #[arg(long)]
         keep_play_all: bool,
+        /// Leave the disc in the drive when the rip is done.
+        ///
+        /// By default the tray opens after a clean rip, so the next disc can go in. A rip
+        /// that failed always leaves the disc where it is.
+        #[arg(long)]
+        no_eject: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -185,6 +191,12 @@ enum Command {
         /// skipped by default when detected.
         #[arg(long)]
         keep_play_all: bool,
+        /// Leave the disc in the drive when the rip is done.
+        ///
+        /// By default the tray opens after a clean rip, so the next disc can go in. A rip
+        /// that failed always leaves the disc where it is.
+        #[arg(long)]
+        no_eject: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -528,13 +540,14 @@ fn main() -> Result<()> {
         })
         .map(|_| ()),
         Command::Config { action } => cmd_config(action),
-        Command::Run { device, min_length, dry_run, yes, keep_play_all, config } => {
+        Command::Run { device, min_length, dry_run, yes, keep_play_all, no_eject, config } => {
             run::run(run::RunArgs {
                 device,
                 min_length,
                 dry_run,
                 assume_yes: yes,
                 keep_play_all,
+                eject: !no_eject,
                 config_file: config,
             })
         }
@@ -545,6 +558,7 @@ fn main() -> Result<()> {
             dry_run,
             yes,
             keep_play_all,
+            no_eject,
             config,
         } => rip::run(rip::RipArgs {
             device,
@@ -553,6 +567,7 @@ fn main() -> Result<()> {
             dry_run,
             assume_yes: yes,
             keep_play_all,
+            eject: !no_eject,
             config_file: config,
         })
         .map(|_| ()),

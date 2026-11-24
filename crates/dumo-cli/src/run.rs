@@ -26,6 +26,7 @@ pub struct RunArgs {
     pub dry_run: bool,
     pub assume_yes: bool,
     pub keep_play_all: bool,
+    pub eject: bool,
     pub config_file: Option<PathBuf>,
 }
 
@@ -38,6 +39,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         dry_run: args.dry_run,
         assume_yes: args.assume_yes,
         keep_play_all: args.keep_play_all,
+        eject: args.eject,
         config_file: args.config_file.clone(),
     })?;
 
@@ -115,7 +117,7 @@ pub fn run(args: RunArgs) -> Result<()> {
 
     println!();
     println!("Done: {job_id} is ripped, identified, packaged and migrated.");
-    println!("The disc has not been modified. Eject it and insert the next one.");
+    println!("The disc has not been modified.");
     Ok(())
 }
 

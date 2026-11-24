@@ -15,7 +15,7 @@ mod mmc;
 mod probe;
 mod udf;
 
-pub use device::{enumerate_drives, open_drive_status, read_drive};
+pub use device::{eject, enumerate_drives, open_drive_status, read_drive};
 pub use probe::probe_disc;
 
 /// Errors from drive access and probing.

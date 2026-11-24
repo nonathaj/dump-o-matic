@@ -30,6 +30,8 @@ pub struct RipArgs {
     pub dry_run: bool,
     pub assume_yes: bool,
     pub keep_play_all: bool,
+    /// Open the tray once the disc is ripped, so the next one can go in.
+    pub eject: bool,
     pub config_file: Option<PathBuf>,
 }
 
@@ -42,6 +44,7 @@ impl Default for RipArgs {
             dry_run: false,
             assume_yes: false,
             keep_play_all: false,
+            eject: true,
             config_file: None,
         }
     }
@@ -49,7 +52,39 @@ impl Default for RipArgs {
 
 /// Rip the disc in a drive. Returns the job id, so a caller driving the whole pipeline
 /// knows which job to carry forward.
-pub fn run(args: RipArgs) -> Result<Option<String>> {
+///
+/// When the rip completes cleanly the tray is opened, so the next disc can go in. A rip
+/// that failed, or was only a dry run, leaves the disc where it is.
+pub fn run(mut args: RipArgs) -> Result<Option<String>> {
+    let device = match args.device.clone() {
+        Some(d) => d,
+        None => dumo_drives::enumerate_drives()
+            .context("enumerating drives")?
+            .first()
+            .map(|d| d.path.clone())
+            .context("no optical drives found")?,
+    };
+    args.device = Some(device.clone());
+    let (eject, dry_run, config_file) = (args.eject, args.dry_run, args.config_file.clone());
+
+    let job_id = rip_disc(args)?;
+
+    if let (true, false, Some(id)) = (eject, dry_run, job_id.as_ref()) {
+        let cfg = Config::load(config_file.as_deref())?;
+        let ripped = Job::load(&cfg.staging.job_dir(id))
+            .map(|j| j.stage == JobStage::Ripped)
+            .unwrap_or(false);
+        if ripped {
+            match dumo_drives::eject(&device) {
+                Ok(()) => println!("Ejected {device}."),
+                Err(e) => eprintln!("Could not eject {device}: {e}. Eject it by hand."),
+            }
+        }
+    }
+    Ok(job_id)
+}
+
+fn rip_disc(args: RipArgs) -> Result<Option<String>> {
     let cfg = Config::load(args.config_file.as_deref())?;
 
     // Configuration must be sound before we touch a disc.

@@ -10,6 +10,7 @@ use std::os::unix::io::RawFd;
 // From <linux/cdrom.h>
 const CDROM_DRIVE_STATUS: libc::c_ulong = 0x5326;
 const CDROM_DISC_STATUS: libc::c_ulong = 0x5327;
+const CDROMEJECT: libc::c_ulong = 0x5309;
 const CDROMREADTOCHDR: libc::c_ulong = 0x5305;
 const CDROMREADTOCENTRY: libc::c_ulong = 0x5306;
 
@@ -76,6 +77,18 @@ pub fn drive_status(fd: RawFd, path: &str) -> Result<TrayState> {
         CDS_NO_INFO => TrayState::NotReady,
         _ => TrayState::NotReady,
     })
+}
+
+/// Open the tray. Opens nothing for writing and reads nothing from the disc.
+pub fn eject(fd: RawFd, path: &str) -> Result<()> {
+    let rc = unsafe { libc::ioctl(fd, CDROMEJECT, 0 as libc::c_ulong) };
+    if rc < 0 {
+        return Err(DriveError::Io {
+            path: path.to_string(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    Ok(())
 }
 
 pub fn disc_class(fd: RawFd) -> KernelDiscClass {

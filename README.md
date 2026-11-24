@@ -144,6 +144,10 @@ the next. So when the scan meets a read error or skips a title for navigation, `
 scans again, up to three times in all, and keeps whichever scan found the most titles.
 If every scan was troubled, it says so, since a title may still be missing.
 
+When a rip completes cleanly, `rip` (and `run`) open the tray so the next disc can go in.
+A rip that failed, and a `--dry-run`, leave the disc where it is; `--no-eject` leaves it
+in after a clean rip too.
+
 Dialogue comes from a title's text subtitle track where it has one — on a DVD,
 MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
 so when there is no text track, the first non-forced PGS track is decoded and read with
