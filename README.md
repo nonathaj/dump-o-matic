@@ -174,6 +174,20 @@ Some series caption no card of their own but close with a preview that says what
 next — Attack on Titan's narrator ends each episode with `Next episode: "Children."`. A
 title without a card of its own is placed just before the episode its preview names.
 
+A disc with no subtitles at all can still show its cards on screen: each Danny Phantom
+episode opens on a poster reading "Danny Phantom starring in … Parental Bonding", and
+its DVDs hold the episodes out of broadcast order with nothing else to tell them apart.
+When two or more titles have no subtitles, their first eight minutes are read by OCR,
+a frame a second (Tesseract, as for Blu-ray subtitles), and the words are looked for
+among the season's episode names. Poster lettering comes back in fragments, so a name
+counts as read when enough of its letters are, in at least two frames, and it scores at
+least twice any other name; words read on every title are the series' own logo and
+credits and are left out first. A card read this way is used like a captioned one. On
+Danny Phantom it reads two or three cards in five; the rest are missed rather than
+guessed. For those, a contact sheet of each title's opening minutes is written to
+`cards/` in the job directory, a frame every ten seconds with its time, so a card can be
+read by eye and the title placed with `--assign`.
+
 A disc is matched against the episodes not yet filed: ones already on a TV destination
 (found by the `SxxEyy` in their names) are left out of the season first, and the disc
 number is then not used, since "disc 2" is simply the next one. A title whose subtitles

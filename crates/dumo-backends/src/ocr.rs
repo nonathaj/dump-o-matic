@@ -85,12 +85,57 @@ pub fn read_captions(captions: &[Caption]) -> Result<String> {
     Ok(out)
 }
 
+/// Recognise whatever words are scattered across each of a set of pictures, in order,
+/// the pictures spread across the machine's cores. For frames of video: a title card
+/// sets its words anywhere on the screen, among drawings.
+pub fn read_pictures(paths: &[std::path::PathBuf]) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !available() {
+        return Err(BackendError::NotInstalled { tool: TOOL });
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .min(paths.len())
+        .max(1);
+    let mut texts: Vec<Option<Result<String>>> = (0..paths.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|w| {
+                scope.spawn(move || {
+                    (w..paths.len())
+                        .step_by(workers)
+                        .map(|i| (i, recognise(&std::fs::read(&paths[i]).unwrap_or_default(), SPARSE)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for h in handles {
+            for (i, r) in h.join().unwrap_or_default() {
+                texts[i] = Some(r);
+            }
+        }
+    });
+    texts.into_iter().flatten().collect()
+}
+
+/// Page segmentation mode 6: one uniform block of text, which a stack of left-aligned
+/// captions is. The default tries to find columns and pictures.
+const BLOCK: &str = "6";
+
+/// Page segmentation mode 11: sparse text, as much as can be found, in no order.
+const SPARSE: &str = "11";
+
 /// One Tesseract run over one page, image in on stdin and text out on stdout.
 fn recognise_page(page: &[u8]) -> Result<String> {
+    recognise(page, BLOCK)
+}
+
+fn recognise(page: &[u8], psm: &str) -> Result<String> {
     let mut child = Command::new(TOOL)
-        // Page segmentation mode 6: one uniform block of text, which a stack of
-        // left-aligned captions is. The default tries to find columns and pictures.
-        .args(["stdin", "stdout", "-l", "eng", "--psm", "6"])
+        .args(["stdin", "stdout", "-l", "eng", "--psm", psm])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

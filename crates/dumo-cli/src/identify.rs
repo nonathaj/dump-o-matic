@@ -441,6 +441,66 @@ fn read_dialogue(path: &std::path::Path) -> Dialogue {
     )
 }
 
+/// Where the contact sheets of a job's titles are written, inside its job directory.
+const SHEETS_DIR: &str = "cards";
+
+/// Read the title cards of the `silent` titles — those with no subtitles to read —
+/// from their opening frames, and write a contact sheet of those minutes for each.
+///
+/// What OCR reads of a card is matched against the season's names later, by the
+/// matcher; words read on every title are the series' own and are left out first. That
+/// takes two titles or more: alone, a title's card cannot be told from its branding.
+fn read_cards_on_screen(
+    titles: &mut [dumo_identify::matching::DiscTitle],
+    silent: &[(usize, std::path::PathBuf)],
+    job_dir: &std::path::Path,
+) {
+    if silent.len() < 2 {
+        return;
+    }
+    if !dumo_backends::ocr::available() {
+        println!(
+            "  ({} title(s) have no subtitles; reading their title cards needs tesseract, \
+             which is not installed — e.g. `sudo apt install tesseract-ocr`)",
+            silent.len()
+        );
+        return;
+    }
+    println!("  No subtitles on {} title(s); reading their title cards from the picture:", silent.len());
+    let sheets = job_dir.join(SHEETS_DIR);
+    let mut texts: Vec<Vec<String>> = Vec::new();
+    for (i, path) in silent {
+        print!("    {} ... ", titles[*i].name);
+        std::io::stdout().flush().ok();
+        let text = dumo_backends::frames::opening_text(path).unwrap_or_default();
+        let sheet = sheets.join(
+            std::path::Path::new(&titles[*i].name)
+                .with_extension("png")
+                .file_name()
+                .unwrap_or_default(),
+        );
+        let sheet_made = std::fs::create_dir_all(&sheets).is_ok()
+            && dumo_backends::frames::contact_sheet(path, &sheet).is_ok();
+        println!(
+            "{} frames read{}",
+            text.len(),
+            if sheet_made { ", contact sheet written" } else { "" }
+        );
+        texts.push(text);
+    }
+    let recurring = dumo_identify::cards::recurring_words(&texts);
+    for ((i, _), text) in silent.iter().zip(&texts) {
+        if let Some(card) = dumo_identify::cards::from_picture(text, &recurring) {
+            titles[*i].cards.push(card);
+        }
+    }
+    println!(
+        "  Contact sheets of the opening {} minutes, to read a card the OCR could not: {}",
+        dumo_backends::frames::WINDOW_SECS / 60,
+        sheets.display()
+    );
+}
+
 /// The episodes of `season` already filed under `show_folder` (`Name (Year)`) on any
 /// destination that takes TV, found by the `SxxEyy` in their file names.
 ///
@@ -1346,6 +1406,7 @@ fn analyse_video(
     // exists to hold — a 14 minute fan retrospective is a listed special.
     let bonus = specials || dumo_identify::specials::is_bonus_label(&label);
     let mut titles: Vec<dumo_identify::matching::DiscTitle> = Vec::new();
+    let mut silent: Vec<(usize, std::path::PathBuf)> = Vec::new();
     for t in analysis
         .titles
         .iter()
@@ -1367,6 +1428,9 @@ fn analyse_video(
             Some(c) => println!(", {}", c.describe()),
             None => println!(),
         }
+        if dialogue.is_none() {
+            silent.push((titles.len(), path.clone()));
+        }
         titles.push(dumo_identify::matching::DiscTitle {
             name: t.name.trim_start_matches("raw/").to_string(),
             duration_secs: t.duration_secs,
@@ -1374,6 +1438,7 @@ fn analyse_video(
             cards,
         });
     }
+    read_cards_on_screen(&mut titles, &silent, job_dir);
     if titles.is_empty() {
         println!("  No main titles to match.");
         return Ok(());
@@ -2657,6 +2722,7 @@ fn solve_video_set(
         // they do not say the same words. Extras have no subtitle track and score on
         // runtime as before.
         let mut titles: Vec<DiscTitle> = Vec::new();
+        let mut silent: Vec<(usize, std::path::PathBuf)> = Vec::new();
         for t in analysis.main_titles() {
             let path = dir.join(&t.name);
             print!("  reading dialogue from {} ... ", t.name);
@@ -2674,6 +2740,9 @@ fn solve_video_set(
                 Some(c) => println!(", {}", c.describe()),
                 None => println!(),
             }
+            if dialogue.is_none() {
+                silent.push((titles.len(), path.clone()));
+            }
             titles.push(DiscTitle {
                 name: t.name.trim_start_matches("raw/").to_string(),
                 duration_secs: t.duration_secs,
@@ -2681,6 +2750,7 @@ fn solve_video_set(
                 cards,
             });
         }
+        read_cards_on_screen(&mut titles, &silent, &dir);
         if titles.is_empty() {
             continue;
         }

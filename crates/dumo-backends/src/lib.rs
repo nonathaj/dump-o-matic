@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod chdman;
 pub mod ffprobe;
+pub mod frames;
 pub mod id3;
 pub mod makemkv;
 pub mod mkvmerge;
