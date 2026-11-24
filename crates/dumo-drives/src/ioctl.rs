@@ -11,6 +11,7 @@ use std::os::unix::io::RawFd;
 const CDROM_DRIVE_STATUS: libc::c_ulong = 0x5326;
 const CDROM_DISC_STATUS: libc::c_ulong = 0x5327;
 const CDROMEJECT: libc::c_ulong = 0x5309;
+const CDROM_LOCKDOOR: libc::c_ulong = 0x5329;
 const CDROMREADTOCHDR: libc::c_ulong = 0x5305;
 const CDROMREADTOCENTRY: libc::c_ulong = 0x5306;
 
@@ -80,13 +81,20 @@ pub fn drive_status(fd: RawFd, path: &str) -> Result<TrayState> {
 }
 
 /// Open the tray. Opens nothing for writing and reads nothing from the disc.
+///
+/// The door is unlocked first: a drive left with removal prevented (as after a rip) refuses
+/// to eject. That refusal comes back as a positive SCSI status, not as -1, so any nonzero
+/// result is a failure here.
 pub fn eject(fd: RawFd, path: &str) -> Result<()> {
+    unsafe { libc::ioctl(fd, CDROM_LOCKDOOR, 0 as libc::c_ulong) };
     let rc = unsafe { libc::ioctl(fd, CDROMEJECT, 0 as libc::c_ulong) };
-    if rc < 0 {
-        return Err(DriveError::Io {
-            path: path.to_string(),
-            source: std::io::Error::last_os_error(),
-        });
+    if rc != 0 {
+        let source = if rc < 0 {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("the drive refused (status {rc})"))
+        };
+        return Err(DriveError::Io { path: path.to_string(), source });
     }
     Ok(())
 }

@@ -181,10 +181,21 @@ pub(crate) fn medium_is_readable(path: &str, medium: Option<String>) -> Result<(
     }
 }
 
-/// Open the tray of the drive at `path`.
+/// Open the tray of the drive at `path`, and check that it opened.
 pub fn eject(path: &str) -> Result<()> {
     let f = open_device(path)?;
-    ioctl::eject(f.as_raw_fd(), path)
+    ioctl::eject(f.as_raw_fd(), path)?;
+    // The drive takes a moment to move; do not report an eject that did not happen.
+    for _ in 0..10 {
+        if ioctl::drive_status(f.as_raw_fd(), path)? == dumo_core::TrayState::TrayOpen {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(DriveError::Io {
+        path: path.to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::Other, "the tray did not open"),
+    })
 }
 
 /// Current tray/media state for a drive.
