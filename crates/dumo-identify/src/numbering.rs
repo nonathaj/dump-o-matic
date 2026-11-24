@@ -21,24 +21,53 @@ const DOUBLE_RATIO: f64 = 1.8;
 /// `None` when no entry before the last is double length. Past that point nothing is
 /// shifted, so the numbers are TMDB's own and the caller needs no other reading.
 pub fn subtitle_numbers(entries: &[(u32, Option<u32>)]) -> Option<Vec<Vec<u32>>> {
+    subtitle_numbers_through(entries, usize::MAX)
+}
+
+/// How many entries before the last are double length: the most shifts the site's
+/// numbering can have made to any episode after them.
+pub fn double_count(entries: &[(u32, Option<u32>)]) -> usize {
+    let last = entries.len().saturating_sub(1);
+    doubles(entries).into_iter().filter(|&i| i < last).count()
+}
+
+/// Indexes of the double-length entries, a double being one at least [`DOUBLE_RATIO`]
+/// times the season's median running time.
+fn doubles(entries: &[(u32, Option<u32>)]) -> Vec<usize> {
     let mut known: Vec<u32> = entries.iter().filter_map(|e| e.1).filter(|&m| m > 0).collect();
     if known.is_empty() {
-        return None;
+        return Vec::new();
     }
     known.sort_unstable();
     let median = f64::from(known[known.len() / 2]);
-    let is_double = |e: &(u32, Option<u32>)| e.1.map(|m| f64::from(m) >= DOUBLE_RATIO * median).unwrap_or(false);
-    let last = entries.len().checked_sub(1)?;
-    if !entries.iter().take(last).any(is_double) {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.1.map(|m| f64::from(m) >= DOUBLE_RATIO * median).unwrap_or(false))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// As [`subtitle_numbers`], but only the first `taken` double-length entries are
+/// numbered as two: the site does not always split every one. Danny Phantom season 2
+/// lists "Reign Storm" and "The Ultimate Enemy" at 44 minutes each; OpenSubtitles splits
+/// the first and numbers the second as one, so the episodes after them sit one number
+/// higher, not two.
+pub fn subtitle_numbers_through(entries: &[(u32, Option<u32>)], taken: usize) -> Option<Vec<Vec<u32>>> {
+    // Past the last double nothing is shifted, so with none before the last entry the
+    // numbers are TMDB's own and the caller needs no other reading.
+    if double_count(entries) == 0 {
         return None;
     }
+    let split: Vec<usize> = doubles(entries).into_iter().take(taken).collect();
     let mut shift = 0;
     Some(
         entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let first = e.0 + shift;
-                if is_double(e) {
+                if split.contains(&i) {
                     shift += 1;
                     vec![first, first + 1]
                 } else {
@@ -80,6 +109,22 @@ mod tests {
         assert_eq!(subtitle_numbers(&season(&[22, 22, 22, 22])), None);
         assert_eq!(subtitle_numbers(&[(1, None), (2, None)]), None);
         assert_eq!(subtitle_numbers(&[]), None);
+    }
+
+    /// Danny Phantom season 2: "Reign Storm" (E04) and "The Ultimate Enemy" (E05) are both
+    /// 44 minutes in TMDB. The site splits the first only.
+    #[test]
+    fn only_the_first_doubles_can_be_taken_as_split() {
+        let s = season(&[22, 22, 22, 44, 44, 22, 22, 22]);
+        assert_eq!(double_count(&s), 2);
+        let all = subtitle_numbers(&s).unwrap();
+        assert_eq!(all[5], vec![8], "both split: two higher");
+        let one = subtitle_numbers_through(&s, 1).unwrap();
+        assert_eq!(one[3], vec![4, 5]);
+        assert_eq!(one[4], vec![6], "the second double is one episode there");
+        assert_eq!(one[5], vec![7], "so everything after is one higher");
+        let none = subtitle_numbers_through(&s, 0).unwrap();
+        assert_eq!(none[5], vec![6], "TMDB's own numbers");
     }
 
     /// A season of hour-long episodes has no doubles among them: the median is the

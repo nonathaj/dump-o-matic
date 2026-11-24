@@ -292,13 +292,14 @@ fn split_camel_case(word: &str) -> String {
 }
 
 /// A season glued into one token, with the part of it if one is given: `S05` is
-/// season 5, `S1P2` is season 1 part 2. Frieren's season 1 came as two box sets,
+/// season 5, `S1P2` is season 1 part 2, and `S2V2` is season 2 volume 2, a volume being
+/// a part by another name. Frieren's season 1 came as two box sets,
 /// `FRIEREN S1P1 D1` .. and `FRIEREN S1P2 D1` ...
 fn season_token(word: &str) -> Option<(u32, Option<u32>)> {
     let up = word.to_ascii_uppercase();
     let rest = up.strip_prefix('S')?;
     let digits = |x: &str| !x.is_empty() && x.chars().all(|c| c.is_ascii_digit());
-    match rest.split_once('P') {
+    match rest.split_once(['P', 'V']) {
         Some((season, part)) if digits(season) && digits(part) => {
             Some((season.parse().ok()?, Some(part.parse().ok()?)))
         }
@@ -1517,6 +1518,17 @@ mod tests {
         assert_eq!(part_number_from_label("SHOW_SEASON_2_PART_3_DISC_1"), Some(3));
         assert_eq!(part_number_from_label("FRIENDS_S05_DISC_3"), None);
         assert_eq!(part_number_from_label("SPIDER-MAN_D1"), None);
+    }
+
+    /// Danny Phantom's later discs are labelled `DP_S2V2_D1`: season 2, volume 2.
+    #[test]
+    fn a_volume_is_read_as_a_part_of_the_season() {
+        assert_eq!(season_number_from_label("DP_S2V2_D1"), Some(2));
+        assert_eq!(part_number_from_label("DP_S2V2_D1"), Some(2));
+        assert_eq!(disc_number_from_label("DP_S2V2_D1"), Some(1));
+        assert_eq!(season_number_from_label("DP_S2V2_D2"), Some(2));
+        // A word that merely contains a V is not a volume.
+        assert_eq!(season_number_from_label("SVEN_D1"), None);
     }
 
     #[test]

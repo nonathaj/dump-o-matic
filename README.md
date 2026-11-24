@@ -276,8 +276,15 @@ double length, which puts every later episode a number higher there (Friends sea
 one at E15, and every episode after it was placed one early). When the season has such an
 entry before its last, the references are also read by that shifted numbering, and the one
 that confirms more of the disc's titles is used; the preview says which. A season whose
-two-parter comes last is unaffected. Where the references disagree with TMDB in some other
-way, the names will be off, so read the proposal.
+two-parter comes last is unaffected. The site does not always split every double-length
+entry: Danny Phantom season 2 lists "Reign Storm" and "The Ultimate Enemy" at 44 minutes
+each, and the site splits only the first. So when a proposal's titles are contradicted by
+TMDB's numbering, the check tries the site's numbering with one double split, then two, and
+accepts the first that leaves no title contradicted, saying so. Where the references
+disagree with TMDB in some other way, the names will be off, so read the proposal.
+
+A label that says a volume (`DP_S2V2_D1`, season 2 volume 2) is read as a part of the
+season, as `S2P2` is.
 
 A library ripped with MakeMKV before this tool existed can be brought in without copying
 it. `import-rips <dir>` groups files named `Disc Label_tNN.mkv` by disc and makes each

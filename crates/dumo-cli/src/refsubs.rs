@@ -63,14 +63,37 @@ pub fn check(cfg: &Config, tv_id: u64, proposals: &[(&str, &TitleMatch)]) -> Res
         .map(|(s, e)| format!("S{s:02}E{e:02}"))
         .collect();
 
+    let titles: Vec<Phrases> = proposals
+        .iter()
+        .map(|(job_id, m)| title_phrases(cfg, job_id, &m.title_name))
+        .collect();
+    let verdicts: Vec<Verdict> = proposals
+        .iter()
+        .zip(&titles)
+        .map(|((_, m), title)| {
+            let key = (m.episode.season, m.episode.number);
+            let idx = episodes.iter().position(|e| *e == key).unwrap_or(0);
+            transcript::check(title, &references, idx)
+        })
+        .collect();
+    let (verdicts, note) = if verdicts.iter().any(|v| matches!(v, Verdict::Contradicted { .. })) {
+        match by_the_sites_numbering(cfg, tv_id, proposals, &titles) {
+            Some((v, note)) => (v, Some(note)),
+            None => (verdicts, None),
+        }
+    } else {
+        (verdicts, None)
+    };
+    if let Some(note) = note {
+        println!("  {note}");
+    }
+
     let mut confirmed = 0;
     let mut checked = 0;
     let mut contradicted = false;
-    for (job_id, m) in proposals {
+    for (((_, m), verdict), _) in proposals.iter().zip(&verdicts).zip(&titles) {
         let key = (m.episode.season, m.episode.number);
         let idx = episodes.iter().position(|e| *e == key).unwrap_or(0);
-        let title = title_phrases(cfg, job_id, &m.title_name);
-        let verdict = transcript::check(&title, &references, idx);
         match verdict {
             Verdict::Confirmed { .. } => {
                 confirmed += 1;
@@ -106,6 +129,65 @@ pub fn check(cfg: &Config, tv_id: u64, proposals: &[(&str, &TitleMatch)]) -> Res
             of: proposals.len(),
         }
     })
+}
+
+/// Verdicts for every proposal under the subtitle site's own numbering, when that
+/// numbering explains what TMDB's could not: `None` unless some numbering leaves no
+/// title contradicted and confirms at least one.
+///
+/// TMDB lists a two-part episode as one entry, and the site may number its halves as two,
+/// which puts every later episode one number higher there. Which of a season's doubles
+/// the site splits is not in TMDB's listing (Danny Phantom season 2 lists "Reign Storm"
+/// and "The Ultimate Enemy" alike, and the site splits only the first), so each count of
+/// splits is tried in turn, fewest first, and the first that leaves nothing contradicted
+/// is taken. Only tried when TMDB's own numbering contradicted a title, so a season that
+/// checks out costs no more downloads than before.
+fn by_the_sites_numbering(
+    cfg: &Config,
+    tv_id: u64,
+    proposals: &[(&str, &TitleMatch)],
+    titles: &[Phrases],
+) -> Option<(Vec<Verdict>, String)> {
+    let season = proposals.first()?.1.episode.season;
+    if proposals.iter().any(|(_, m)| m.episode.season != season) {
+        return None;
+    }
+    let tmdb = dumo_identify::tmdb::TmdbClient::from_config(&cfg.api).ok()?;
+    let listing = tmdb.season(tv_id, season).ok()?;
+    let entries: Vec<(u32, Option<u32>)> =
+        listing.episodes.iter().map(|e| (e.number, e.runtime_mins)).collect();
+    for taken in 1..=dumo_identify::numbering::double_count(&entries) {
+        let numbers = dumo_identify::numbering::subtitle_numbers_through(&entries, taken)?;
+        let mapped = references_mapped(cfg, tv_id, season, &numbers).ok()??;
+        let verdicts: Vec<Verdict> = proposals
+            .iter()
+            .zip(titles)
+            .map(|((_, m), title)| {
+                let idx = listing.episodes.iter().position(|e| e.number == m.episode.number);
+                idx.map(|i| transcript::check(title, &mapped.references, i))
+                    .unwrap_or(Verdict::Unchecked)
+            })
+            .collect();
+        let contradicted = verdicts.iter().any(|v| matches!(v, Verdict::Contradicted { .. }));
+        let confirmed = verdicts.iter().any(|v| matches!(v, Verdict::Confirmed { .. }));
+        if !contradicted && confirmed {
+            let split: Vec<String> = numbers
+                .iter()
+                .zip(&listing.episodes)
+                .filter(|(n, _)| n.len() == 2)
+                .map(|(_, e)| format!("E{:02}", e.number))
+                .collect();
+            return Some((
+                verdicts,
+                format!(
+                    "TMDB's numbering contradicts a title, but the subtitle site's does not: it \
+                     numbers {} as two episodes, which puts the episodes after it one higher there.",
+                    split.join(" and ")
+                ),
+            ));
+        }
+    }
+    None
 }
 
 /// References for `episodes`, `(season, number)` each, in the same order: cached, or
