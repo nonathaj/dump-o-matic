@@ -148,6 +148,14 @@ When a rip completes cleanly, `rip` (and `run`) open the tray so the next disc c
 A rip that failed, and a `--dry-run`, leave the disc where it is; `--no-eject` leaves it
 in after a clean rip too.
 
+For working through a box set, `dump-o-matic watch` waits for a disc, rips it as
+`rip --yes` would, opens the tray, and waits for the next, until stopped with Ctrl-C. A
+disc already in the drive when it starts is ripped. It only rips; identify and file the
+rips as usual. A disc whose rip failed stays in the drive and is not tried again until it
+is taken out and put back, so a bad disc cannot loop. Only one rip at a time may use a
+drive: a second `rip` of a drive already being ripped, by hand or by a watch, refuses to
+start.
+
 Dialogue comes from a title's text subtitle track where it has one — on a DVD,
 MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
 so when there is no text track, the first non-forced PGS track is decoded and read with

@@ -67,6 +67,9 @@ pub fn run(mut args: RipArgs) -> Result<Option<String>> {
     args.device = Some(device.clone());
     let (eject, dry_run, config_file) = (args.eject, args.dry_run, args.config_file.clone());
 
+    // Held until the disc is out: two rips of one drive would fight over it, and a
+    // `watch` must not start on a disc that a `rip` typed by hand is already reading.
+    let _lock = lock_drive(&Config::load(config_file.as_deref())?, &device)?;
     let job_id = rip_disc(args)?;
 
     if let (true, false, Some(id)) = (eject, dry_run, job_id.as_ref()) {
@@ -82,6 +85,29 @@ pub fn run(mut args: RipArgs) -> Result<Option<String>> {
         }
     }
     Ok(job_id)
+}
+
+/// Claim a drive for one rip, or refuse if another process has it.
+///
+/// An advisory lock on a file in the staging root, named for the drive; the kernel lets
+/// go of it when the holder exits, however it exits, so a crash leaves nothing stale.
+fn lock_drive(cfg: &Config, device: &str) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let name = Path::new(device)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "drive".into());
+    let path = cfg.staging.root.join(format!(".rip-{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("another rip is already using {device}");
+    }
+    Ok(file)
 }
 
 fn rip_disc(args: RipArgs) -> Result<Option<String>> {

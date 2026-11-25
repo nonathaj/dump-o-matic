@@ -198,6 +198,16 @@ pub fn eject(path: &str) -> Result<()> {
     })
 }
 
+/// What the drive says about its tray, without reading the disc.
+///
+/// Cheap enough to ask every second or two: unlike [`open_drive_status`], it does not
+/// open the medium, so a disc that is still spinning up is reported as not ready rather
+/// than waited for.
+pub fn tray_state(path: &str) -> Result<dumo_core::TrayState> {
+    let f = open_device(path)?;
+    ioctl::drive_status(f.as_raw_fd(), path)
+}
+
 /// Current tray/media state for a drive.
 pub fn open_drive_status(drive: &Drive) -> Result<DriveStatus> {
     let f = open_device(&drive.path)?;

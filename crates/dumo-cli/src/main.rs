@@ -23,6 +23,7 @@ mod rip;
 mod run;
 mod split;
 mod verify;
+mod watch;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -197,6 +198,25 @@ enum Command {
         /// that failed always leaves the disc where it is.
         #[arg(long)]
         no_eject: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Rip every disc put into a drive, one after another, until stopped.
+    ///
+    /// Waits for a disc, rips it as `rip --yes` would, opens the tray, and waits for
+    /// the next. It only rips: identify and file the rips as usual. A disc whose rip
+    /// failed is left in the drive and not tried again until it is taken out and put
+    /// back. A disc already in the drive when the watch starts is ripped. Ctrl-C stops.
+    Watch {
+        /// Device to watch. Defaults to the first drive found.
+        device: Option<String>,
+        /// Ignore titles shorter than this many seconds.
+        #[arg(long, default_value_t = 300)]
+        min_length: u32,
+        /// Rip a "play all" title too, instead of skipping it as redundant.
+        #[arg(long)]
+        keep_play_all: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -559,6 +579,9 @@ fn main() -> Result<()> {
                 eject: !no_eject,
                 config_file: config,
             })
+        }
+        Command::Watch { device, min_length, keep_play_all, config } => {
+            watch::run(watch::WatchArgs { device, min_length, keep_play_all, config_file: config })
         }
         Command::Rip {
             device,

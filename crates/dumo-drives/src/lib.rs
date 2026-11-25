@@ -1,8 +1,8 @@
 //! Optical drive detection and **read-only** disc probing.
 //!
 //! Everything in this crate is non-destructive: it opens devices read-only, and issues
-//! only informational SCSI/MMC commands and reads. Nothing here writes to a disc, ejects
-//! a tray, or modifies the filesystem.
+//! only informational SCSI/MMC commands and reads. Nothing here writes to a disc or
+//! modifies the filesystem; the one thing it moves is the tray, in [`eject`].
 //!
 //! Platform support is currently Linux-only; the public API is platform-neutral so other
 //! backends can be added without changing callers.
@@ -15,7 +15,7 @@ mod mmc;
 mod probe;
 mod udf;
 
-pub use device::{eject, enumerate_drives, open_drive_status, read_drive};
+pub use device::{eject, enumerate_drives, open_drive_status, read_drive, tray_state};
 pub use probe::probe_disc;
 
 /// Errors from drive access and probing.
