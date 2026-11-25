@@ -310,6 +310,15 @@ enum Command {
         /// that each hold one half of the episode's dialogue are filed as `- pt1`/`- pt2`.
         #[arg(long)]
         by_reference: bool,
+        /// File episodes placed by hand although the reference subtitles contradict them.
+        ///
+        /// For a disc whose every title you have named with --assign, from its title
+        /// cards or by watching it, where the subtitle site numbers or orders the season
+        /// differently from TMDB, so its references disagree with names that are right.
+        /// Refused unless every title has an --assign. The job records that the check was
+        /// overridden.
+        #[arg(long)]
+        skip_reference_check: bool,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -587,6 +596,7 @@ fn main() -> Result<()> {
             extras,
             drop_tracks,
             by_reference,
+            skip_reference_check,
             config,
         } => {
             identify::run(identify::IdentifyArgs {
@@ -606,6 +616,7 @@ fn main() -> Result<()> {
                 extras,
                 drop_tracks,
                 by_reference,
+                skip_reference_check,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {

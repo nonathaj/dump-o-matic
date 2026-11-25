@@ -286,6 +286,13 @@ disagree with TMDB in some other way, the names will be off, so read the proposa
 A label that says a volume (`DP_S2V2_D1`, season 2 volume 2) is read as a part of the
 season, as `S2P2` is.
 
+Sometimes the site orders a season differently from TMDB, not just shifted (Danny Phantom
+season 2's episodes 12 to 15), and the check then contradicts names that are right.
+`--skip-reference-check` files such a disc anyway. It is refused unless every title has an
+`--assign`, so it can only confirm what you placed by hand, from a title card or by
+watching; it says so in the output, and the job records that the check was overridden.
+`run` never sets it.
+
 A library ripped with MakeMKV before this tool existed can be brought in without copying
 it. `import-rips <dir>` groups files named `Disc Label_tNN.mkv` by disc and makes each
 disc a job, hard-linking the files in (they must be on the staging filesystem) and hashing

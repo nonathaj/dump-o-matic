@@ -52,6 +52,8 @@ pub struct IdentifyArgs {
     /// Place each title by reference subtitles alone, choosing freely among the
     /// season's episodes.
     pub by_reference: bool,
+    /// File hand-assigned episodes though the reference subtitles contradict them.
+    pub skip_reference_check: bool,
 }
 
 /// What the operator has said about a film disc beyond its name.
@@ -70,6 +72,9 @@ pub struct MovieOptions {
     /// Languages to keep on top of the configured ones, for a film or series whose
     /// original language is not among them.
     pub keep_languages: Vec<String>,
+    /// Not a film option either: a contradiction by the reference subtitles does not stop
+    /// a series disc whose every title was placed by hand with `--assign`.
+    pub skip_reference_check: bool,
 }
 
 /// Tracks to leave out of one title, named by hand with `--drop-track`.
@@ -105,6 +110,12 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     if !args.keep_languages.is_empty() && (args.set || args.by_reference) {
         bail!("--keep-language is for a film or a single disc; it cannot be combined with --set or --by-reference");
+    }
+    if args.skip_reference_check && (args.set || args.by_reference || args.assign.is_empty()) {
+        bail!(
+            "--skip-reference-check is for a single series disc whose titles you placed by hand: \
+             give every title a --assign, and do not combine it with --set or --by-reference"
+        );
     }
     if !drop_tracks.is_empty() && (args.set || args.by_reference || args.specials || !args.assign.is_empty()) {
         bail!("--drop-track is for a film disc; it cannot be combined with --set, --by-reference, --specials or --assign");
@@ -182,6 +193,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         by_reference: args.by_reference,
         own_show: args.as_show.clone(),
         keep_languages: args.keep_languages.iter().map(|l| l.trim().to_ascii_lowercase()).collect(),
+        skip_reference_check: args.skip_reference_check,
     };
     for dir in dirs {
         identify_job(
@@ -1640,7 +1652,30 @@ fn analyse_video(
     }
     println!();
     let proposals: Vec<_> = best.matches.iter().map(|m| (job.id.as_str(), m)).collect();
-    if !crate::refsubs::permits_filing(crate::refsubs::check(cfg, candidate.id, &proposals)?) {
+    let outcome = crate::refsubs::check(cfg, candidate.id, &proposals)?;
+    let mut overridden = false;
+    if movie.skip_reference_check && outcome == crate::refsubs::Outcome::Contradicted {
+        // Only for a proposal every title of which was named by hand: the operator has
+        // read each title's card or watched it, and says the reference is what is wrong.
+        let by_hand: std::collections::HashSet<&str> = assign
+            .iter()
+            .filter_map(|a| a.split_once('=').map(|(t, _)| t.trim().trim_start_matches("raw/")))
+            .collect();
+        if let Some(m) = best.matches.iter().find(|m| !by_hand.contains(m.title_name.as_str())) {
+            anyhow::bail!(
+                "--skip-reference-check needs every title placed by hand, and {} was not; \
+                 give it an --assign, or leave the check on",
+                m.title_name
+            );
+        }
+        println!();
+        println!(
+            "  FILING AGAINST THE REFERENCE CHECK: every title above was placed by hand with \
+             --assign, and --skip-reference-check says the reference subtitles are what \
+             disagree. The job records it."
+        );
+        overridden = true;
+    } else if !crate::refsubs::permits_filing(outcome) {
         return Ok(());
     }
     println!();
@@ -1668,6 +1703,11 @@ fn analyse_video(
                 format!("inference (runtime + dialogue, single disc; {by_hand} assigned by hand)")
             } else {
                 "inference (runtime + dialogue, single disc)".to_string()
+            };
+            let how = if overridden {
+                format!("{how}; filed against the reference subtitles' check (--skip-reference-check)")
+            } else {
+                how
             };
             match movie.own_show {
                 Some(_) => format!("{how}; filed as a show of its own, listed by TMDB under {}", candidate.name),
