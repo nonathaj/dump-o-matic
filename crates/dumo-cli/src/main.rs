@@ -227,6 +227,16 @@ enum Command {
         /// `--id "Bones=1911"`, the name exactly as it is in the library. Repeatable.
         #[arg(long = "id", value_name = "NAME=ID")]
         ids: Vec<String>,
+        /// Only this name, exactly as it is in the library. Repeatable.
+        #[arg(long, value_name = "NAME")]
+        only: Vec<String>,
+        /// Only the first this many names that can be tagged, to check a batch at a time.
+        #[arg(long, value_name = "N")]
+        batch: Option<usize>,
+        /// Without --apply, write the renames listed to this file; with it, make the
+        /// renames in the file as written there, without looking anything up again.
+        #[arg(long, value_name = "FILE")]
+        plan: Option<PathBuf>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -617,8 +627,8 @@ fn main() -> Result<()> {
                 config_file: config,
             })
         }
-        Command::TagLibrary { apply, shows, movies, ids, config } => {
-            tag::run(tag::TagArgs { apply, shows, movies, ids, config_file: config })
+        Command::TagLibrary { apply, shows, movies, ids, only, batch, plan, config } => {
+            tag::run(tag::TagArgs { apply, shows, movies, ids, only, batch, plan, config_file: config })
         }
         Command::Watch { device, min_length, keep_play_all, config } => {
             watch::run(watch::WatchArgs { device, min_length, keep_play_all, config_file: config })

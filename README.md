@@ -371,6 +371,18 @@ given; renaming moves a film's own file and subtitles with it, never overwrites,
 updates the job manifests that record the renamed files so `verify` and `clean` still find
 them.
 
+A large library is better checked a batch at a time. `--batch 25` lists only the first 25
+names that can be tagged, each with its TMDB page, and `--plan FILE` writes them to a file;
+`--apply --plan FILE` then makes exactly the renames in it, without looking anything up
+again, so what was reviewed is what changes. `--only NAME` limits it to one name.
+
+```sh
+dump-o-matic tag-library --shows --batch 25 --plan shows-01.tsv   # review the list
+dump-o-matic tag-library --apply --plan shows-01.tsv               # rename those 25
+```
+
+Each batch tagged drops out of the next run, so the next `--batch 25` lists the next 25.
+
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover
 a whole disc, so the two can never be compared — but every block copied is checked against

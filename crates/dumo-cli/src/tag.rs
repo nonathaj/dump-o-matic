@@ -28,6 +28,13 @@ pub struct TagArgs {
     pub movies: bool,
     /// `NAME=ID`: the TMDB entry a name is, settled by hand.
     pub ids: Vec<String>,
+    /// Only these names, exactly as they are in the library.
+    pub only: Vec<String>,
+    /// Only the first this many names that can be tagged.
+    pub batch: Option<usize>,
+    /// Without `apply`, where to write the renames listed; with it, the renames to make,
+    /// as an earlier run wrote them, without looking anything up again.
+    pub plan: Option<PathBuf>,
     pub config_file: Option<PathBuf>,
 }
 
@@ -41,6 +48,13 @@ struct Rename {
     old: String,
     new: String,
     is_dir: bool,
+    id: u64,
+}
+
+/// The TMDB page of a show or film, to check a rename against.
+fn tmdb_url(category: &str, id: u64) -> String {
+    let kind = if category == "tv" { "tv" } else { "movie" };
+    format!("https://www.themoviedb.org/{kind}/{id}")
 }
 
 enum Verdict {
@@ -67,23 +81,42 @@ pub fn run(args: TagArgs) -> Result<()> {
         (false, true) => vec!["movies"],
         _ => vec!["tv", "movies"],
     };
+    let root_of = |category: &str| {
+        cfg.destinations
+            .iter()
+            .find(|d| d.accepts(category) && !d.media.is_empty())
+            .map(|d| d.root.clone())
+    };
+
+    if let (true, Some(plan)) = (args.apply, &args.plan) {
+        let renames = read_plan(plan, |c| root_of(c))?;
+        println!("{} rename(s) in {}:", renames.len(), plan.display());
+        for r in &renames {
+            // An empty library is a share that is not mounted.
+            list(&r.root)?;
+            println!("  {}\n    -> {}", r.old, r.new);
+        }
+        return apply(&cfg, &renames);
+    }
 
     let mut renames: Vec<Rename> = Vec::new();
     let mut unsure = 0usize;
+    let mut more = 0usize;
     for category in categories {
-        let Some(dest) = cfg.destinations.iter().find(|d| d.accepts(category) && !d.media.is_empty()) else {
+        let Some(root) = root_of(category) else {
             println!("No destination is set aside for {category}; skipping it.");
             continue;
         };
-        let root = dest.root.clone();
         let entries = list(&root)?;
         let tagged = entries.iter().filter(|(n, _)| plexname::tmdb_id(n).is_some()).count();
         println!();
         println!("{} ({}): {} name(s), {tagged} already tagged", root.display(), category, entries.len());
         let untagged: Vec<&(String, bool)> =
             entries.iter().filter(|(n, _)| plexname::tmdb_id(n).is_none()).collect();
-        let mut judged: Vec<(&str, bool, std::result::Result<String, String>, String)> = Vec::new();
+        let mut judged: Vec<(&str, bool, std::result::Result<(String, u64), String>, String)> = Vec::new();
         for (i, (name, is_dir)) in untagged.iter().enumerate() {
+            // Every name is looked up even with --only, so that two names becoming one
+            // are still found.
             eprint!("\r  looking up {} of {} ...", i + 1, untagged.len());
             let entry = plexname::parse(name, !is_dir);
             let given = ids.get(name.as_str()).copied();
@@ -93,7 +126,7 @@ pub fn run(args: TagArgs) -> Result<()> {
             }
             .with_context(|| format!("looking up {name:?}"))?;
             judged.push(match verdict {
-                Verdict::Tag { year, id, why } => (name, *is_dir, Ok(entry.tagged(year, id)), why),
+                Verdict::Tag { year, id, why } => (name, *is_dir, Ok((entry.tagged(year, id), id)), why),
                 Verdict::Unsure(why) => (name, *is_dir, Err(why), String::new()),
             });
         }
@@ -102,14 +135,21 @@ pub fn run(args: TagArgs) -> Result<()> {
         // same show or film kept twice: that is for a person to merge, not a rename.
         let clashes = clashing(&entries, &judged);
         for (name, is_dir, outcome, why) in judged {
+            if !args.only.is_empty() && !args.only.iter().any(|o| o == name) {
+                continue;
+            }
             match outcome {
-                Ok(new) if clashes.contains_key(&new) => {
+                Ok((new, _)) if clashes.contains_key(&new) => {
                     unsure += 1;
                     println!("  ??   {name}: is {new}, as {} also is; merge them by hand", clashes[&new]);
                 }
-                Ok(new) => {
-                    println!("  tag  {name}\n       -> {new}   ({why})");
-                    renames.push(Rename { category, root: root.clone(), old: name.to_string(), new, is_dir });
+                Ok(_) if args.batch.map(|n| renames.len() >= n).unwrap_or(false) => more += 1,
+                Ok((new, id)) => {
+                    println!(
+                        "  tag  {name}\n       -> {new}\n       {}   ({why})",
+                        tmdb_url(category, id)
+                    );
+                    renames.push(Rename { category, root: root.clone(), old: name.to_string(), new, is_dir, id });
                 }
                 Err(why) => {
                     unsure += 1;
@@ -123,23 +163,42 @@ pub fn run(args: TagArgs) -> Result<()> {
             println!("note: --id names {id_name:?}, which is not an untagged name in the library");
         }
     }
+    for o in &args.only {
+        if !renames.iter().any(|r| &r.old == o) {
+            println!("note: --only names {o:?}, which is not listed to be tagged");
+        }
+    }
 
     println!();
     println!(
         "{} name(s) to tag; {unsure} left as they are, for --id \"NAME=ID\" to settle.",
         renames.len()
     );
+    if more > 0 {
+        println!("{more} more can be tagged, after this batch.");
+    }
     if renames.is_empty() {
         return Ok(());
     }
     if !args.apply {
-        println!("Nothing was renamed. Re-run with --apply to rename them.");
+        match &args.plan {
+            Some(plan) => {
+                write_plan(plan, &renames)?;
+                println!("Nothing was renamed. These renames are in {}; make them with", plan.display());
+                println!("  dump-o-matic tag-library --apply --plan {}", plan.display());
+            }
+            None => println!("Nothing was renamed. Re-run with --apply to rename them."),
+        }
         return Ok(());
     }
+    apply(&cfg, &renames)
+}
 
+/// Make the renames, in the library and in staging, and update the job manifests.
+fn apply(cfg: &Config, renames: &[Rename]) -> Result<()> {
     println!();
     let mut done: Vec<&Rename> = Vec::new();
-    for r in &renames {
+    for r in renames {
         match rename_entry(&r.root, &r.old, &r.new, r.is_dir) {
             Ok(()) => done.push(r),
             Err(e) => println!("  not renamed: {}: {e:#}", r.old),
@@ -154,13 +213,61 @@ pub fn run(args: TagArgs) -> Result<()> {
             }
         }
     }
-    let jobs = retarget_jobs(&cfg, &done)?;
+    let jobs = retarget_jobs(cfg, &done)?;
     println!(
         "Renamed {} of {}; {jobs} job manifest(s) updated to the new names.",
         done.len(),
         renames.len()
     );
     Ok(())
+}
+
+const PLAN_HEADER: &str = "# dump-o-matic tag-library plan: category, dir or file, TMDB ID, old name, new name";
+
+/// Write renames one to a line, tab-separated, for `--apply --plan` to make as listed.
+fn write_plan(path: &Path, renames: &[Rename]) -> Result<()> {
+    let mut s = format!("{PLAN_HEADER}\n");
+    for r in renames {
+        if [&r.old, &r.new].iter().any(|n| n.contains(['\t', '\n'])) {
+            bail!("{:?} has a tab or line break in it, which a plan cannot hold", r.old);
+        }
+        let kind = if r.is_dir { "dir" } else { "file" };
+        s.push_str(&format!("{}\t{kind}\t{}\t{}\t{}\n", r.category, r.id, r.old, r.new));
+    }
+    std::fs::write(path, s).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Read a plan `write_plan` wrote, finding each category's library with `root_of`.
+fn read_plan(path: &Path, root_of: impl Fn(&str) -> Option<PathBuf>) -> Result<Vec<Rename>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut renames = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let bad = || anyhow::anyhow!("{} line {}: not a tag-library plan line", path.display(), n + 1);
+        let f: Vec<&str> = line.split('\t').collect();
+        let [category, kind, id, old, new] = f.as_slice() else {
+            return Err(bad());
+        };
+        let category: &'static str = match *category {
+            "tv" => "tv",
+            "movies" => "movies",
+            _ => return Err(bad()),
+        };
+        let is_dir = match *kind {
+            "dir" => true,
+            "file" => false,
+            _ => return Err(bad()),
+        };
+        let id: u64 = id.parse().map_err(|_| bad())?;
+        if plexname::tmdb_id(new) != Some(id) || plexname::tmdb_id(old).is_some() {
+            return Err(bad());
+        }
+        let root = root_of(category).with_context(|| format!("no destination is set aside for {category}"))?;
+        renames.push(Rename { category, root, old: old.to_string(), new: new.to_string(), is_dir, id });
+    }
+    Ok(renames)
 }
 
 /// The names at the top of a library, in order, but not hidden ones or `_held` folders.
@@ -182,11 +289,11 @@ fn list(root: &Path) -> Result<Vec<(String, bool)>> {
 /// with what else is, or would be, that name.
 fn clashing(
     entries: &[(String, bool)],
-    judged: &[(&str, bool, std::result::Result<String, String>, String)],
+    judged: &[(&str, bool, std::result::Result<(String, u64), String>, String)],
 ) -> HashMap<String, String> {
     let mut by_new: HashMap<&str, Vec<&str>> = HashMap::new();
     for (old, _, outcome, _) in judged {
-        if let Ok(new) = outcome {
+        if let Ok((new, _)) = outcome {
             by_new.entry(new.as_str()).or_default().push(old);
         }
     }
@@ -569,7 +676,34 @@ mod tests {
     use super::*;
 
     fn rename(category: &'static str, old: &str, new: &str, is_dir: bool) -> Rename {
-        Rename { category, root: PathBuf::new(), old: old.into(), new: new.into(), is_dir }
+        let id = plexname::tmdb_id(new).unwrap_or(0);
+        Rename { category, root: PathBuf::new(), old: old.into(), new: new.into(), is_dir, id }
+    }
+
+    /// A batch reviewed in a dry run is the batch applied, name for name.
+    #[test]
+    fn a_plan_reads_back_as_written() {
+        let path = std::env::temp_dir().join(format!("dumo-plan-{}.tsv", std::process::id()));
+        let renames = vec![
+            rename("tv", "Robot Chicken (2005)", "Robot Chicken (2005) {tmdb-709}", true),
+            rename("movies", "300.mkv", "300 (2007) {tmdb-1271}.mkv", false),
+        ];
+        write_plan(&path, &renames).unwrap();
+        let back = read_plan(&path, |c| Some(PathBuf::from(format!("/lib/{c}")))).unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!(
+            (back[0].category, back[0].old.as_str(), back[0].new.as_str(), back[0].is_dir, back[0].id),
+            ("tv", "Robot Chicken (2005)", "Robot Chicken (2005) {tmdb-709}", true, 709)
+        );
+        assert_eq!(back[1].root, PathBuf::from("/lib/movies"));
+        assert!(!back[1].is_dir);
+
+        // A new name whose tag disagrees with the ID is not a plan this wrote.
+        std::fs::write(&path, "tv\tdir\t1\tBones\tBones (2005) {tmdb-1911}\n").unwrap();
+        assert!(read_plan(&path, |_| Some(PathBuf::new())).is_err());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(tmdb_url("tv", 709), "https://www.themoviedb.org/tv/709");
+        assert_eq!(tmdb_url("movies", 1271), "https://www.themoviedb.org/movie/1271");
     }
 
     /// Series that share a title, told apart by how long their episodes run.
@@ -601,10 +735,10 @@ mod tests {
             ("Bones".to_string(), true),
         ];
         let judged = vec![
-            ("Friends", true, Ok("Friends (1994) {tmdb-1668}".to_string()), String::new()),
-            ("Friends (1994)", true, Ok("Friends (1994) {tmdb-1668}".to_string()), String::new()),
-            ("Carnivale", true, Ok("Carnivale (2003) {tmdb-185}".to_string()), String::new()),
-            ("Bones", true, Ok("Bones (2005) {tmdb-1911}".to_string()), String::new()),
+            ("Friends", true, Ok(("Friends (1994) {tmdb-1668}".to_string(), 1668)), String::new()),
+            ("Friends (1994)", true, Ok(("Friends (1994) {tmdb-1668}".to_string(), 1668)), String::new()),
+            ("Carnivale", true, Ok(("Carnivale (2003) {tmdb-185}".to_string(), 185)), String::new()),
+            ("Bones", true, Ok(("Bones (2005) {tmdb-1911}".to_string(), 1911)), String::new()),
         ];
         let c = clashing(&entries, &judged);
         assert!(c.contains_key("Friends (1994) {tmdb-1668}"));
