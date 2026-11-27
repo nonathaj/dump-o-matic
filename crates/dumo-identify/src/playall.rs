@@ -87,10 +87,13 @@ pub fn find(spans: &[Span]) -> Option<Found> {
     if others.iter().any(|&i| spans[i].secs >= longest.secs) {
         return None;
     }
+    // A title without chapter marks plays as one chapter of a play-all: Robot Chicken
+    // S1 disc 1's is 6769 s and 10 chapters, against 6769 s for its ten chapterless
+    // episodes.
     let total = |members: &[usize]| -> (u64, u32) {
         members
             .iter()
-            .fold((0, 0), |(s, c), &i| (s + spans[i].secs, c + spans[i].chapters))
+            .fold((0, 0), |(s, c), &i| (s + spans[i].secs, c + spans[i].chapters.max(1)))
     };
 
     let (all_secs, _) = total(&others);
@@ -296,6 +299,31 @@ mod tests {
             .enumerate()
             .map(|(i, &(secs, chapters))| t(i as u32, secs, chapters))
             .collect();
+        assert_eq!(detect(&titles), None);
+    }
+
+    #[test]
+    fn a_play_all_of_chapterless_episodes_has_a_chapter_for_each() {
+        // Robot Chicken Season 1 disc 1, as scanned: ten episodes without chapters, the
+        // play-all, extras.
+        let d = [
+            (699, 0), (701, 0), (679, 0), (664, 0), (697, 0), (698, 0), (665, 0), (655, 0),
+            (640, 0), (671, 0), (6769, 10), (1085, 11), (312, 0), (1144, 19), (838, 7),
+            (303, 0),
+        ];
+        let titles: Vec<TitleInfo> = d
+            .iter()
+            .enumerate()
+            .map(|(i, &(secs, chapters))| t(i as u32, secs, chapters))
+            .collect();
+        let found = detect(&titles).expect("play-all not detected");
+        assert_eq!(found.index, 10);
+        assert_eq!((found.first, found.last), (0, 9));
+        // Chapters that do not go one to an episode are still no play-all. (Not 20: the
+        // third to tenth episodes and the two extras after them add up to 6766 s and,
+        // by chance, 20 chapters.)
+        let mut titles = titles;
+        titles[10].chapters = 25;
         assert_eq!(detect(&titles), None);
     }
 

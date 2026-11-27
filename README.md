@@ -301,6 +301,14 @@ season 2's episodes 12 to 15), and the check then contradicts names that are rig
 watching; it says so in the output, and the job records that the check was overridden.
 `run` never sets it.
 
+A title shorter than 15 minutes is taken for an extra, which sets aside every episode of a
+series whose episodes are shorter: Robot Chicken's run 11 minutes. `identify --min-length
+600` counts titles of 10 minutes or more as content, so they are matched and checked like
+any others. Such episodes are often authored without chapters while the disc's extras have
+them, so where the chapterless titles are a run of one length and the chaptered ones are
+not, the chaptered ones are the extras. A play-all of chapterless episodes has one chapter
+for each, and is set aside as any other play-all is.
+
 A library ripped with MakeMKV before this tool existed can be brought in without copying
 it. `import-rips <dir>` groups files named `Disc Label_tNN.mkv` by disc and makes each
 disc a job, hard-linking the files in (they must be on the staging filesystem) and hashing

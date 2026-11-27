@@ -339,6 +339,14 @@ enum Command {
         /// overridden.
         #[arg(long)]
         skip_reference_check: bool,
+        /// Count titles this many seconds or longer as episodes or films, not extras.
+        /// Default: 900 (15 minutes).
+        ///
+        /// For a series whose episodes are shorter than that: Robot Chicken's run 11
+        /// minutes, and at the default every one is set aside as an extra, unchecked.
+        /// `--min-length 600` brings them into the matching and the reference check.
+        #[arg(long, value_name = "SECONDS")]
+        min_length: Option<u32>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -620,6 +628,7 @@ fn main() -> Result<()> {
             drop_tracks,
             by_reference,
             skip_reference_check,
+            min_length,
             config,
         } => {
             identify::run(identify::IdentifyArgs {
@@ -640,6 +649,7 @@ fn main() -> Result<()> {
                 drop_tracks,
                 by_reference,
                 skip_reference_check,
+                min_length,
             })
         }
         Command::Adopt { path, dry_run, yes, config } => {

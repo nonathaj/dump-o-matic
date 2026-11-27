@@ -176,6 +176,18 @@ fn median(mut v: Vec<f64>) -> f64 {
     }
 }
 
+/// How far apart the longest and shortest of some durations are, as a fraction of the
+/// longest.
+fn spread_of(durations: &[f64]) -> f64 {
+    let lo = durations.iter().cloned().fold(f64::MAX, f64::min);
+    let hi = durations.iter().cloned().fold(0.0_f64, f64::max);
+    if hi > 0.0 {
+        (hi - lo) / hi
+    } else {
+        0.0
+    }
+}
+
 /// Work out what a disc contains from its titles' durations and chapter layout.
 pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     let mut analysed: Vec<AnalysedTitle> = Vec::new();
@@ -227,10 +239,36 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     let chaptering_is_meaningful = long_enough.iter().any(|t| t.chapters > 0)
         && long_enough.iter().any(|t| t.chapters == 0);
 
+    // The split usually runs the other way round on a disc authored without chapters in
+    // its episodes. Robot Chicken S1 disc 1 has ten 11 min episodes with none, beside
+    // 14–19 min extras with 7 to 19. The chapterless side is the episodes when it
+    // looks like a set of them and the chaptered side looks like nothing in particular:
+    // at least three titles of one length, more of them than chaptered ones, against
+    // chaptered titles of mixed lengths with no film among them.
+    let chapterless_are_episodes = chaptering_is_meaningful && {
+        let (bare, marked): (Vec<f64>, Vec<f64>) = {
+            let bare = long_enough.iter().filter(|t| t.chapters == 0);
+            let marked = long_enough.iter().filter(|t| t.chapters > 0);
+            (
+                bare.map(|t| t.duration_secs).collect(),
+                marked.map(|t| t.duration_secs).collect(),
+            )
+        };
+        let one_length = |v: &[f64]| v.len() > 1 && spread_of(v) <= params.episode_tolerance;
+        bare.len() >= 3
+            && bare.len() > marked.len()
+            && one_length(&bare)
+            && !one_length(&marked)
+            && marked.iter().all(|&d| d < params.feature_secs)
+    };
+
     let is_content = |t: &TitleInput| -> bool {
-        t.duration_secs >= params.min_main_secs
-            && !(chaptering_is_meaningful && t.chapters == 0)
-            && !is_play_all(t)
+        let authored_as_extra = if chapterless_are_episodes {
+            t.chapters > 0
+        } else {
+            chaptering_is_meaningful && t.chapters == 0
+        };
+        t.duration_secs >= params.min_main_secs && !authored_as_extra && !is_play_all(t)
     };
 
     let mains: Vec<&TitleInput> = titles.iter().filter(|t| is_content(t)).collect();
@@ -247,7 +285,7 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
     // that blind spot.
     let lo = main_durations.iter().cloned().fold(f64::MAX, f64::min);
     let hi = main_durations.iter().cloned().fold(0.0_f64, f64::max);
-    let spread = if hi > 0.0 { (hi - lo) / hi } else { 0.0 };
+    let spread = spread_of(&main_durations);
     let uniform = mains.len() > 1 && spread <= params.episode_tolerance;
 
     // The same film more than once: a DVD with widescreen and full-screen versions, or
@@ -335,6 +373,13 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
                 ratio(t),
                 ratio(k)
             )
+        } else if is_extra && !short && chapterless_are_episodes {
+            format!(
+                "{:.0} min with {} chapter(s), where the run of same-length titles here \
+                 has none — authored as an extra",
+                t.duration_secs / 60.0,
+                t.chapters
+            )
         } else if is_extra && !short {
             format!(
                 "{:.0} min but no chapters, where other titles here have them — \
@@ -382,6 +427,13 @@ pub fn analyse(titles: &[TitleInput], params: AnalysisParams) -> DiscAnalysis {
             titles[p.position].name,
             p.members.len()
         ));
+    }
+    if chapterless_are_episodes {
+        evidence.push(
+            "the titles without chapters are a run of one length and those with them are \
+             not, so the chaptered ones are taken for extras"
+                .to_string(),
+        );
     }
 
     match shape {
@@ -722,5 +774,84 @@ mod tests {
         let titles = vec![t("a.mkv", 52.0, 4), t("b.mkv", 51.0, 4)];
         let a = analyse(&titles, AnalysisParams::default());
         assert_eq!(a.main_titles().count(), 2);
+    }
+
+    /// Robot Chicken Season 1 disc 1, as ripped, read with a 10 minute content threshold.
+    fn robot_chicken() -> Vec<TitleInput> {
+        [
+            ("C1_t01", 698.7, 0), ("C2_t02", 700.9, 0), ("C3_t03", 679.1, 0),
+            ("C4_t04", 664.0, 0), ("C5_t05", 696.5, 0), ("D1_t06", 698.4, 0),
+            ("D2_t07", 665.2, 0), ("D3_t08", 655.4, 0), ("D4_t09", 640.1, 0),
+            ("D5_t10", 671.1, 0), ("E1_t00", 6769.3, 10), ("G1_t11", 1084.7, 11),
+            ("G2_t12", 312.2, 0), ("I1_t13", 1144.2, 19), ("M1_t14", 837.8, 7),
+            ("M4_t15", 303.0, 0),
+        ]
+        .iter()
+        .map(|&(name, secs, chapters)| TitleInput {
+            name: format!("{name}.mkv"),
+            duration_secs: secs,
+            chapters,
+            display_aspect: None,
+        })
+        .collect()
+    }
+
+    fn ten_minutes() -> AnalysisParams {
+        AnalysisParams {
+            min_main_secs: 600.0,
+            max_extra_secs: 600.0,
+            ..AnalysisParams::default()
+        }
+    }
+
+    /// Short episodes authored without chapters, beside extras that have them: the
+    /// chapter rule runs the other way, or every episode is taken for an extra.
+    #[test]
+    fn chapterless_episodes_beside_chaptered_extras_are_the_episodes() {
+        let a = analyse(&robot_chicken(), ten_minutes());
+        assert_eq!(a.shape, DiscShape::Series);
+        let mains: Vec<_> = a.main_titles().map(|t| t.name.as_str()).collect();
+        assert_eq!(mains.len(), 10, "{mains:?}");
+        assert!(mains.iter().all(|n| n.starts_with('C') || n.starts_with('D')), "{mains:?}");
+        let by = |n: &str| a.titles.iter().find(|x| x.name == n).unwrap();
+        assert!(by("E1_t00.mkv").why.contains("play-all"), "{}", by("E1_t00.mkv").why);
+        assert_eq!(by("I1_t13.mkv").role, TitleRole::Extra);
+        assert!(by("I1_t13.mkv").why.contains("authored as an extra"), "{}", by("I1_t13.mkv").why);
+    }
+
+    /// Unchanged at the default threshold: the episodes are under it, and the play-all
+    /// is still found.
+    #[test]
+    fn short_episodes_are_extras_at_the_default_threshold() {
+        let a = analyse(&robot_chicken(), AnalysisParams::default());
+        let mains: Vec<_> = a.main_titles().map(|t| t.name.as_str()).collect();
+        assert_eq!(mains, vec!["G1_t11.mkv", "I1_t13.mkv"]);
+    }
+
+    /// The chapter rule keeps its usual direction where the chapterless titles are not
+    /// an episode set, or the chaptered ones are: chapterless featurettes beside a film,
+    /// or beside chaptered episodes of one length.
+    #[test]
+    fn chapterless_featurettes_stay_extras() {
+        let beside_a_film = vec![
+            t("f1.mkv", 16.0, 0),
+            t("f2.mkv", 17.0, 0),
+            t("f3.mkv", 16.5, 0),
+            t("film.mkv", 104.0, 24),
+        ];
+        let a = analyse(&beside_a_film, AnalysisParams::default());
+        let mains: Vec<_> = a.main_titles().map(|t| t.name.as_str()).collect();
+        assert_eq!(mains, vec!["film.mkv"]);
+
+        let beside_episodes = vec![
+            t("e1.mkv", 22.0, 4),
+            t("e2.mkv", 22.5, 4),
+            t("f1.mkv", 16.0, 0),
+            t("f2.mkv", 17.0, 0),
+            t("f3.mkv", 16.5, 0),
+        ];
+        let a = analyse(&beside_episodes, AnalysisParams::default());
+        let mains: Vec<_> = a.main_titles().map(|t| t.name.as_str()).collect();
+        assert_eq!(mains, vec!["e1.mkv", "e2.mkv"]);
     }
 }

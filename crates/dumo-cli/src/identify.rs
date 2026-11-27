@@ -54,6 +54,9 @@ pub struct IdentifyArgs {
     pub by_reference: bool,
     /// File hand-assigned episodes though the reference subtitles contradict them.
     pub skip_reference_check: bool,
+    /// Titles this many seconds or longer are content rather than extras; the analysis'
+    /// own threshold when not given.
+    pub min_length: Option<u32>,
 }
 
 /// What the operator has said about a film disc beyond its name.
@@ -75,6 +78,19 @@ pub struct MovieOptions {
     /// Not a film option either: a contradiction by the reference subtitles does not stop
     /// a series disc whose every title was placed by hand with `--assign`.
     pub skip_reference_check: bool,
+    /// Not a film option either: the content threshold, for a series whose episodes are
+    /// shorter than the analysis expects.
+    pub min_length: Option<u32>,
+}
+
+/// The analysis' tunables, with the content threshold given on the command line.
+fn analysis_params(min_length: Option<u32>) -> dumo_identify::video::AnalysisParams {
+    let mut params = dumo_identify::video::AnalysisParams::default();
+    if let Some(secs) = min_length {
+        params.min_main_secs = f64::from(secs);
+        params.max_extra_secs = f64::from(secs);
+    }
+    params
 }
 
 /// Tracks to leave out of one title, named by hand with `--drop-track`.
@@ -182,7 +198,13 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
     }
 
     if args.set {
-        return solve_video_set(&dirs, &cfg, args.show.as_deref(), args.apply && args.accept_inferred);
+        return solve_video_set(
+            &dirs,
+            &cfg,
+            args.show.as_deref(),
+            args.apply && args.accept_inferred,
+            args.min_length,
+        );
     }
 
     let movie = MovieOptions {
@@ -194,6 +216,7 @@ pub fn run(args: IdentifyArgs) -> Result<()> {
         own_show: args.as_show.clone(),
         keep_languages: args.keep_languages.iter().map(|l| l.trim().to_ascii_lowercase()).collect(),
         skip_reference_check: args.skip_reference_check,
+        min_length: args.min_length,
     };
     for dir in dirs {
         identify_job(
@@ -1242,7 +1265,7 @@ fn analyse_video(
     specials: bool,
     movie: &MovieOptions,
 ) -> Result<()> {
-    use dumo_identify::video::{self, AnalysisParams, TitleInput};
+    use dumo_identify::video::{self, TitleInput};
 
     let media: Vec<_> = job
         .artifacts
@@ -1278,7 +1301,7 @@ fn analyse_video(
     // Present titles in disc order, which is the ordering an episode set follows.
     inputs.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let analysis = video::analyse(&inputs, AnalysisParams::default());
+    let analysis = video::analyse(&inputs, analysis_params(movie.min_length));
 
     println!("  Disc shape: {}", analysis.shape);
     if let Some(c) = analysis.category {
@@ -2742,10 +2765,11 @@ fn solve_video_set(
     cfg: &Config,
     show_override: Option<&str>,
     accept_inferred: bool,
+    min_length: Option<u32>,
 ) -> Result<()> {
     use dumo_identify::discset::{self, GroupInput};
     use dumo_identify::matching::{self, DiscTitle};
-    use dumo_identify::video::{self as vid, AnalysisParams, TitleInput};
+    use dumo_identify::video::{self as vid, TitleInput};
 
     let mut inputs: Vec<GroupInput> = Vec::new();
 
@@ -2786,7 +2810,7 @@ fn solve_video_set(
             continue;
         }
 
-        let analysis = vid::analyse(&title_inputs, AnalysisParams::default());
+        let analysis = vid::analyse(&title_inputs, analysis_params(min_length));
         // Pull dialogue for each main title. This is what lets the solver do better
         // than runtime alone: two episodes of a series often run to the same minute, but
         // they do not say the same words. Extras have no subtitle track and score on

@@ -82,6 +82,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         drop_tracks: Vec::new(),
         by_reference: false,
         skip_reference_check: false,
+        min_length: None,
     })?;
 
     if stage(&job_dir)? != JobStage::Identified {
