@@ -50,7 +50,8 @@ pub fn split_year(query: &str) -> (String, Option<u32>) {
     (q.to_string(), None)
 }
 
-fn fits(title_mins: f64, listed: u32) -> bool {
+/// Whether a title's running time fits a listed runtime, allowing for cuts and credits.
+pub fn fits(title_mins: f64, listed: u32) -> bool {
     let listed = f64::from(listed);
     (title_mins - listed).abs() <= RUNTIME_TOLERANCE_MINS.max(listed * RUNTIME_TOLERANCE_SHARE)
 }

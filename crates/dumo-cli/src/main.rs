@@ -22,6 +22,7 @@ mod repack;
 mod rip;
 mod run;
 mod split;
+mod tag;
 mod verify;
 mod watch;
 
@@ -198,6 +199,34 @@ enum Command {
         /// that failed always leaves the disc where it is.
         #[arg(long)]
         no_eject: bool,
+        /// Config file to use instead of the search path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Tag the shows and films already in the library with their TMDB IDs, as Plex asks:
+    /// `Bones` becomes `Bones (2005) {tmdb-1911}`.
+    ///
+    /// `identify` files everything with the tag, and `migrate` holds back a show filed
+    /// with it while the library has the same show without; this brings the library
+    /// level. A name is tagged only where TMDB leaves no doubt: one entry of that title
+    /// (and year, where the name has one), or for a film without a year, one whose
+    /// runtime fits the file. The rest are listed with their candidates, to be settled
+    /// with --id. Only names change; job manifests follow them. Reports and stops unless
+    /// --apply is given.
+    TagLibrary {
+        /// Rename the names that can be tagged.
+        #[arg(long)]
+        apply: bool,
+        /// Only the shows.
+        #[arg(long, conflicts_with = "movies")]
+        shows: bool,
+        /// Only the films.
+        #[arg(long)]
+        movies: bool,
+        /// The TMDB entry a name is, for one the lookup could not settle:
+        /// `--id "Bones=1911"`, the name exactly as it is in the library. Repeatable.
+        #[arg(long = "id", value_name = "NAME=ID")]
+        ids: Vec<String>,
         /// Config file to use instead of the search path.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -587,6 +616,9 @@ fn main() -> Result<()> {
                 eject: !no_eject,
                 config_file: config,
             })
+        }
+        Command::TagLibrary { apply, shows, movies, ids, config } => {
+            tag::run(tag::TagArgs { apply, shows, movies, ids, config_file: config })
         }
         Command::Watch { device, min_length, keep_play_all, config } => {
             watch::run(watch::WatchArgs { device, min_length, keep_play_all, config_file: config })

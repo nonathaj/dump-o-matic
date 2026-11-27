@@ -135,6 +135,8 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         None => None,
     };
 
+    let mut listings: std::collections::HashMap<PathBuf, Vec<(String, bool)>> = Default::default();
+    let mut twins = 0usize;
     for (dir, job) in &eligible {
         let Some(id) = &job.identification else {
             continue;
@@ -161,6 +163,10 @@ pub fn run(args: MigrateArgs) -> Result<()> {
                 None => None,
             };
             let exists = dest.exists() && case_src.is_none();
+            let listing = listings
+                .entry(target.root.clone())
+                .or_insert_with(|| list_top(&target.root));
+            let twin = untagged_twin(listing, &f.path);
             // Renaming in place: the rip this file came from, by its name, found in
             // permanent storage. The hash is checked when it is renamed, not here.
             let rename_src = case_src.or_else(|| {
@@ -179,6 +185,8 @@ pub fn run(args: MigrateArgs) -> Result<()> {
                 dest.display(),
                 if exists {
                     "   [BLOCKED: exists]".to_string()
+                } else if let Some(t) = &twin {
+                    format!("   [BLOCKED: the library has it untagged, as {t:?}]")
                 } else {
                     rename_src
                         .as_ref()
@@ -186,6 +194,8 @@ pub fn run(args: MigrateArgs) -> Result<()> {
                         .unwrap_or_default()
                 }
             );
+            twins += usize::from(twin.is_some() && !exists);
+            let exists = exists || twin.is_some();
             if !exists && rename_src.is_none() {
                 total_bytes += f.bytes;
             }
@@ -203,7 +213,15 @@ pub fn run(args: MigrateArgs) -> Result<()> {
         }
     }
 
-    let blocked = planned.iter().filter(|p| p.blocked).count();
+    if twins > 0 {
+        println!();
+        println!(
+            "{twins} file(s) are filed under a name tagged with its TMDB ID, and the library\n\
+             has the same show or film without the tag. Filed beside it, a show would be\n\
+             split in two in Plex. Run `dump-o-matic tag-library` to tag the library first."
+        );
+    }
+    let blocked = planned.iter().filter(|p| p.blocked).count() - twins;
     if blocked > 0 {
         println!();
         println!(
@@ -685,6 +703,45 @@ pub fn destination_path(dest_root: &Path, staging_relative: &str) -> PathBuf {
     dest_root.join(below)
 }
 
+/// The names at the top of a destination, and whether each is a directory.
+fn list_top(root: &Path) -> Vec<(String, bool)> {
+    std::fs::read_dir(root)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().is_dir()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The library's untagged name for the show or film a file is filed under with its
+/// TMDB tag: `Robot Chicken (2005)` for `ready/tv/Robot Chicken (2005) {tmdb-709}/…`.
+/// Filed beside it, the show would be split in two in Plex, or the film kept twice.
+fn untagged_twin(listing: &[(String, bool)], staging_relative: &str) -> Option<String> {
+    use dumo_identify::plexname;
+    let category = category_of(staging_relative);
+    if category != "tv" && category != "movies" {
+        return None;
+    }
+    let below = staging_relative.strip_prefix("ready/")?.strip_prefix(&category)?.trim_start_matches('/');
+    let (top, deeper) = match below.split_once('/') {
+        Some((t, _)) => (t, true),
+        None => (below, false),
+    };
+    let filed = plexname::parse(top, !deeper);
+    filed.tmdb?;
+    listing
+        .iter()
+        .filter(|(name, _)| !name.starts_with('.') && !name.starts_with('_'))
+        .find(|(name, is_dir)| {
+            let e = plexname::parse(name, !is_dir);
+            e.tmdb.is_none()
+                && plexname::same_title(&e.title, &filed.title)
+                && (e.year.is_none() || e.year == filed.year)
+        })
+        .map(|(name, _)| name.clone())
+}
+
 /// The media category of a staging-relative path: the component after `ready/`.
 ///
 /// `ready/games/ps2/Title.iso` -> `games`. This is the key that routes a file to a
@@ -809,6 +866,29 @@ mod tests {
         assert!(problems[0].contains("stale.mkv") && problems[0].contains("differs"));
         assert!(problems[1].contains("gone.mkv") && problems[1].contains("could not be read"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tagged_filing_is_held_back_by_its_untagged_twin() {
+        let listing = vec![
+            ("Robot Chicken (2005)".to_string(), true),
+            ("Bones".to_string(), true),
+            ("Sense8 (2015) {tmdb-61664}".to_string(), true),
+            ("300.mkv".to_string(), false),
+            ("_replaced".to_string(), true),
+        ];
+        let twin = |p: &str| untagged_twin(&listing, p);
+        assert_eq!(
+            twin("ready/tv/Robot Chicken (2005) {tmdb-709}/Season 01/e.mkv").as_deref(),
+            Some("Robot Chicken (2005)")
+        );
+        assert_eq!(twin("ready/tv/Bones (2005) {tmdb-1911}/Season 01/e.mkv").as_deref(), Some("Bones"));
+        assert_eq!(twin("ready/movies/300 (2007) {tmdb-1271}.mkv").as_deref(), Some("300.mkv"));
+        // Already tagged, or another year, or filed without a tag: nothing to hold back.
+        assert_eq!(twin("ready/tv/Sense8 (2015) {tmdb-61664}/Season 01/e.mkv"), None);
+        assert_eq!(twin("ready/tv/Robot Chicken (1999) {tmdb-5}/Season 01/e.mkv"), None);
+        assert_eq!(twin("ready/tv/Robot Chicken (2005)/Season 01/e.mkv"), None);
+        assert_eq!(twin("ready/games/ps2/Robot Chicken (2005) {tmdb-709}.iso"), None);
     }
 
     #[test]

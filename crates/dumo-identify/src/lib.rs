@@ -20,6 +20,7 @@ pub mod opensubtitles;
 pub mod ordering;
 pub mod platform;
 pub mod playall;
+pub mod plexname;
 pub mod signals;
 pub mod specials;
 pub mod tmdb;

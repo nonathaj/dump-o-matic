@@ -182,6 +182,15 @@ impl TmdbClient {
         })
     }
 
+    /// Fetch one series' details, by its ID.
+    pub fn tv(&self, id: u64) -> Result<TvResult> {
+        let v = self.get_json(&format!("/tv/{id}"), "")?;
+        parse_tv(&v).ok_or_else(|| TmdbError::Malformed {
+            endpoint: format!("/tv/{id}"),
+            detail: "no id or name".into(),
+        })
+    }
+
     /// Fetch a season's episode list.
     pub fn season(&self, tv_id: u64, season: u32) -> Result<Season> {
         let v = self.get_json(&format!("/tv/{tv_id}/season/{season}"), "")?;
@@ -212,26 +221,27 @@ pub fn parse_tv_results(v: &serde_json::Value) -> Vec<TvResult> {
     v.get("results")
         .and_then(|r| r.as_array())
         .map(|arr| {
-            arr.iter()
-                .filter_map(|r| {
-                    Some(TvResult {
-                        id: r.get("id")?.as_u64()?,
-                        name: r.get("name")?.as_str()?.to_string(),
-                        first_air_date: r
-                            .get("first_air_date")
-                            .and_then(|d| d.as_str())
-                            .filter(|d| !d.is_empty())
-                            .map(str::to_string),
-                        overview: r
-                            .get("overview")
-                            .and_then(|d| d.as_str())
-                            .filter(|d| !d.is_empty())
-                            .map(str::to_string),
-                    })
-                })
-                .collect()
+            arr.iter().filter_map(parse_tv).collect()
         })
         .unwrap_or_default()
+}
+
+/// One series, from a search result or a details response.
+pub fn parse_tv(r: &serde_json::Value) -> Option<TvResult> {
+    Some(TvResult {
+        id: r.get("id")?.as_u64()?,
+        name: r.get("name")?.as_str()?.to_string(),
+        first_air_date: r
+            .get("first_air_date")
+            .and_then(|d| d.as_str())
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+        overview: r
+            .get("overview")
+            .and_then(|d| d.as_str())
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+    })
 }
 
 pub fn parse_movie_results(v: &serde_json::Value) -> Vec<MovieResult> {

@@ -326,7 +326,7 @@ A disc with one feature-length title is matched against TMDB's films instead: th
 finds the candidates and the runtime checks them. It is `strong` only when the top search
 result is the one candidate whose runtime fits; two same-named films that both fit stay
 `weak` until `--show "Title (1986)"` names the year. It is filed as
-`movies/Title (Year).mkv`.
+`movies/Title (Year) {tmdb-ID}.mkv`.
 
 A disc can carry the film more than once — a DVD's widescreen and full-screen versions,
 say. Feature-length titles within ten seconds of one another, with the same chapters,
@@ -340,8 +340,8 @@ a subfolder per kind of extra (Behind The Scenes, Deleted Scenes, Featurettes,
 Interviews, Scenes, Shorts, Trailers, Other):
 
 ```text
-movies/Hundreds of Beavers (2022)/Hundreds of Beavers (2022).mkv
-movies/Hundreds of Beavers (2022)/Featurettes/The Making of Hundreds of Beavers.mkv
+movies/Hundreds of Beavers (2022) {tmdb-1011985}/Hundreds of Beavers (2022) {tmdb-1011985}.mkv
+movies/Hundreds of Beavers (2022) {tmdb-1011985}/Featurettes/The Making of Hundreds of Beavers.mkv
 ```
 
 `--folder` files the film that way even before its extras are ripped, so that a second disc
@@ -351,6 +351,25 @@ a title of the disc as an extra, and a disc that holds only extras is named with
 an extra is, so the names are given by hand; a title left unnamed stays in the job, and
 filing needs `--apply --accept-inferred` as for any inferred match. A film filed without
 extras stays a bare file, as before.
+
+Shows and films are filed with the TMDB tag Plex asks for, which tells it exactly which
+entry a folder or film is: `tv/Robot Chicken (2005) {tmdb-709}/Season 01/…`. Where the
+library already has a folder or film with that tag, under whatever spelling, it is filed
+under that name, so one show is never split across two folders. `migrate` holds a tagged
+file back while the library has the same show or film untagged (`Robot Chicken (2005)`
+beside `Robot Chicken (2005) {tmdb-709}`), since Plex would see them as two.
+
+`tag-library` brings a library kept before this up to that: it looks each untagged show
+folder and film up on TMDB and proposes `Bones` → `Bones (2005) {tmdb-1911}`, keeping the
+title as written. A name is tagged only where TMDB leaves no doubt: one entry of that title
+and year. Without a year, the running time must agree as well, since a title alone is
+often another entry's: a `Cosmos` folder of hour-long episodes is Carl Sagan's, not the
+44-minute 2014 series that is TMDB's only `Cosmos`. Two names for one show, or a name the
+library already has, are left to be merged by hand. Everything else is listed with its
+candidates, for `--id "Bones=1911"` to settle. It reports and stops unless `--apply` is
+given; renaming moves a film's own file and subtitles with it, never overwrites, and
+updates the job manifests that record the renamed files so `verify` and `clean` still find
+them.
 
 Content pulled off a storage device sits between the two. There is no hash to match — a
 Games-on-Demand package holds only the game partition, while Redump's Xbox 360 hashes cover

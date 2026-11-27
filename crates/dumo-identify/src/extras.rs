@@ -117,12 +117,10 @@ pub fn parse_spec(spec: &str) -> Result<Extra, String> {
     })
 }
 
-/// The film's folder, which is also the stem of the film's file: `Title (Year)`.
-pub fn film_folder(title: &str, year: Option<u32>) -> String {
-    match year {
-        Some(y) => format!("{title} ({y})"),
-        None => title.to_string(),
-    }
+/// The film's folder, which is also the stem of the film's file: `Title (Year)
+/// {tmdb-ID}`, the TMDB tag telling Plex exactly which film it is.
+pub fn film_folder(title: &str, year: Option<u32>, id: u64) -> String {
+    crate::plexname::folder_name(title, year, id)
 }
 
 /// Staging-relative path of a film filed in its own folder.
@@ -177,15 +175,16 @@ mod tests {
 
     #[test]
     fn lays_a_film_and_its_extras_out_as_plex_expects() {
-        let folder = film_folder("Hundreds of Beavers", Some(2022));
-        assert_eq!(folder, "Hundreds of Beavers (2022)");
+        let folder = film_folder("Hundreds of Beavers", Some(2022), 1011985);
+        assert_eq!(folder, "Hundreds of Beavers (2022) {tmdb-1011985}");
         assert_eq!(
             feature_path(&folder, "mkv"),
-            "ready/movies/Hundreds of Beavers (2022)/Hundreds of Beavers (2022).mkv"
+            "ready/movies/Hundreds of Beavers (2022) {tmdb-1011985}/\
+             Hundreds of Beavers (2022) {tmdb-1011985}.mkv"
         );
         assert_eq!(
             extra_path(&folder, Category::DeletedScenes, "Cut Scene", "mkv"),
-            "ready/movies/Hundreds of Beavers (2022)/Deleted Scenes/Cut Scene.mkv"
+            "ready/movies/Hundreds of Beavers (2022) {tmdb-1011985}/Deleted Scenes/Cut Scene.mkv"
         );
     }
 }

@@ -1661,13 +1661,18 @@ fn analyse_video(
         .unwrap_or_default();
     // Named and numbered for the shelf. The reference check below still reads the
     // episodes as TMDB lists them, so a show of its own is numbered only after it.
-    let (shelf, show) = match movie.own_show.as_deref() {
-        Some(name) => (renumbered_as_own_show(&best.matches)?, sanitise(name)),
-        None => (best.matches.clone(), format!("{}{}", sanitise(&candidate.name), year)),
+    let (shelf, show, id) = match movie.own_show.as_deref() {
+        Some(name) => (renumbered_as_own_show(&best.matches)?, sanitise(name), None),
+        None => (
+            best.matches.clone(),
+            format!("{}{}", sanitise(&candidate.name), year),
+            Some(candidate.id),
+        ),
     };
+    let folder = show_folder(cfg, &show, id);
     for m in &shelf {
         println!(
-            "    tv/{show}/Season {:02}/{show} {} - {}.mkv",
+            "    tv/{folder}/Season {:02}/{show} {} - {}.mkv",
             m.episode.season,
             m.code(),
             sanitise(&m.episode.name)
@@ -1720,6 +1725,7 @@ fn analyse_video(
         &job.id,
         &shelf,
         &show,
+        &folder,
         movie.own_show.as_deref().unwrap_or(&candidate.name),
         &{
             let how = if by_hand > 0 {
@@ -2007,7 +2013,8 @@ fn identify_movie(
     let named = read_extras(analysis, &opts.extras, Some(&feature_name))?;
     // A film with extras has to live in a folder for Plex to find them.
     let in_folder = opts.folder || !named.is_empty();
-    let folder = extras::film_folder(&sanitise(&film.title), film.year());
+    let folder = library_name(cfg, "movies", film.id)
+        .unwrap_or_else(|| extras::film_folder(&sanitise(&film.title), film.year(), film.id));
     let rel = if in_folder {
         extras::feature_path(&folder, &ext)
     } else {
@@ -2193,7 +2200,8 @@ fn identify_film_extras(
         return Ok(());
     }
 
-    let folder = extras::film_folder(&sanitise(&film.title), film.year());
+    let folder = library_name(cfg, "movies", film.id)
+        .unwrap_or_else(|| extras::film_folder(&sanitise(&film.title), film.year(), film.id));
     println!("  Film: {folder}  [tmdb:{}]  — extras go in movies/{folder}/", film.id);
     let named = read_extras(analysis, &opts.extras, None)?;
     let mut items = Vec::new();
@@ -2287,6 +2295,7 @@ fn identify_by_reference(
         sanitise(&series.name),
         series.year().map(|y| format!(" ({y})")).unwrap_or_default()
     );
+    let folder = show_folder(cfg, &show, Some(series.id));
     let listing = client
         .season(series.id, season)
         .with_context(|| format!("fetching season {season}"))?;
@@ -2510,7 +2519,7 @@ fn identify_by_reference(
             );
             (
                 m.title_name.clone(),
-                format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season),
+                format!("ready/tv/{folder}/Season {:02}/{name}", m.episode.season),
             )
         })
         .collect();
@@ -2681,13 +2690,13 @@ fn identify_bonus_disc(
     }
     println!();
     println!("  Proposed names:");
+    let show = format!("{}{}", sanitise(&candidate.name), year);
+    let folder = show_folder(cfg, &show, Some(candidate.id));
     for (m, _) in &result.matched {
         println!(
-            "    tv/{}{}/Season 00/{}{} S00E{:02} - {}.mkv",
-            sanitise(&candidate.name),
-            year,
-            sanitise(&candidate.name),
-            year,
+            "    tv/{folder}/Season {:02}/{show} S{:02}E{:02} - {}.mkv",
+            m.episode.season,
+            m.episode.season,
             m.episode.number,
             sanitise(&m.episode.name)
         );
@@ -2707,12 +2716,12 @@ fn identify_bonus_disc(
         return Ok(());
     }
     let matches: Vec<_> = result.matched.iter().map(|(m, _)| m.clone()).collect();
-    let show = format!("{}{}", sanitise(&candidate.name), year);
     println!("Filing {} title(s) as an inferred match.", matches.len());
     let failures = file_episodes(
         &job.id,
         &matches,
         &show,
+        &folder,
         &candidate.name,
         &if by_hand > 0 {
             format!("inference (dialogue, bonus disc against specials; {by_hand} assigned by hand)")
@@ -2744,6 +2753,37 @@ fn sanitise(s: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The folder a show is filed in, tagged with its TMDB ID as Plex asks: the library's
+/// own folder for that ID where there is one, so a show it spells differently is not
+/// split in two, and otherwise `Name (Year) {tmdb-ID}`. A show of its own (`--as-show`)
+/// is no TMDB entry, and is filed under its name alone.
+fn show_folder(cfg: &Config, show: &str, id: Option<u64>) -> String {
+    match id {
+        Some(id) => library_name(cfg, "tv", id)
+            .unwrap_or_else(|| dumo_identify::plexname::folder_name(show, None, id)),
+        None => show.to_string(),
+    }
+}
+
+/// The name the library already gives the show or film with this TMDB ID: a folder's
+/// name, or a film file's without its extension.
+fn library_name(cfg: &Config, category: &str, id: u64) -> Option<String> {
+    cfg.destinations
+        .iter()
+        .filter(|d| d.accepts(category))
+        .filter_map(|d| std::fs::read_dir(&d.root).ok())
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            match e.path().is_dir() {
+                true => name,
+                false => name.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or(name),
+            }
+        })
+        .find(|n| dumo_identify::plexname::tmdb_id(n) == Some(id))
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -3032,6 +3072,8 @@ fn solve_one_set(
     }
 
     println!();
+    let show = format!("{}{}", sanitise(&series.name), year);
+    let folder = show_folder(cfg, &show, Some(series.id));
     for p in &solution.placements {
         println!("Disc {} ({})", p.disc_number, p.job_id);
         for m in &p.matches {
@@ -3047,9 +3089,10 @@ fn solve_one_set(
         }
         for m in &p.matches {
             println!(
-                "    tv/{}{}/Season {:02}/{}{} S{:02}E{:02} - {}.mkv",
-                sanitise(&series.name), year, m.episode.season,
-                sanitise(&series.name), year, m.episode.season, m.episode.number,
+                "    tv/{folder}/Season {:02}/{show} S{:02}E{:02} - {}.mkv",
+                m.episode.season,
+                m.episode.season,
+                m.episode.number,
                 sanitise(&m.episode.name)
             );
         }
@@ -3068,7 +3111,7 @@ fn solve_one_set(
         println!("Review the above, then re-run with --apply --accept-inferred to file it.");
         return Ok(());
     }
-    apply_video_set(&solution, &series.name, &year, cfg)
+    apply_video_set(&solution, &series.name, &year, &folder, cfg)
 }
 
 /// File a solved set under the TV naming convention.
@@ -3091,6 +3134,7 @@ fn file_episodes(
     job_id: &str,
     matches: &[dumo_identify::matching::TitleMatch],
     show: &str,
+    folder: &str,
     series: &str,
     matched_on: &str,
     confidence: dumo_core::Confidence,
@@ -3110,7 +3154,7 @@ fn file_episodes(
                 m.code(),
                 sanitise(&m.episode.name)
             );
-            let rel = format!("ready/tv/{show}/Season {:02}/{name}", m.episode.season);
+            let rel = format!("ready/tv/{folder}/Season {:02}/{name}", m.episode.season);
             (m.title_name.clone(), rel)
         })
         .collect();
@@ -3391,6 +3435,7 @@ fn apply_video_set(
     solution: &dumo_identify::discset::SetSolution,
     series: &str,
     year: &str,
+    folder: &str,
     cfg: &Config,
 ) -> Result<()> {
     let show = format!("{}{}", sanitise(series), year);
@@ -3404,6 +3449,7 @@ fn apply_video_set(
             &p.job_id,
             &p.matches,
             &show,
+            folder,
             series,
             "inference (runtime + dialogue, joint set solve)",
             solution.confidence,
