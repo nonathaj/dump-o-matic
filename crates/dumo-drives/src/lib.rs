@@ -16,7 +16,7 @@ mod probe;
 mod udf;
 
 pub use device::{eject, enumerate_drives, open_drive_status, read_drive, tray_state};
-pub use probe::probe_disc;
+pub use probe::{probe_disc, probe_image};
 
 /// Errors from drive access and probing.
 #[derive(Debug, thiserror::Error)]

@@ -254,16 +254,31 @@ pub fn version() -> Result<String> {
     })
 }
 
+/// What MakeMKV reads from: a drive, by MakeMKV's own index for it, or a disc image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    Disc(u32),
+    Image(std::path::PathBuf),
+}
+
+impl Source {
+    /// The source as `makemkvcon` names it.
+    pub fn arg(&self) -> String {
+        match self {
+            Source::Disc(index) => format!("disc:{index}"),
+            Source::Image(path) => format!("iso:{}", path.display()),
+        }
+    }
+}
+
 /// Scan a disc for titles.
-///
-/// `disc_index` is MakeMKV's own drive index, not a device path.
-pub fn scan(disc_index: u32, min_length_secs: u32) -> Result<DiscScan> {
+pub fn scan(source: &Source, min_length_secs: u32) -> Result<DiscScan> {
     let args = vec![
         "-r".to_string(),
         "--cache=1".to_string(),
         format!("--minlength={min_length_secs}"),
         "info".to_string(),
-        format!("disc:{disc_index}"),
+        source.arg(),
     ];
     let mut child = spawn(&args)?;
     let stdout = child.stdout.take().expect("piped");
@@ -311,7 +326,7 @@ pub struct RipProgress {
 /// through `on_progress`. Every output line is passed to `on_log` so the caller can
 /// retain the backend's full log for troubleshooting.
 pub fn rip(
-    disc_index: u32,
+    source: &Source,
     titles: &[u32],
     out_dir: &Path,
     min_length_secs: u32,
@@ -336,7 +351,7 @@ pub fn rip(
         "--progress=-same".to_string(),
         format!("--minlength={min_length_secs}"),
         "mkv".to_string(),
-        format!("disc:{disc_index}"),
+        source.arg(),
         selector,
         out_dir.to_string_lossy().to_string(),
     ];
@@ -415,6 +430,15 @@ pub fn rip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_is_named_as_makemkvcon_takes_it() {
+        assert_eq!(Source::Disc(0).arg(), "disc:0");
+        assert_eq!(
+            Source::Image("/srv/images/Some Disc.iso".into()).arg(),
+            "iso:/srv/images/Some Disc.iso"
+        );
+    }
 
     #[test]
     fn splits_plain_values() {

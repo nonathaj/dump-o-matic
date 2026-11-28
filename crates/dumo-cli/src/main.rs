@@ -137,6 +137,14 @@ enum Command {
     Rip {
         /// Device to rip. Defaults to the first drive found.
         device: Option<String>,
+        /// Rip a disc image instead of a drive, a DVD or Blu-ray video one.
+        ///
+        /// For a disc whose damage stops MakeMKV partway: `ddrescue` copies it to an
+        /// image, retrying the bad patches and reading on past what it cannot get, and
+        /// MakeMKV rips the image. What could not be read is blank in the image, so the
+        /// title it falls in has a glitch there rather than failing outright.
+        #[arg(long, conflicts_with = "device", value_name = "FILE")]
+        image: Option<PathBuf>,
         /// Rip only this title index. Default: every title long enough to qualify.
         #[arg(long)]
         title: Option<u32>,
@@ -639,6 +647,7 @@ fn main() -> Result<()> {
         }
         Command::Rip {
             device,
+            image,
             title,
             min_length,
             dry_run,
@@ -648,6 +657,7 @@ fn main() -> Result<()> {
             config,
         } => rip::run(rip::RipArgs {
             device,
+            image,
             title,
             min_length,
             dry_run,

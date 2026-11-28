@@ -34,6 +34,7 @@ pub fn run(args: RunArgs) -> Result<()> {
     // --- Stage 2: rip (probing happens inside) ---
     let job_id = crate::rip::run(crate::rip::RipArgs {
         device: args.device.clone(),
+        image: None,
         title: None,
         min_length: args.min_length,
         dry_run: args.dry_run,

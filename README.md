@@ -156,6 +156,20 @@ is taken out and put back, so a bad disc cannot loop. Only one rip at a time may
 drive: a second `rip` of a drive already being ripped, by hand or by a watch, refuses to
 start.
 
+MakeMKV gives up on a whole title at the first sector it cannot read, so one scratch can
+cost every episode in a play-all. Such a disc can be copied to an image with `ddrescue`,
+which retries the bad patches and reads on past what it cannot get, and the image ripped
+with `rip --image`:
+
+```sh
+ddrescue -b 2048 -n /dev/sr0 disc.iso disc.map      # everything that reads easily
+ddrescue -b 2048 -r 3 /dev/sr0 disc.iso disc.map    # then retry the bad patches
+dump-o-matic rip --image disc.iso
+```
+
+What could not be read is blank in the image, so the title it falls in has a glitch
+there instead of failing. Watch that part before filing it.
+
 Dialogue comes from a title's text subtitle track where it has one — on a DVD,
 MakeMKV turns the closed captions into one. A Blu-ray's subtitles are pictures instead,
 so when there is no text track, the first non-forced PGS track is decoded and read with

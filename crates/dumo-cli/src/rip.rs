@@ -25,6 +25,9 @@ const SCAN_ATTEMPTS: u32 = 3;
 
 pub struct RipArgs {
     pub device: Option<String>,
+    /// A disc image to rip instead of a drive: one `ddrescue` made of a disc whose
+    /// damage stops a rip from the drive.
+    pub image: Option<PathBuf>,
     pub title: Option<u32>,
     pub min_length: u32,
     pub dry_run: bool,
@@ -39,6 +42,7 @@ impl Default for RipArgs {
     fn default() -> Self {
         Self {
             device: None,
+            image: None,
             title: None,
             min_length: DEFAULT_MIN_LENGTH_SECS,
             dry_run: false,
@@ -56,6 +60,10 @@ impl Default for RipArgs {
 /// When the rip completes cleanly the tray is opened, so the next disc can go in. A rip
 /// that failed, or was only a dry run, leaves the disc where it is.
 pub fn run(mut args: RipArgs) -> Result<Option<String>> {
+    // An image needs no drive, so there is none to claim or eject.
+    if args.image.is_some() {
+        return rip_disc(args);
+    }
     let device = match args.device.clone() {
         Some(d) => d,
         None => dumo_drives::enumerate_drives()
@@ -126,9 +134,10 @@ fn rip_disc(args: RipArgs) -> Result<Option<String>> {
         bail!("configuration is not usable; run 'dump-o-matic config check'");
     }
 
-    let device = match args.device.clone() {
-        Some(d) => d,
-        None => dumo_drives::enumerate_drives()
+    let device = match (&args.image, args.device.clone()) {
+        (Some(image), _) => image.to_string_lossy().to_string(),
+        (None, Some(d)) => d,
+        (None, None) => dumo_drives::enumerate_drives()
             .context("enumerating drives")?
             .first()
             .map(|d| d.path.clone())
@@ -137,7 +146,11 @@ fn rip_disc(args: RipArgs) -> Result<Option<String>> {
 
     // --- Stage 1: probe, so the job records what the disc looked like going in ---
     println!("Probing {device} ...");
-    let probe = dumo_drives::probe_disc(&device).with_context(|| format!("probing {device}"))?;
+    let probe = match &args.image {
+        Some(image) => dumo_drives::probe_image(image),
+        None => dumo_drives::probe_disc(&device),
+    }
+    .with_context(|| format!("probing {device}"))?;
     println!(
         "  {} — {}",
         probe.content.kind,
@@ -150,6 +163,10 @@ fn rip_disc(args: RipArgs) -> Result<Option<String>> {
         // An audio CD goes through redumper too: it corrects the drive's read offset and
         // checks C2 errors, which cdparanoia does not, and its per-track .bin/.cue output
         // is the lossless archival record the MP3s are later encoded from.
+        MediaKind::GameDisc | MediaKind::Data | MediaKind::AudioCd if args.image.is_some() => bail!(
+            "an image is ripped only when it is of a video disc; this one looks like {}",
+            probe.content.kind
+        ),
         MediaKind::GameDisc | MediaKind::Data | MediaKind::AudioCd => {
             return rip_game(&cfg, &device, &probe, &args);
         }
@@ -179,11 +196,15 @@ fn rip_disc(args: RipArgs) -> Result<Option<String>> {
     let backend_version = makemkv::version().context("checking makemkvcon")?;
     println!("Backend: {backend_version}");
 
-    let disc_index = makemkv::find_disc_index(&device)
-        .with_context(|| format!("locating {device} in MakeMKV"))?;
+    let source = match &args.image {
+        Some(image) => makemkv::Source::Image(image.clone()),
+        None => makemkv::Source::Disc(
+            makemkv::find_disc_index(&device).with_context(|| format!("locating {device} in MakeMKV"))?,
+        ),
+    };
 
     println!("Scanning titles (this reads the whole disc structure) ...");
-    let mut scan = makemkv::scan(disc_index, args.min_length).context("scanning disc")?;
+    let mut scan = makemkv::scan(&source, args.min_length).context("scanning disc")?;
     // A read error during the scan can make MakeMKV leave out a title it cannot follow,
     // and whether it does varies from one read to the next. So a troubled scan is
     // repeated, keeping whichever found the most titles.
@@ -194,7 +215,7 @@ fn rip_disc(args: RipArgs) -> Result<Option<String>> {
             "  the scan met read errors, which can hide a title; scanning again \
              ({attempts} of {SCAN_ATTEMPTS}) ..."
         );
-        let again = makemkv::scan(disc_index, args.min_length).context("scanning disc")?;
+        let again = makemkv::scan(&source, args.min_length).context("scanning disc")?;
         if again.titles.len() >= scan.titles.len() {
             scan = again;
         }
@@ -350,7 +371,7 @@ fn rip_disc(args: RipArgs) -> Result<Option<String>> {
             println!();
             println!("Ripping title {title} ({} of {}) ...", n + 1, selected.len());
             makemkv::rip(
-                disc_index,
+                &source,
                 &[*title],
                 &raw_dir,
                 args.min_length,

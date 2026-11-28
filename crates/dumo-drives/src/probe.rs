@@ -10,6 +10,7 @@ use dumo_core::{
     Confidence, ContentHint, DiscProbe, DiscProfile, GameSerial, MediaKind, TrayState,
 };
 use std::io::{Read, Seek};
+use std::path::Path;
 use std::os::unix::io::AsRawFd;
 
 /// `SYSTEM.CNF` is a few hundred bytes; anything larger is not the file we want.
@@ -125,6 +126,47 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
         }
     })?;
 
+    Ok(read_contents(
+        &mut reader,
+        device_path,
+        profile,
+        kernel_class,
+        toc,
+        capacity_bytes,
+        started,
+    ))
+}
+
+/// Probe a disc image, such as one `ddrescue` made of a disc a drive could not rip
+/// straight through. Only what is on the disc can be read: there is no drive to ask for
+/// the medium or a TOC, so the content is told from the filesystem alone.
+pub fn probe_image(path: &Path) -> Result<DiscProbe> {
+    let started = std::time::Instant::now();
+    let shown = path.to_string_lossy().to_string();
+    let io = |source| DriveError::Io { path: shown.clone(), source };
+    let mut reader = std::fs::File::open(path).map_err(io)?;
+    let capacity_bytes = reader.metadata().map_err(io)?.len();
+    Ok(read_contents(
+        &mut reader,
+        &shown,
+        None,
+        ioctl::KernelDiscClass::NoInfo,
+        None,
+        Some(capacity_bytes),
+        started,
+    ))
+}
+
+/// Read a disc's filesystem and say what it holds.
+fn read_contents<R: Read + Seek>(
+    mut reader: R,
+    device_path: &str,
+    profile: Option<DiscProfile>,
+    kernel_class: ioctl::KernelDiscClass,
+    toc: Option<dumo_core::TocInfo>,
+    capacity_bytes: Option<u64>,
+    started: std::time::Instant,
+) -> DiscProbe {
     let volume = iso9660::read_volume(&mut reader).ok().flatten();
     let is_udf = iso9660::detect_udf(&mut reader);
 
@@ -167,7 +209,7 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
         is_udf,
     );
 
-    Ok(DiscProbe {
+    DiscProbe {
         device: device_path.to_string(),
         profile,
         content,
@@ -177,7 +219,7 @@ pub fn probe_disc(device_path: &str) -> Result<DiscProbe> {
         capacity_bytes,
         root_entries,
         probe_millis: started.elapsed().as_millis(),
-    })
+    }
 }
 
 /// Recover a PlayStation game serial from `SYSTEM.CNF`.
