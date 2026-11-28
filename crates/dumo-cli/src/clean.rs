@@ -131,8 +131,34 @@ pub fn run(args: CleanArgs) -> Result<()> {
     // Rips filed as a trimmed copy: (the rip, the copy's destination, the copy's hash).
     let mut trimmed: Vec<(RawFile, PathBuf, String)> = Vec::new();
 
+    // A rip never identified, named on its own: everything in it is unfiled. That is a
+    // disc kept another way, such as one whose play-all was split into a job of its own
+    // and filed from there, leaving the rip with nothing to file.
+    let discard_whole_rip = args.discard_unfiled && args.job.is_some() && dirs.len() == 1;
+
     for dir in &dirs {
         let Ok(job) = Job::load(dir) else { continue };
+        if discard_whole_rip && job.stage == JobStage::Ripped && job.identification.is_none() {
+            println!("{} was never identified; every title in it is unfiled.", job.id);
+            for a in &job.artifacts {
+                if !dir.join(&a.relative_path).is_file() {
+                    continue;
+                }
+                if a.bytes > UNFILED_CONTENT_BYTES && tier_of(&a.relative_path) == Tier::Audit {
+                    unfiled_bytes += a.bytes;
+                    unfiled.push(RawFile {
+                        job_dir: dir.clone(),
+                        job_id: job.id.clone(),
+                        relative: a.relative_path.clone(),
+                        sha256: a.sha256.clone(),
+                        bytes: a.bytes,
+                    });
+                } else {
+                    audit_bytes += a.bytes;
+                }
+            }
+            continue;
+        }
         if job.stage != JobStage::Migrated {
             not_migrated += 1;
             continue;

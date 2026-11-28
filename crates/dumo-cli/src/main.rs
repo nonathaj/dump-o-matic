@@ -533,6 +533,10 @@ enum Command {
         /// Nothing filed these, so no destination copy exists to verify them against and
         /// nothing can bring them back. This is a decision about not wanting the content,
         /// not a reclamation of something already backed up. Off by default.
+        ///
+        /// Given one job that was ripped but never identified, it discards every title
+        /// in it: a disc kept another way, such as one whose play-all was split into a
+        /// job of its own and filed from there.
         #[arg(long)]
         discard_unfiled: bool,
         /// Show what would happen without deleting anything.
